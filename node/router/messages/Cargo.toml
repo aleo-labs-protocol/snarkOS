@@ -19,6 +19,18 @@ edition = "2024"
 [features]
 default = [ ]
 test = [ ]
+# See the note on the same feature in node/bft/events: this exposes the
+# `prop_tests` generators so a fuzzing corpus can be seeded with structurally
+# valid messages rather than by mutation from nothing.
+fuzz-helpers = [
+  "dep:indexmap",
+  "dep:proptest",
+  "dep:test-strategy",
+  "snarkos-node-bft-events/fuzz-helpers",
+  "snarkos-node-sync-locators/test",
+  "snarkvm/test-helpers",
+  "snarkvm/algorithms",
+]
 
 [dependencies.bytes]
 workspace = true
@@ -55,6 +67,18 @@ features = [ "test" ]
 [dev-dependencies.snarkvm]
 workspace = true
 features = [ "algorithms", "test-helpers" ]
+
+[dependencies.indexmap]
+workspace = true
+optional = true
+
+[dependencies.proptest]
+workspace = true
+optional = true
+
+[dependencies.test-strategy]
+workspace = true
+optional = true
 
 [dev-dependencies.proptest]
 workspace = true
