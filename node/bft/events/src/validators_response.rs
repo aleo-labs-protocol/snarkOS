@@ -65,8 +65,9 @@ impl<N: Network> FromBytes for ValidatorsResponse<N> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz-helpers"))]
 pub mod prop_tests {
+    #![cfg_attr(not(test), allow(unused_imports))]
     use crate::{ValidatorsResponse, challenge_request::prop_tests::any_valid_address};
 
     use bytes::{Buf, BufMut, BytesMut};

@@ -98,8 +98,9 @@ impl FromBytes for PeerResponse {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz-helpers"))]
 pub mod prop_tests {
+    #![cfg_attr(not(test), allow(unused_imports))]
     use crate::PeerResponse;
     use snarkvm::utilities::{FromBytes, ToBytes};
 

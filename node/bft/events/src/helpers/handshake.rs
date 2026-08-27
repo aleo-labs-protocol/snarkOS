@@ -396,8 +396,9 @@ impl<N: Network> FromBytes for ResponderProof<N> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz-helpers"))]
 pub mod prop_tests {
+    #![cfg_attr(not(test), allow(unused_imports))]
     use super::*;
     use crate::{challenge_request::prop_tests::any_valid_address, challenge_response::prop_tests::any_signature};
 
