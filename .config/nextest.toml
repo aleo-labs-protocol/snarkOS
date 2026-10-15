@@ -1,0 +1,10 @@
+[profile.ci]
+fail-fast = false
+slow-timeout = "60s"
+status-level = "fail"
+# Many tests bind sockets and start nodes, and have only been run two at a
+# time.
+test-threads = 2
+
+[profile.ci.junit]
+path = "junit.xml"

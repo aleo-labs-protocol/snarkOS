@@ -12,6 +12,9 @@ total_validators=4
 network_id=0
 network_name="mainnet"
 
+# Ledgers, node data and checkpoints
+tmp_dir="${TMPDIR:-/tmp}"
+
 # Stopping conditions
 checkpoint_height=3
 rollback_height=10
@@ -42,7 +45,7 @@ for ((validator_index = 0; validator_index < total_validators; validator_index++
   log_file="$log_dir/validator-$validator_index.log"
   run_with_prefix "validator-$validator_index" snarkos start --nodisplay --network $network_id --dev $validator_index --dev-num-validators $total_validators \
     --validator --jwt-secret $jwt_secret --jwt-timestamp $jwt_ts --verbosity $log_verbosity "--logfile=$log_file" \
-    "--node-data-storage=/tmp/node_data_$validator_index" "--ledger-storage=/tmp/ledger_$validator_index"
+    "--node-data-storage=$tmp_dir/node_data_$validator_index" "--ledger-storage=$tmp_dir/ledger_$validator_index"
   PIDS[validator_index]=$!
   log "Started validator $validator_index with PID ${PIDS[$validator_index]}"
   # Add 1-second delay between starting nodes to avoid hitting rate limits
@@ -54,7 +57,7 @@ function create_checkpoints() {
   for ((node_index = 0; node_index < total_validators; node_index++)); do
     port=$((3030 + node_index))
     suffix="${node_index}_$1"
-    result=$(curl -s -X "POST" -H "Authorization: Bearer ${jwt[node_index]}" "http://127.0.0.1:$port/v2/$network_name/db_backup?path=/tmp/checkpoint_$suffix" || echo "fail")
+    result=$(curl -s -X "POST" -H "Authorization: Bearer ${jwt[node_index]}" "http://127.0.0.1:$port/v2/$network_name/db_backup?path=$tmp_dir/checkpoint_$suffix" || echo "fail")
 
     # Track highest height for reporting
     if [ "$result" = "fail" ]; then
@@ -101,12 +104,12 @@ while (( total_wait < 600 )); do  # 10 minutes max
         if (( num_checkpoints == 1 )); then 
           # Remove the original ledger
           snarkos clean "--network=$network_id" "--dev=$validator_index" --keep-node-data \
-              "--ledger-storage=/tmp/ledger_$validator_index"
+              "--ledger-storage=$tmp_dir/ledger_$validator_index"
         else
           # Remove the checkpoint
           suffix="${validator_index}_$((num_checkpoints-2))"
           snarkos clean "--network=$network_id" "--dev=$validator_index" --keep-node-data \
-              "--ledger-storage=/tmp/ledger_checkpoint_$suffix"
+              "--ledger-storage=$tmp_dir/ledger_checkpoint_$suffix"
         fi
        # Wait until the cleanup concludes
         sleep 1
@@ -116,7 +119,7 @@ while (( total_wait < 600 )); do  # 10 minutes max
         log_file="$log_dir/validator-$validator_index.log"
         run_with_prefix "validator-$validator_index" snarkos start --nodisplay "--network=$network_id" "--dev=$validator_index" "--dev-num-validators=$total_validators" \
           --validator "--jwt-secret=$jwt_secret" "--jwt-timestamp=$jwt_ts" --verbosity $log_verbosity "--logfile=$log_file" \
-          "--node-data-storage=/tmp/node_data_$validator_index" "--ledger-storage=/tmp/ledger_checkpoint_$suffix"
+          "--node-data-storage=$tmp_dir/node_data_$validator_index" "--ledger-storage=$tmp_dir/ledger_checkpoint_$suffix"
         PIDS[validator_index]=$!
         log "Restarted validator $validator_index with PID ${PIDS[$validator_index]}"
         # Add 1-second delay between starting nodes to avoid hitting rate limits

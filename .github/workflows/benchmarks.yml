@@ -20,7 +20,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.96 # Attention - The MSRV is pinned in Cargo.toml, rust-toolchain.toml, .circleci/config.yml and .github/workflows/benchmarks.yml; change all of them together.
+        uses: dtolnay/rust-toolchain@1.96 # Attention - The MSRV is pinned in Cargo.toml, rust-toolchain.toml and .github/workflows/benchmarks.yml; change all of them together.
 
       - name: Install required Debian packages
         run: |

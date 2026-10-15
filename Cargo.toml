@@ -15,7 +15,7 @@ keywords = [
 categories = [ "cryptography", "cryptography::cryptocurrencies", "os" ]
 license = "Apache-2.0"
 edition = "2024"
-rust-version = "1.96.0" # Attention - The MSRV is pinned in Cargo.toml, rust-toolchain.toml, .circleci/config.yml and .github/workflows/benchmarks.yml; change all of them together.
+rust-version = "1.96.0" # Attention - The MSRV is pinned in Cargo.toml, rust-toolchain.toml and .github/workflows/benchmarks.yml; change all of them together.
 
 [workspace]
 members = [
