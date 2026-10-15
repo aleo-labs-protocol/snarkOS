@@ -5,6 +5,14 @@ description: >
   over: downloaded parameters, and dev genesis blocks keyed by the files that
   decide them. Does nothing on a hosted runner, which starts clean.
 
+inputs:
+  genesis-scope:
+    description: >
+      Appended to the dev genesis cache key, for a job whose genesis blocks
+      may come from another snarkOS build than this checkout's.
+    required: false
+    default: ""
+
 runs:
   using: composite
   steps:
@@ -14,7 +22,7 @@ runs:
         # The dev genesis cache names a block by its inputs, not by the code
         # that builds it, so a shared cache would hand one snarkVM's block to
         # another.
-        GENESIS_KEY: ${{ hashFiles('Cargo.lock', 'cli/src/commands/start.rs') }}
+        GENESIS_KEY: ${{ hashFiles('Cargo.lock', 'cli/src/commands/start.rs') }}${{ inputs.genesis-scope && format('-{0}', inputs.genesis-scope) || '' }}
       run: |
         set -euo pipefail
         # Empty would put every key's blocks in one shared directory.

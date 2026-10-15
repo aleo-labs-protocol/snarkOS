@@ -18,8 +18,8 @@ Jobs run in one of two places:
 
 | Event | Runs |
 |---|---|
-| Pull request | `fmt`, `deny`, `shellcheck`, `lint`, `test`, `build-snarkos`, `devnet` |
-| Push to `staging`, `canary`, `testnet`, `mainnet`, or manual dispatch | the above, plus `devnet-merge`, `machete`, `windows` |
+| Pull request | `fmt`, `deny`, `shellcheck`, `machete`, `lint`, `test`, `build-snarkos`, `devnet`, `ci-ok` |
+| Push to `staging`, `canary`, `testnet`, `mainnet`, or manual dispatch | the above, plus `devnet-merge`, `windows` |
 
 ## Jobs
 
@@ -48,11 +48,17 @@ other jobs run on every event.
 | `devnet (chaotic-minority-reset)` | `cpu` | merge | 45 | `test_reset_minority.sh`, with delays |
 | `devnet (chaotic-majority-restart)` | `cpu` | merge | 45 | `test_restart_majority.sh`, with delays |
 | `devnet (upgrade)` | `cpu` | merge | 90 | `test_full_upgrade.sh`, `test_partial_upgrade.sh` |
-| `machete` | hosted | merge | | `cargo machete` |
+| `machete` | hosted | all | | `cargo machete` |
 | `windows` | hosted (Windows) | merge | | `cargo check --examples --benches --tests` in `account`, `cli`, `display`, `node` |
+| `ci-ok` | hosted | all | | fails unless every job a pull request runs succeeded |
 
 A job with no timeout gets the GitHub default of six hours. Only hosted jobs
 have none, and a hosted job holds no fleet box.
+
+Protected branches require `ci-ok` alone. GitHub counts a skipped job as
+passed for a required check, and a fleet job is skipped when
+`start-cpu-runners` fails or the pull request comes from a fork; `ci-ok`
+fails in both cases.
 
 ## Test groups
 
@@ -81,11 +87,12 @@ Each `test` and devnet job on the fleet gets its own home directory and
 `TMPDIR`, so ledgers and node data from one run never reach the next.
 Downloaded parameters and dev genesis blocks persist on the box; the genesis
 blocks are keyed by `Cargo.lock` and `cli/src/commands/start.rs`. The
-`upgrade` entry also builds the latest release the first time a box sees its
-tag, and keeps it. The chaotic entries delay loopback traffic through the
-boxes' `runner-netem` helper, which the runner user may run with `sudo`. Every
-devnet entry stops leftover `snarkos` processes and clears the delays before
-it starts and after it ends.
+`upgrade` entry also runs the latest release, so its genesis blocks have a key
+of their own. It builds that release the first time a box sees its tag, in a
+target dir of its own, and keeps it. The chaotic entries delay loopback
+traffic through the boxes' `runner-netem` helper, which the runner user may
+run with `sudo`. Every devnet entry stops leftover `snarkos` processes and
+clears the delays before it starts and after it ends.
 
 To run the `.ci` scripts on macOS you may want to `brew install bash coreutils
 && echo 'export PATH="/opt/homebrew/bin:$PATH"' >> ~/.bash_profile`.
