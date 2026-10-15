@@ -477,8 +477,8 @@ if wait_for_heights 0 $((total_validators+total_clients)) "$min_height" "$networ
   log "🎉 Test passed! All nodes reached minimum height."
 else
   log "❌ Test failed! Not all nodes reached minimum height within 10 minutes."
-  log_validator_logs "$log_dir" "$total_validators" "$total_clients"
-  log_client_logs "$log_dir" "$total_validators" "$total_clients"
+  print_validator_logs "$log_dir" "$total_validators" "$total_clients"
+  print_client_logs "$log_dir" "$total_validators" "$total_clients"
   exit 1
 fi
 

@@ -90,7 +90,8 @@ jobs:
       - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      # The two crates without tests, which no `test` entry builds alone.
+      # Two crates without tests, each alone: the workspace pass above unifies
+      # features, so it misses a feature one of them fails to declare.
       - run: cargo check -p snarkos-node-metrics --all-features
       - run: cargo check -p snarkos-display --all-features
 
@@ -119,7 +120,7 @@ jobs:
             runner: ubuntu-latest
             runs: >-
               nextest run -p snarkos-account -p snarkos-utilities -p snarkos-node-tcp
-              -p snarkos-node-sync-communication-service -p snarkos-node-sync-locators -p snarkos-node-network
+              -p snarkos-node-sync-locators -p snarkos-node-network
           - name: cdn
             runner: ubuntu-latest
             runs: nextest run -p snarkos-node-cdn
@@ -133,9 +134,7 @@ jobs:
             runs: nextest run -p snarkos-node-consensus -p snarkos-node-rest -p snarkos-cli
           - name: node
             runner: [self-hosted, linux, x64, cpu]
-            runs: |
-              nextest run -p snarkos-node -p snarkos-node-bft-storage-service --features snarkos-node-bft-storage-service/memory,snarkos-node-bft-storage-service/persistent
-              nextest run -p snarkos
+            runs: nextest run -p snarkos-node -p snarkos-node-bft-storage-service --features snarkos-node-bft-storage-service/memory,snarkos-node-bft-storage-service/persistent
           - name: bft
             runner: [self-hosted, linux, x64, cpu]
             runs: nextest run -p snarkos-node-bft

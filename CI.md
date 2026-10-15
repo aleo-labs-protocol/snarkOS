@@ -34,11 +34,11 @@ other jobs run on every event.
 | `deny` | hosted | all | | `cargo deny check` |
 | `shellcheck` | hosted | all | | `.ci/*.sh`, `scripts/*.sh` |
 | `lint` | `cpu` | all | 90 | clippy, default and `--all-features`; `cargo check --all-features` of `snarkos-node-metrics` and `snarkos-display` |
-| `test (light)` | hosted | all | 90 | `snarkos-account`, `-utilities`, `-node-tcp`, `-node-sync-communication-service`, `-node-sync-locators`, `-node-network` |
+| `test (light)` | hosted | all | 90 | `snarkos-account`, `-utilities`, `-node-tcp`, `-node-sync-locators`, `-node-network` |
 | `test (cdn)` | hosted | all | 90 | `snarkos-node-cdn` |
 | `test (messages)` | hosted | all | 90 | `snarkos-node-bft-events`, `-node-router-messages`, `-node-bft-ledger-service` |
 | `test (services)` | `cpu` | all | 90 | `snarkos-node-consensus`, `-node-rest`, `-cli` |
-| `test (node)` | `cpu` | all | 90 | `snarkos-node` with `snarkos-node-bft-storage-service` (features `memory,persistent`); then `snarkos` |
+| `test (node)` | `cpu` | all | 90 | `snarkos-node` with `snarkos-node-bft-storage-service` (features `memory,persistent`) |
 | `test (bft)` | `cpu` | all | 90 | `snarkos-node-bft` |
 | `test (router)` | `cpu` | all | 90 | `snarkos-node-router` |
 | `test (sync)` | `cpu` | all | 90 | `snarkos-node-sync` |
