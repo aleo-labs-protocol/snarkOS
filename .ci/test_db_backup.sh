@@ -63,11 +63,19 @@ for ((validator_index = 0; validator_index < total_validators; validator_index++
   sleep 1
 done
 
+# The height of each node just before its most recent checkpoint.
+declare -a checkpoint_floor=()
+
 # Create database checkpoints
 function create_checkpoints() {
   for ((node_index = 0; node_index < total_validators; node_index++)); do
     port=$((3030 + node_index))
     path=$(checkpoint_dir "${node_index}_$1")
+    checkpoint_floor[node_index]=$(get_block_height_by_port "$port" "$network_name")
+    if [[ -z "${checkpoint_floor[node_index]}" ]]; then
+      log "❌ Node #${node_index} did not report its height before the checkpoint"
+      return 1
+    fi
     if ! curl -sf -X "POST" -H "Authorization: Bearer ${jwt[node_index]}" "http://127.0.0.1:$port/v2/$network_name/db_backup?path=$path" > /dev/null; then
       log "❌ Node #${node_index} failed to create a checkpoint at $path"
       return 1
@@ -141,12 +149,30 @@ while (( total_wait < 600 )); do  # 10 minutes max
         # Add 1-second delay between starting nodes to avoid hitting rate limits
         sleep 1
 
+        # The REST server starts after the ledger loads and before the node connects to peers,
+        # so the first height it reports is the height of the ledger it loaded.
         port=$((3030 + validator_index))
-        height=$(curl -s "http://127.0.0.1:$port/$network_name/block/height/latest" || echo "0")
-        log "Node height after restart: $height"
+        height=""
+        for ((attempt = 0; attempt < 120; attempt++)); do
+          height=$(get_block_height_by_port "$port" "$network_name" 2)
+          if [[ -n "$height" ]]; then
+            break
+          fi
+          if ! kill -0 "${PIDS[validator_index]}" 2>/dev/null; then
+            log "❌ Node #${validator_index} exited after the restart"
+            exit 1
+          fi
+          sleep 1
+        done
+        if [[ -z "$height" ]]; then
+          log "❌ Node #${validator_index} did not report its height after the restart"
+          exit 1
+        fi
+        log "Node #${validator_index} height after restart: $height"
 
-        # Ensure that the height is below the rollback height
-        if [[ "$height" =~ ^[0-9]+$ ]] && (( height >= rollback_height )) && (( height < checkpoint_height )); then
+        # A node that ignored the checkpoint starts either at genesis or at its pre-shutdown height.
+        if (( height < checkpoint_floor[validator_index] || height >= rollback_height )); then
+          log "❌ Node #${validator_index} restarted at height $height, expected at least ${checkpoint_floor[validator_index]} and below $rollback_height"
           log "❌ Test failed!"
           exit 1
         fi
