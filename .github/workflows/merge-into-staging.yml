@@ -1,0 +1,24 @@
+name: Merge testnet and mainnet into staging
+
+# Keeps one pull request open for each of testnet and mainnet while it has
+# commits that staging lacks. Promotion in the other direction stays manual.
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency: merge-into-staging
+
+jobs:
+  merge:
+    uses: aleo-labs-protocol/gh-actions/.github/workflows/merge-branches.yml@v2
+    permissions: { contents: read, pull-requests: read }
+    with:
+      target: staging
+      sources: testnet mainnet
+    # Lives in the merge-bot environment, which admits only staging. The called
+    # workflow's merge job sets that environment and receives the value.
+    secrets:
+      MERGE_BOT_APP_KEY: ${{ secrets.MERGE_BOT_APP_KEY }}
