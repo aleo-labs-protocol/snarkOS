@@ -24,6 +24,11 @@ remaining_checkpoints=2
 # Create log directory
 init_log_dir
 
+# The ledger checkpoint with the given suffix.
+function checkpoint_dir() {
+  echo "$tmp_dir/checkpoint_$1"
+}
+
 # Use fixed JWT values in order to be able to create checkpoints
 jwt_secret="ZGJjaGVja3BvaW50dGVzdA=="
 jwt_ts=1749116345
@@ -40,7 +45,13 @@ trap 'log "⛔️ Error in $BASH_SOURCE at line $LINENO: \"$BASH_COMMAND\" faile
 
 # Start all validator nodes in the background
 for ((validator_index = 0; validator_index < total_validators; validator_index++)); do
-  snarkos clean --dev $validator_index --network=$network_id
+  snarkos clean --dev $validator_index --network=$network_id \
+    "--node-data-storage=$tmp_dir/node_data_$validator_index" "--ledger-storage=$tmp_dir/ledger_$validator_index"
+  # RocksDB refuses to write a checkpoint into an existing directory.
+  for ((checkpoint_index = 0; checkpoint_index <= remaining_checkpoints; checkpoint_index++)); do
+    snarkos clean --dev $validator_index --network=$network_id --keep-node-data \
+      "--ledger-storage=$(checkpoint_dir "${validator_index}_$checkpoint_index")"
+  done
 
   log_file="$log_dir/validator-$validator_index.log"
   run_with_prefix "validator-$validator_index" snarkos start --nodisplay --network $network_id --dev $validator_index --dev-num-validators $total_validators \
@@ -56,11 +67,13 @@ done
 function create_checkpoints() {
   for ((node_index = 0; node_index < total_validators; node_index++)); do
     port=$((3030 + node_index))
-    suffix="${node_index}_$1"
-    result=$(curl -s -X "POST" -H "Authorization: Bearer ${jwt[node_index]}" "http://127.0.0.1:$port/v2/$network_name/db_backup?path=$tmp_dir/checkpoint_$suffix" || echo "fail")
-
-    # Track highest height for reporting
-    if [ "$result" = "fail" ]; then
+    path=$(checkpoint_dir "${node_index}_$1")
+    if ! curl -sf -X "POST" -H "Authorization: Bearer ${jwt[node_index]}" "http://127.0.0.1:$port/v2/$network_name/db_backup?path=$path" > /dev/null; then
+      log "❌ Node #${node_index} failed to create a checkpoint at $path"
+      return 1
+    fi
+    if [[ ! -d "$path" ]]; then
+      log "❌ Node #${node_index} reported a checkpoint, but $path does not exist"
       return 1
     fi
   done
@@ -79,7 +92,10 @@ while (( total_wait < 600 )); do  # 10 minutes max
   if [[ $checkpoint_created = true ]] || check_heights  0 "$total_validators" "$checkpoint_height" "$network_name"; then
     if [[ $checkpoint_created = false ]]; then
       # Create checkpoints at the specified height
-      create_checkpoints $num_checkpoints
+      if ! create_checkpoints $num_checkpoints; then
+        log "❌ Test failed!"
+        exit 1
+      fi
       checkpoint_created=true
       checkpoint_height=$((checkpoint_height+2))
       num_checkpoints=$((num_checkpoints+1))
@@ -106,10 +122,10 @@ while (( total_wait < 600 )); do  # 10 minutes max
           snarkos clean "--network=$network_id" "--dev=$validator_index" --keep-node-data \
               "--ledger-storage=$tmp_dir/ledger_$validator_index"
         else
-          # Remove the checkpoint
+          # Remove the checkpoint the node last ran from
           suffix="${validator_index}_$((num_checkpoints-2))"
           snarkos clean "--network=$network_id" "--dev=$validator_index" --keep-node-data \
-              "--ledger-storage=$tmp_dir/ledger_checkpoint_$suffix"
+              "--ledger-storage=$(checkpoint_dir "$suffix")"
         fi
        # Wait until the cleanup concludes
         sleep 1
@@ -119,7 +135,7 @@ while (( total_wait < 600 )); do  # 10 minutes max
         log_file="$log_dir/validator-$validator_index.log"
         run_with_prefix "validator-$validator_index" snarkos start --nodisplay "--network=$network_id" "--dev=$validator_index" "--dev-num-validators=$total_validators" \
           --validator "--jwt-secret=$jwt_secret" "--jwt-timestamp=$jwt_ts" --verbosity $log_verbosity "--logfile=$log_file" \
-          "--node-data-storage=$tmp_dir/node_data_$validator_index" "--ledger-storage=$tmp_dir/ledger_checkpoint_$suffix"
+          "--node-data-storage=$tmp_dir/node_data_$validator_index" "--ledger-storage=$(checkpoint_dir "$suffix")"
         PIDS[validator_index]=$!
         log "Restarted validator $validator_index with PID ${PIDS[$validator_index]}"
         # Add 1-second delay between starting nodes to avoid hitting rate limits
