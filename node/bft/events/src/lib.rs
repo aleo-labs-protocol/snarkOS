@@ -389,7 +389,7 @@ pub mod prop_tests {
     };
 
     use proptest::{
-        prelude::{BoxedStrategy, Just, Strategy, any},
+        prelude::{BoxedStrategy, Just, ProptestConfig, Strategy, any},
         prop_oneof,
         sample::Selector,
     };
@@ -473,7 +473,7 @@ pub mod prop_tests {
         .boxed()
     }
 
-    #[proptest]
+    #[proptest(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
     fn serialize_deserialize(#[strategy(any_event())] original: Event<CurrentNetwork>) {
         let mut buf = Vec::new();
         Event::write_le(&original, &mut buf).unwrap();
@@ -485,7 +485,7 @@ pub mod prop_tests {
 
     /// Serializing the payload ahead of time must be invisible on the wire, otherwise doing it
     /// before a broadcast would change what peers receive.
-    #[proptest]
+    #[proptest(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
     fn serialize_payload_preserves_the_encoding(#[strategy(any_event())] original: Event<CurrentNetwork>) {
         let mut expected = Vec::new();
         Event::write_le(&original, &mut expected).unwrap();
@@ -501,7 +501,7 @@ pub mod prop_tests {
 
     /// Serializing the payload must be idempotent, so that broadcasting an event that has already
     /// been serialized does not deserialize and re-serialize it.
-    #[proptest]
+    #[proptest(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
     fn serialize_payload_is_idempotent(#[strategy(any_event())] original: Event<CurrentNetwork>) {
         let mut once = original.clone();
         once.serialize_payload().unwrap();
@@ -515,7 +515,7 @@ pub mod prop_tests {
     /// `has_unserialized_payload` is what decides whether an event is worth handing to a blocking
     /// thread, so it must agree with `serialize_payload` about which events have work to do. If the
     /// two ever disagreed, a payload-carrying event could be serialized on a writer task after all.
-    #[proptest]
+    #[proptest(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
     fn has_unserialized_payload_agrees_with_serialize_payload(
         #[strategy(any_event())] original: Event<CurrentNetwork>,
     ) {

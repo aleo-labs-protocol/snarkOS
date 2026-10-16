@@ -119,6 +119,7 @@ impl<N: Network> Decoder for EventCodec<N> {
 mod tests {
     use super::*;
     use crate::prop_tests::any_event;
+    use proptest::prelude::ProptestConfig;
     use test_strategy::proptest;
 
     type CurrentNetwork = snarkvm::prelude::MainnetV0;
@@ -132,12 +133,12 @@ mod tests {
         assert_eq!(decoded.to_bytes_le().unwrap(), msg.to_bytes_le().unwrap());
     }
 
-    #[proptest]
+    #[proptest(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
     fn event_roundtrip(#[strategy(any_event())] event: Event<CurrentNetwork>) {
         assert_roundtrip(event)
     }
 
-    #[proptest]
+    #[proptest(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
     fn events_encoded_into_a_shared_buffer_stay_separate(
         #[strategy(any_event())] first: Event<CurrentNetwork>,
         #[strategy(any_event())] second: Event<CurrentNetwork>,

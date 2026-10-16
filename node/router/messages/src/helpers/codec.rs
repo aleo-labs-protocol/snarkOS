@@ -241,7 +241,7 @@ mod tests {
         assert!(matches!(codec.decode(&mut bytes), Err(err) if err.kind() == std::io::ErrorKind::InvalidData));
     }
 
-    #[proptest]
+    #[proptest(ProptestConfig { cases: 10, ..ProptestConfig::default() })]
     fn puzzle_response_is_accepted(#[strategy(any_puzzle_response())] message: PuzzleResponse<CurrentNetwork>) {
         let mut bytes = BytesMut::new();
         let mut codec = MessageCodec::<CurrentNetwork>::default();

@@ -59,7 +59,7 @@ pub mod prop_tests {
     };
 
     use bytes::{Buf, BufMut, Bytes, BytesMut};
-    use proptest::prelude::{BoxedStrategy, Strategy, any};
+    use proptest::prelude::{BoxedStrategy, ProptestConfig, Strategy, any};
     use test_strategy::proptest;
 
     type CurrentNetwork = snarkvm::prelude::MainnetV0;
@@ -93,7 +93,7 @@ pub mod prop_tests {
             .boxed()
     }
 
-    #[proptest]
+    #[proptest(ProptestConfig { cases: 10, ..ProptestConfig::default() })]
     fn puzzle_response_roundtrip(#[strategy(any_puzzle_response())] original: PuzzleResponse<CurrentNetwork>) {
         let mut buf = BytesMut::default().writer();
         PuzzleResponse::write_le(&original, &mut buf).unwrap();

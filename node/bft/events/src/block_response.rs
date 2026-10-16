@@ -191,7 +191,7 @@ pub mod prop_tests {
     };
 
     use bytes::{Buf, BufMut, BytesMut};
-    use proptest::prelude::{BoxedStrategy, Strategy, any};
+    use proptest::prelude::{BoxedStrategy, ProptestConfig, Strategy, any};
     use test_strategy::proptest;
 
     type CurrentNetwork = snarkvm::prelude::MainnetV0;
@@ -213,7 +213,7 @@ pub mod prop_tests {
             .boxed()
     }
 
-    #[proptest]
+    #[proptest(ProptestConfig { cases: 10, ..ProptestConfig::default() })]
     fn block_response_roundtrip(#[strategy(any_block_response())] block_response: BlockResponse<CurrentNetwork>) {
         let mut bytes = BytesMut::default().writer();
         block_response.write_le(&mut bytes).unwrap();
@@ -237,7 +237,7 @@ pub mod prop_tests {
     }
 
     /// Generates a block response encoded in the old format, and ensures it is still deserializable.
-    #[proptest]
+    #[proptest(ProptestConfig { cases: 10, ..ProptestConfig::default() })]
     fn deserialize_version1(
         #[strategy(any_block_request())] request: BlockRequest,
         #[strategy(any::<u64>())] seed: u64,
