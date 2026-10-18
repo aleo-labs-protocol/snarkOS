@@ -66,7 +66,8 @@ jobs:
         with: { persist-credentials: false }
       - uses: taiki-e/install-action@v2
         with: { tool: cargo-deny@0.20.2 }
-      - run: cargo deny check
+      # Advisories: bump-advisories.yml.
+      - run: cargo deny check bans licenses sources
 
   shellcheck:
     runs-on: ubuntu-latest

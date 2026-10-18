@@ -1,0 +1,23 @@
+name: Bump crates with advisories
+
+# Pull requests do not check advisories. This opens a pull request that updates
+# Cargo.lock past them, and an issue for those it cannot fix.
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency: bump-advisories
+
+jobs:
+  bump:
+    uses: aleo-labs-protocol/gh-actions/.github/workflows/bump-advisories.yml@v2
+    permissions: { contents: read }
+    with:
+      target: staging
+    # Lives in the merge-bot environment, which admits only staging. The called
+    # workflow's job sets that environment and receives the value.
+    secrets:
+      MERGE_BOT_APP_KEY: ${{ secrets.MERGE_BOT_APP_KEY }}
