@@ -79,7 +79,16 @@ jobs:
       - run: |
           curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
             | tar -xJ -C "$RUNNER_TEMP"
-          "$RUNNER_TEMP/shellcheck-${SHELLCHECK_VERSION}/shellcheck" -x .ci/*.sh scripts/*.sh
+          "$RUNNER_TEMP/shellcheck-${SHELLCHECK_VERSION}/shellcheck" -x .ci/*.sh scripts/*.sh .github/*.sh
+
+  # The shallow checkout lacks the history the replays of real merges need, so
+  # those are skipped here and run locally.
+  merge-fixup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: { persist-credentials: false }
+      - run: .github/merge-fixup.test.sh
 
   lint:
     needs: start-cpu-runners
@@ -359,7 +368,7 @@ jobs:
   # for a required check, so each job a pull request runs must succeed here.
   ci-ok:
     if: always()
-    needs: [check-shared-refs, fmt, deny, shellcheck, machete, lint, test-hosted, test, build-snarkos, devnet]
+    needs: [check-shared-refs, fmt, deny, shellcheck, merge-fixup, machete, lint, test-hosted, test, build-snarkos, devnet]
     runs-on: ubuntu-latest
     steps:
       - env:

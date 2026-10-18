@@ -18,6 +18,7 @@ jobs:
     with:
       target: staging
       sources: testnet mainnet
+      post-merge: .github/merge-fixup.sh
     # Lives in the merge-bot environment, which admits only staging. The called
     # workflow's merge job sets that environment and receives the value.
     secrets:
