@@ -34,7 +34,7 @@ optional = true
 version = "0.22"
 
 [dependencies.metrics-exporter-prometheus]
-version = "0.13"
+version = "0.18"
 
 [dependencies.parking_lot]
 workspace = true
