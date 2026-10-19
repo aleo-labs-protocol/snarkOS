@@ -147,7 +147,8 @@ if top=$(git -C "$(dirname "$0")" rev-parse --show-toplevel) && git -C "$top" ca
   git -C "$repo" merge -q --no-ff --no-commit "$(git -C "$top" rev-parse origin/testnet)" > /dev/null 2>&1
   before=$(git -C "$repo" ls-files -s)
   run_hook
-  ck "the hook changes nothing" bash -c "[ \"\$(git -C $repo ls-files -s)\" = '$before' ] && ! [ -s $repo.out ]"
+  # shellcheck disable=SC2016
+  ck "the hook changes nothing" bash -c '[ "$(git -C "$1" ls-files -s)" = "$2" ] && ! [ -s "$1.out" ]' _ "$repo" "$before"
   git -C "$top" worktree remove --force "$repo"
 else
   echo "skipped the replays: this clone lacks mainnet f2eea52d9"
