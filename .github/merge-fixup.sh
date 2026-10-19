@@ -54,26 +54,24 @@ unmerged() {
   [ -n "$(git ls-files -u -- "$@")" ]
 }
 
-# Prints one line per package of the lockfile: its name, a tab, and its name,
-# version and source. A snarkVM pin change also rewrites the dependency lists of
-# packages that share dependencies with snarkVM, so those lists are left out.
+# Prints one line per package of the lockfile: its name, a tab, and the entry to
+# compare. A snarkVM pin change also rewrites the dependency lists of packages
+# that share dependencies with snarkVM, so a package from a registry or git is
+# compared by its name, version and source alone. A workspace package is
+# compared whole, so a dependency added to it shows.
 packages() {
   awk '
-    /^\[/ { if (e != "") print n "\t" e; e = ""; on = $0 == "[[package]]"; next }
+    function flush() { if (n != "") print n "\t" (src ? key : all); n = key = all = ""; src = 0 }
+    /^\[/ { flush(); on = $0 == "[[package]]"; next }
     on && /^name = / { n = $3; gsub(/"/, "", n) }
-    on && /^(name|version|source) = / { e = e " " $0 }
-    END { if (e != "") print n "\t" e }'
+    on && /^source = / { src = 1 }
+    on && /^(name|version|source) = / { key = key " " $0 }
+    on && NF { all = all " " $0 }
+    END { flush() }'
 }
 
-# Prints the names of the packages whose lockfile entries the source changed.
-changed_by_source() {
-  local base
-  base=$(git merge-base HEAD MERGE_HEAD | head -n 1)
-  if git cat-file -e "$base:$lockfile" 2> /dev/null && git cat-file -e "MERGE_HEAD:$lockfile" 2> /dev/null; then
-    LC_ALL=C comm -3 <(git show "$base:$lockfile" | packages | LC_ALL=C sort) \
-      <(git show "MERGE_HEAD:$lockfile" | packages | LC_ALL=C sort) \
-      | awk -F '\t' '{ print $1 == "" ? $2 : $1 }' | LC_ALL=C sort -u
-  fi
+has_lockfile() {
+  [ -n "$(git ls-tree "$1" -- "$lockfile")" ]
 }
 
 # Prints ls-tree lines as update-index lines at the given stage.
@@ -128,12 +126,22 @@ elif [ -f "$manifest" ]; then
   fi
 fi
 
-if git cat-file -e "HEAD:$lockfile" 2> /dev/null; then
+if has_lockfile HEAD; then
   if [ "$(git show "HEAD:$manifest" | table)" != "$(cat "$tmp/table")" ]; then
     leave_unmerged "$lockfile"
     echo "$lockfile: left unmerged, since HEAD pins snarkVM unlike $TARGET"
   else
-    changed=$(changed_by_source)
+    # The packages whose entries the source changed. A side without the
+    # lockfile leaves git's merge, conflicted or not, to stand.
+    changed=
+    base=$(git merge-base HEAD MERGE_HEAD | head -n 1)
+    if has_lockfile "$base" && has_lockfile MERGE_HEAD; then
+      # Outside a command substitution, so a failed fetch stops the hook.
+      git show "$base:$lockfile" | packages | LC_ALL=C sort > "$tmp/base.packages"
+      git show "MERGE_HEAD:$lockfile" | packages | LC_ALL=C sort > "$tmp/source.packages"
+      changed=$(LC_ALL=C comm -3 "$tmp/base.packages" "$tmp/source.packages" \
+        | awk -F '\t' '{ print $1 == "" ? $2 : $1 }' | LC_ALL=C sort -u)
+    fi
     if grep -qE '^snarkvm(-|$)' <<< "$changed"; then
       if grep -qvE '^snarkvm(-|$)' <<< "$changed"; then
         leave_unmerged "$lockfile"

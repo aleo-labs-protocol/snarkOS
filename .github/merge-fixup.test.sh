@@ -34,9 +34,21 @@ version = "${2:-1.0}"
 EOF
 }
 
-lockfile() { # pin, anyhow version, foo version
+lockfile() { # pin, anyhow version, foo version, another dependency of a
+  local dep=
+  if [ -n "${4:-}" ]; then
+    dep=$'\n'" \"$4\","
+  fi
   cat <<EOF
 version = 4
+
+[[package]]
+name = "a"
+version = "0.1.0"
+dependencies = [${dep}
+ "foo",
+ "snarkvm",
+]
 
 [[package]]
 name = "anyhow"
@@ -78,10 +90,10 @@ setup() {
   git -C "$repo" branch release
 }
 
-edit() { # branch, pin, anyhow version, foo version, line above the anyhow table
+edit() { # branch, pin, anyhow version, foo version, line above the anyhow table, another dependency of a
   git -C "$repo" checkout -q "$1"
   manifest "$2" "${3:-}" "${5:-}" > "$repo/Cargo.toml"
-  lockfile "$2" "${3:-}" "${4:-}" > "$repo/Cargo.lock"
+  lockfile "$2" "${3:-}" "${4:-}" "${6:-}" > "$repo/Cargo.lock"
   git -C "$repo" commit -qam "$1"
 }
 
@@ -171,6 +183,22 @@ run_hook
 ck "the pin is restored" staged_has Cargo.toml 'rev = "1111111" #staging'
 ck "the other change is kept" staged_has Cargo.toml 'version = "1.1"'
 ck "the lockfile is left for people" unmerged_are Cargo.lock
+
+echo "the source moved the pin and added a dependency to a workspace package"
+setup "$staging_pin"
+edit release "$release_pin" 1.0 1.0.0 '' anyhow
+merge_into
+run_hook
+ck "the pin is restored" staged_has Cargo.toml 'rev = "1111111" #staging'
+ck "the lockfile is left for people" unmerged_are Cargo.lock
+
+echo "the hook cannot read the merge base's lockfile"
+setup "$staging_pin"
+edit release "$release_pin"
+merge_into
+blob=$(git -C "$repo" rev-parse "$(git -C "$repo" merge-base HEAD MERGE_HEAD):Cargo.lock")
+rm "$repo/.git/objects/${blob:0:2}/${blob:2}"
+ck "the hook fails" fails hook
 
 echo "a conflict outside the table"
 setup "$release_rev"
