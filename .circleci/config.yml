@@ -904,7 +904,6 @@ workflows:
             branches:
               only:
                 - main_net_v4120
-                - main_net_v4121
                 - canary
                 - testnet
                 - mainnet
@@ -916,7 +915,6 @@ workflows:
             branches:
               only:
                 - main_net_v4120
-                - main_net_v4121
                 - canary
                 - testnet
                 - mainnet
@@ -928,7 +926,6 @@ workflows:
             branches:
               only:
                 - main_net_v4120
-                - main_net_v4121
                 - canary
                 - testnet
                 - mainnet
@@ -940,7 +937,6 @@ workflows:
             branches:
               only:
                 - main_net_v4120
-                - main_net_v4121
                 - canary
                 - testnet
                 - mainnet
