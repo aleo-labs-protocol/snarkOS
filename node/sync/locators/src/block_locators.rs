@@ -15,10 +15,13 @@
 
 use snarkvm::prelude::{FromBytes, IoResult, Network, Read, ToBytes, Write, error, has_duplicates};
 
+use rayon::prelude::*;
+use rayon::iter::IntoParallelIterator;
 use anyhow::{Result, bail, ensure};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, btree_map::IntoIter};
+use std::iter::FromIterator;
 
 /// The number of recent blocks (near tip).
 pub const NUM_RECENT_BLOCKS: usize = 100; // 100 blocks
@@ -105,11 +108,14 @@ impl<N: Network> IntoIterator for BlockLocators<N> {
     type IntoIter = IntoIter<u32, N::BlockHash>;
     type Item = (u32, N::BlockHash);
 
-    // TODO (howardwu): Consider using `BTreeMap::from_par_iter` if it is more performant.
-    //  Check by sorting 300-1000 items and comparing the performance.
-    //  (https://docs.rs/indexmap/latest/indexmap/map/struct.IndexMap.html#method.from_par_iter)
     fn into_iter(self) -> Self::IntoIter {
-        BTreeMap::from_iter(self.checkpoints.into_iter().chain(self.recents)).into_iter()
+        BTreeMap::from_iter(
+            self.checkpoints
+            .into_par_iter()
+            .chain(self.recents.into_par_iter())
+            .collect::<Vec<_>>(),
+        )
+            .into_iter()
     }
 }
 
@@ -474,10 +480,39 @@ pub mod test_helpers {
 mod tests {
     use super::*;
     use snarkvm::prelude::Field;
+    use std::time::Instant;
 
     use core::ops::Range;
 
     type CurrentNetwork = snarkvm::prelude::MainnetV0;
+
+    /// Generates a large dataset of BlockLocators to test the performance of the iterator.
+    fn generate_large_block_locators(num_blocks: u32) -> BlockLocators<CurrentNetwork> {
+        let mut recents = IndexMap::new();
+        let mut checkpoints = IndexMap::new();
+
+        for i in 0..num_blocks {
+            recents.insert(i, Field::<CurrentNetwork>::from_u32(i).into());
+            if i % CHECKPOINT_INTERVAL == 0 {
+                checkpoints.insert(i, Field::<CurrentNetwork>::from_u32(i).into());
+            }
+        }
+
+        BlockLocators::new_unchecked(recents, checkpoints)
+    }
+
+    #[test]
+    fn test_block_locators_iterator_performance() {
+        // Generate a dataset with 1000 items for testing
+        let block_locators = generate_large_block_locators(1000);
+
+        // Measure time taken for the iterator with parallel processing
+        let start = Instant::now();
+        let _: Vec<_> = block_locators.clone().into_iter().collect();
+        let duration_parallel = start.elapsed();
+
+        println!("Time taken with parallel processing: {:?}", duration_parallel);
+    }
 
     /// Simulates block locators for a ledger within the given `heights` range.
     fn check_is_valid(checkpoints: IndexMap<u32, <CurrentNetwork as Network>::BlockHash>, heights: Range<u32>) {
