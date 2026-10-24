@@ -1013,6 +1013,11 @@ impl Start {
         }
 
         node.wait_for_signals(&signal_handler).await;
+
+        // Exit with an error, so that the node is not mistaken for one that was stopped on purpose.
+        if let Some(error) = signal_handler.error() {
+            bail!(error);
+        }
         Ok(())
     }
 
