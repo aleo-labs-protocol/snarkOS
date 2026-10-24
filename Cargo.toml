@@ -383,12 +383,6 @@ workspace = true
 version = "=0.14.1"
 default-features = false
 
-# Pinned alongside elliptic-curve to avoid resolving yanked crypto-bigint releases.
-[dependencies.crypto-bigint]
-version = "=0.7.5"
-default-features = false
-features = ["hybrid-array", "rand_core", "subtle", "zeroize"]
-
 [dev-dependencies.rusty-hook]
 version = "0.11.2"
 
@@ -421,7 +415,6 @@ opt-level = 2
 [package.metadata.cargo-machete]
 ignored = [
   "elliptic-curve", # Needed to pin the crate to a specific version
-  "crypto-bigint", # Needed to pin the crate to a specific version
   "snarkos-account", # Needed for cuda feature
   "snarkos-node", # Needed for metrics feature
   "snarkos-node-bft", # Needed for cuda and locktick features
