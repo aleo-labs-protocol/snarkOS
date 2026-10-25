@@ -42,7 +42,7 @@ use parking_lot::Mutex;
 use parking_lot::RwLock;
 use rand::seq::{IteratorRandom, SliceRandom};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque, hash_map},
+    collections::{BTreeMap, HashMap, HashSet, hash_map},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
     time::{Duration, Instant},
@@ -95,7 +95,55 @@ pub const MAX_BLOCKS_BEHIND: u32 = 1; // blocks
 pub const DUMMY_SELF_IP: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
 
 /// The map of failed block requests.
-type FailedRequests<H> = BTreeMap<u32, (Option<H>, Option<H>)>;
+type FailedRequests<H> = BTreeMap<u32, FailedRequest<H>>;
+
+/// The initial delay before a failed block request is re-issued.
+const FAILED_REQUEST_BASE_DELAY: Duration = Duration::from_millis(250);
+
+/// The upper bound on the delay before a failed block request is re-issued.
+const FAILED_REQUEST_MAX_DELAY: Duration = Duration::from_secs(30);
+
+/// A failed block request whose backoff has expired, so it may be re-issued now: its height,
+/// expected block hash and expected previous block hash.
+type RetryableRequest<H> = (u32, Option<H>, Option<H>);
+
+/// Why a peer's outstanding block requests are being re-filed, which decides whether their
+/// re-issue is delayed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequeueReason {
+    /// The peer served a response we rejected, or the request timed out. A peer can drive either
+    /// at will, so re-issuing immediately is a hot loop and the request has to back off.
+    RequestFailed,
+    /// The peer disconnected. Another peer can serve the request straight away, and reconnection
+    /// is already rate limited elsewhere, so there is nothing to back off from here.
+    PeerDisconnected,
+}
+
+/// A block request that failed and is waiting to be re-issued.
+///
+/// Failed requests are re-issued ahead of new ones, so without a delay any error that refiles a
+/// request immediately becomes a hot loop: the sync task wakes on every inbound peer update, which
+/// in a well-connected node means several times a second.
+#[derive(Clone, Copy, Debug)]
+struct FailedRequest<H> {
+    /// The expected hash of the block, if known.
+    hash: Option<H>,
+    /// The expected hash of the previous block, if known.
+    previous_hash: Option<H>,
+    /// The earliest instant at which this request may be re-issued.
+    retry_after: Instant,
+    /// How long this request waited before its most recent re-issue. Doubles per failure.
+    delay: Duration,
+}
+
+/// Returns the delay to apply for the next retry of a failed block request: the base delay on the
+/// first failure, then double the previous delay each time, capped at [`FAILED_REQUEST_MAX_DELAY`].
+fn next_failed_request_delay(previous: Option<Duration>) -> Duration {
+    match previous {
+        None => FAILED_REQUEST_BASE_DELAY,
+        Some(delay) => delay.saturating_mul(2).min(FAILED_REQUEST_MAX_DELAY),
+    }
+}
 
 /// Handle to an outstanding requested, containing the request itself and its timestamp.
 /// This does not contain the response so that checking for responses does not require iterating over all requests.
@@ -642,7 +690,7 @@ impl<N: Network> BlockSync<N> {
 
         // On failure, remove all block requests to the peer.
         if result.is_err() {
-            self.remove_block_requests_to_peer(&peer_ip);
+            self.remove_block_requests_to_peer(&peer_ip, RequeueReason::RequestFailed);
         }
 
         // Return the result.
@@ -929,7 +977,7 @@ impl<N: Network> BlockSync<N> {
         // Drop the last-response timestamp so a reconnecting peer starts fresh.
         self.last_response_at.lock().remove(peer_ip);
         // Remove all block requests to the peer.
-        self.remove_block_requests_to_peer(peer_ip);
+        self.remove_block_requests_to_peer(peer_ip, RequeueReason::PeerDisconnected);
 
         {
             // Do not lock sync state and locators at the same time.
@@ -1008,34 +1056,41 @@ impl<N: Network> BlockSync<N> {
             failed_requests.pop_first();
         }
 
-        // Re-issue the remaining failed requests.
-        if !failed_requests.is_empty() {
-            trace!("There are {} failed requests that need to be re-issued.", failed_requests.len());
+        // Re-issue the failed requests whose backoff has expired and that are not already in
+        // flight again.
+        //
+        // A height that is still backing off is skipped rather than dropped. Skipping splits the
+        // contiguous ranges below, which is harmless: non-adjacent heights already start a new
+        // batch.
+        //
+        // Excluding heights that are still outstanding is what keeps the retained entries bounded.
+        // An entry is kept after it is re-issued, so it becomes due again while its own request is
+        // still in flight. `construct_requests` skips over heights that are already in `requests`,
+        // so retrying such a height does not re-request it - it requests the *next* free range
+        // instead, and since this branch returns before the outstanding/total-buffer checks below,
+        // that would grow `requests` by a batch on every wake without bound. A height that is
+        // already in flight needs no retry, so it is simply not retryable until it leaves
+        // `requests`.
+        let now = Instant::now();
+        let retryable: Vec<RetryableRequest<N::BlockHash>> = {
+            // Matches the lock order already used below, where `construct_requests` read-locks
+            // `requests` while this `failed_requests` lock is held.
+            let outstanding = self.requests.read();
+            failed_requests
+                .iter()
+                .filter(|(height, entry)| entry.retry_after <= now && !outstanding.contains_key(height))
+                .map(|(height, entry)| (*height, entry.hash, entry.previous_hash))
+                .collect()
+        };
 
-            // Convert the set of failed requests into one or multiple continuous ranges.
-            let iter = failed_requests.iter();
-            let mut batches: VecDeque<Vec<(u32, _, _)>> = VecDeque::new();
-
-            for (height, (hash, previous_hash)) in iter {
-                if let Some(prev_batch) = batches.back_mut() {
-                    if let Some((last_height, _, _)) = prev_batch.last()
-                        && *last_height + 1 != *height
-                    {
-                        // We need to start a new batch.
-                        batches.push_back(vec![(*height, *hash, *previous_hash)]);
-                    } else {
-                        // We can add the request to the current batch.
-                        prev_batch.push((*height, *hash, *previous_hash));
-                    }
-                } else {
-                    // First batch.
-                    batches.push_back(vec![(*height, *hash, *previous_hash)]);
-                }
-            }
+        if !retryable.is_empty() {
+            trace!("There are {} failed requests that need to be re-issued.", retryable.len());
 
             let mut result = vec![];
-            while let Some(batch) = batches.pop_front() {
-                // SAFETY: Batches are guaranteed to be non-empty.
+
+            // Handle the retryable requests as one or multiple continuous ranges of heights.
+            for batch in retryable.chunk_by(|(last_height, _, _), (height, _, _)| last_height + 1 == *height) {
+                // SAFETY: `chunk_by` never yields an empty chunk.
                 let start_height = batch.first().unwrap().0;
                 let end_height = batch.last().unwrap().0 + 1;
 
@@ -1066,16 +1121,34 @@ impl<N: Network> BlockSync<N> {
                     greatest_peer_height,
                 );
 
-                // Only remove from failed_requests the heights we actually re-issued.
-                // (If construct_requests returned empty we must not drop these failed requests.)
+                // Push back the retry deadline for the heights we actually re-issued.
+                // (If construct_requests returned empty we must not touch these failed requests.)
+                //
+                // The entry is deliberately kept rather than removed. Removing it would reset the
+                // attempt count, so a height that fails on every cycle would be re-issued at the
+                // base delay forever instead of backing off. The obsolete-purge at the top of this
+                // function drops the entry once the ledger advances past the height, and
+                // `check_block_request` keeps the still-outstanding request from being duplicated
+                // in the meantime.
                 for (height, _) in &requests {
-                    failed_requests.remove(height);
+                    if let Some(entry) = failed_requests.get_mut(height) {
+                        entry.delay = next_failed_request_delay(Some(entry.delay));
+                        entry.retry_after = now + entry.delay;
+                    }
                 }
 
                 result.push((requests, sync_peers));
             }
 
             return result;
+        }
+
+        if !failed_requests.is_empty() {
+            // Wait for the backoff rather than falling through to new requests: a failed height is
+            // a gap, and blocks only apply in order, so fetching higher heights now would just
+            // queue responses that cannot be applied until the gap is filled.
+            trace!("There are {} failed requests, but none are due for a retry yet.", failed_requests.len());
+            return vec![];
         }
 
         // Ensure to not exceed the maximum number of outstanding block requests.
@@ -1254,6 +1327,36 @@ impl<N: Network> BlockSync<N> {
         Ok(())
     }
 
+    /// Records the given requests as failed, so that they are re-issued once their backoff expires.
+    ///
+    /// The accumulated delay is carried forward for a height that is already recorded, so a request
+    /// that keeps failing keeps backing off instead of resetting to the base delay each cycle.
+    fn mark_requests_failed(
+        &self,
+        requests: impl IntoIterator<Item = (u32, (Option<N::BlockHash>, Option<N::BlockHash>))>,
+        reason: RequeueReason,
+    ) {
+        let now = Instant::now();
+        let mut failed_requests = self.failed_requests.lock();
+
+        for (height, (hash, previous_hash)) in requests {
+            // Carry the accumulated delay forward either way, so that a disconnect in the middle of
+            // a run of failures does not reset the backoff that those failures had built up.
+            let previous_delay = failed_requests.get(&height).map(|entry| entry.delay);
+
+            let (delay, retry_after) = match reason {
+                RequeueReason::RequestFailed => {
+                    let delay = next_failed_request_delay(previous_delay);
+                    trace!("Block request at height {height} failed; retrying in {delay:?}");
+                    (delay, now + delay)
+                }
+                RequeueReason::PeerDisconnected => (previous_delay.unwrap_or(FAILED_REQUEST_BASE_DELAY), now),
+            };
+
+            failed_requests.insert(height, FailedRequest { hash, previous_hash, retry_after, delay });
+        }
+    }
+
     /// Checks that a block request for the given height does not already exist.
     fn check_block_request(&self, height: u32) -> Result<()> {
         // Ensure the block height is not already in the ledger.
@@ -1290,8 +1393,10 @@ impl<N: Network> BlockSync<N> {
 
     /// Removes all block requests for the given peer IP.
     ///
-    /// This is used when disconnecting from a peer or when a peer sends invalid block responses.
-    fn remove_block_requests_to_peer(&self, peer_ip: &SocketAddr) {
+    /// This is used when disconnecting from a peer or when a peer sends invalid block responses;
+    /// `reason` says which, as that decides whether the re-issued requests back off (see
+    /// [`RequeueReason`]).
+    fn remove_block_requests_to_peer(&self, peer_ip: &SocketAddr, reason: RequeueReason) {
         trace!("Block sync is removing all block requests to peer {peer_ip}...");
         let mut heights = vec![];
         let mut removed_requests = vec![];
@@ -1327,15 +1432,7 @@ impl<N: Network> BlockSync<N> {
 
         // Mark all requests that were removed as failed.
         if !removed_requests.is_empty() {
-            let mut failed_requests = self.failed_requests.lock();
-            for (height, e) in removed_requests.into_iter() {
-                let prev = failed_requests.insert(height, e);
-                if prev.is_some() {
-                    warn!(
-                        "Failed to mark block request at height {height} as failed, as it already exists in the failed requests map"
-                    );
-                }
-            }
+            self.mark_requests_failed(removed_requests, reason);
         }
 
         // No need to remove responses here, because requests with responses will be retained.
@@ -1424,15 +1521,7 @@ impl<N: Network> BlockSync<N> {
 
         // Mark the non-obsolete requests that timed out as failed.
         if !timed_out_requests.is_empty() {
-            let mut failed_requests = self.failed_requests.lock();
-            for (height, e) in timed_out_requests.into_iter() {
-                let prev = failed_requests.insert(height, e);
-                if prev.is_some() {
-                    warn!(
-                        "Failed to mark block request at height {height} as failed, as it already exists in the failed requests map"
-                    );
-                }
-            }
+            self.mark_requests_failed(timed_out_requests, RequeueReason::RequestFailed);
         }
 
         // Remove and ban the unresponsive peers. The `has_responsive_peer` check inside `retain`
@@ -2325,9 +2414,11 @@ mod tests {
         let failed_requests = sync.failed_requests.lock();
         assert_eq!(failed_requests.len(), 1);
 
-        let (height, (hash, _)) = failed_requests.iter().next().unwrap();
+        let (height, entry) = failed_requests.iter().next().unwrap();
         assert_eq!(*height, 1);
-        assert_eq!(*hash, block_hash1);
+        assert_eq!(entry.hash, block_hash1);
+        // A first failure backs off by the base delay before the request is re-issued.
+        assert_eq!(entry.delay, FAILED_REQUEST_BASE_DELAY);
         /*
         assert_eq!(new_sync_ips.len(), 2);
 
@@ -2335,5 +2426,147 @@ mod tests {
         let mut iter = new_sync_ips.iter();
         assert_ne!(iter.next().unwrap().0, &peer_ip1);
         assert_ne!(iter.next().unwrap().0, &peer_ip1);*/
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Backoff for failed block requests
+    // ---------------------------------------------------------------------------------------
+
+    /// Returns the total number of block requests across all prepared batches.
+    fn num_prepared(batches: &[BlockRequestBatch<CurrentNetwork>]) -> usize {
+        batches.iter().map(|(requests, _)| requests.len()).sum()
+    }
+
+    #[test]
+    fn the_backoff_doubles_per_failure_and_is_capped() {
+        // The first failure waits the base delay; each subsequent one doubles.
+        let first = next_failed_request_delay(None);
+        assert_eq!(first, FAILED_REQUEST_BASE_DELAY);
+        let second = next_failed_request_delay(Some(first));
+        assert_eq!(second, FAILED_REQUEST_BASE_DELAY * 2);
+        assert_eq!(next_failed_request_delay(Some(second)), FAILED_REQUEST_BASE_DELAY * 4);
+
+        // The delay is capped, and doubling at the cap cannot overflow.
+        assert_eq!(next_failed_request_delay(Some(FAILED_REQUEST_MAX_DELAY)), FAILED_REQUEST_MAX_DELAY);
+        assert_eq!(next_failed_request_delay(Some(Duration::MAX)), FAILED_REQUEST_MAX_DELAY);
+    }
+
+    #[test]
+    fn repeated_failures_at_the_same_height_increase_the_backoff() {
+        let sync = sample_sync_at_height(0);
+
+        sync.mark_requests_failed([(5, (None, None))], RequeueReason::RequestFailed);
+        let first = *sync.failed_requests.lock().get(&5).unwrap();
+        assert_eq!(first.delay, FAILED_REQUEST_BASE_DELAY);
+
+        sync.mark_requests_failed([(5, (None, None))], RequeueReason::RequestFailed);
+        let second = *sync.failed_requests.lock().get(&5).unwrap();
+        assert_eq!(second.delay, FAILED_REQUEST_BASE_DELAY * 2);
+        assert!(second.retry_after > first.retry_after, "the retry deadline must move further out");
+    }
+
+    #[test]
+    fn removing_the_only_assigned_peer_files_the_request_with_a_backoff() {
+        // `REDUNDANCY_FACTOR` is 1 in production but 3 under `cfg(test)`, so `construct_requests`
+        // would assign three peers here and the request would survive losing one. Build the
+        // single-peer request directly: that is the shape operators actually run, and the only one
+        // that reaches the failed-request path at all.
+        let sync = sample_sync_at_height(0);
+        let peer_ip = sample_peer_ip(1);
+        let locators = sample_block_locators(10);
+        let block_hash = locators.get_hash(1);
+
+        sync.update_peer_locators(peer_ip, &locators).unwrap();
+        sync.insert_block_request(1, (block_hash, None, [peer_ip].into())).unwrap();
+
+        sync.remove_block_requests_to_peer(&peer_ip, RequeueReason::RequestFailed);
+
+        let failed = sync.failed_requests.lock();
+        let entry = failed.get(&1).expect("the request must be filed as failed");
+        assert_eq!(entry.hash, block_hash);
+        assert_eq!(entry.delay, FAILED_REQUEST_BASE_DELAY);
+        assert!(entry.retry_after > Instant::now(), "the request must not be immediately re-issuable");
+    }
+
+    #[test]
+    fn a_failed_request_is_not_reissued_before_its_backoff_expires() {
+        let sync = sample_sync_at_height(0);
+        let peer_ip = sample_peer_ip(1);
+        let locators = sample_block_locators(10);
+
+        sync.update_peer_locators(peer_ip, &locators).unwrap();
+        sync.mark_requests_failed([(1, (locators.get_hash(1), None))], RequeueReason::RequestFailed);
+
+        // The height has only just failed, so it is still backing off.
+        assert_eq!(num_prepared(&sync.prepare_block_requests()), 0, "a backing-off request must not be re-issued");
+
+        // Move the retry deadline into the past; the request is now due.
+        sync.failed_requests.lock().get_mut(&1).unwrap().retry_after = Instant::now() - Duration::from_secs(1);
+        assert!(num_prepared(&sync.prepare_block_requests()) > 0, "a due request must be re-issued");
+    }
+
+    #[test]
+    fn reissuing_a_failed_request_keeps_its_entry_and_extends_the_backoff() {
+        let sync = sample_sync_at_height(0);
+        let peer_ip = sample_peer_ip(1);
+        let locators = sample_block_locators(10);
+
+        sync.update_peer_locators(peer_ip, &locators).unwrap();
+        sync.mark_requests_failed([(1, (locators.get_hash(1), None))], RequeueReason::RequestFailed);
+        sync.failed_requests.lock().get_mut(&1).unwrap().retry_after = Instant::now() - Duration::from_secs(1);
+
+        assert!(num_prepared(&sync.prepare_block_requests()) > 0);
+
+        // The entry survives the re-issue, so that a height which keeps failing keeps backing off
+        // instead of resetting to the base delay on every cycle.
+        let entry = *sync.failed_requests.lock().get(&1).expect("the entry must be kept after re-issue");
+        assert_eq!(entry.delay, FAILED_REQUEST_BASE_DELAY * 2);
+        assert!(entry.retry_after > Instant::now());
+    }
+
+    #[test]
+    fn a_retained_failed_request_does_not_accumulate_outstanding_requests() {
+        let rng = &mut TestRng::default();
+        let sync = sample_sync_at_height(0);
+        let peer_ip = sample_peer_ip(1);
+        let locators = sample_block_locators(5000);
+        sync.update_peer_locators(peer_ip, &locators).unwrap();
+
+        // Height 1 failed and has since been re-issued: its entry is retained in `failed_requests`
+        // while the request itself is outstanding in `requests`.
+        sync.mark_requests_failed([(1, (locators.get_hash(1), None))], RequeueReason::RequestFailed);
+        sync.insert_block_request(1, (locators.get_hash(1), None, [peer_ip].into())).unwrap();
+
+        // A peer that withholds height 1 while answering later ranges keeps the request from timing
+        // out, so the entry becomes due again while its own height is still in flight.
+        sync.failed_requests.lock().get_mut(&1).unwrap().retry_after = Instant::now() - Duration::from_secs(1);
+
+        // Drive many scheduler wakes. Retrying a height that is already in flight must not request
+        // the next free range instead, which would grow `requests` by a batch per wake, unbounded,
+        // because this path returns before the outstanding/total-buffer checks.
+        for _ in 0..2000 {
+            for (requests, sync_peers) in sync.prepare_block_requests() {
+                for (height, (hash, previous_hash, num_sync_ips)) in requests {
+                    let sync_ips: IndexSet<_> =
+                        sync_peers.keys().sample(rng, num_sync_ips).into_iter().copied().collect();
+                    let _ = sync.insert_block_request(height, (hash, previous_hash, sync_ips));
+                }
+            }
+        }
+
+        assert_eq!(
+            sync.num_total_block_requests(),
+            1,
+            "an in-flight height must not cause further requests to be issued on its behalf"
+        );
+
+        // The entry is still retained, so the backoff it accumulated is not lost.
+        assert_eq!(sync.failed_requests.lock().len(), 1);
+
+        // Once the height is no longer in flight, it becomes retryable again - the exclusion
+        // defers the retry, it does not drop it.
+        sync.requests.write().remove(&1);
+        let batches = sync.prepare_block_requests();
+        assert_eq!(num_prepared(&batches), 1, "the height must be re-requested once it leaves `requests`");
     }
 }
