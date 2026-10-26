@@ -14,6 +14,7 @@
 // limitations under the License.
 
 use super::*;
+use snarkos_node_bft::helpers::fmt_id;
 use snarkos_node_network::{PeerPoolHandling, harden_socket};
 use snarkos_node_router::messages::{
     BlockRequest,
@@ -293,14 +294,38 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Validator<N, C> {
         serialized: UnconfirmedTransaction<N>,
         transaction: Transaction<N>,
     ) -> bool {
+        let transaction_id = transaction.id();
         // Add the unconfirmed transaction to the memory pool.
-        if let Err(error) = self.consensus.add_unconfirmed_transaction(transaction).await {
-            trace!("[UnconfirmedTransaction] {error}");
-            return true; // Maintain the connection.
-        }
-        let message = Message::UnconfirmedTransaction(serialized);
-        // Propagate the "UnconfirmedTransaction" to the connected validators.
-        self.propagate_to_validators(message, &[peer_ip]);
+        let verified = match self.consensus.add_unconfirmed_transaction(transaction).await {
+            Ok(Some(verified)) => verified,
+            // The transaction was recently seen, so it is not propagated again.
+            Ok(None) => return true,
+            Err(error) => {
+                trace!("[UnconfirmedTransaction] {error}");
+                return true; // Maintain the connection.
+            }
+        };
+        // Propagate the "UnconfirmedTransaction" to the connected validators once the BFT worker has
+        // verified it, without blocking the inbound handler on the result.
+        let node = self.clone();
+        tokio::spawn(async move {
+            match verified.await {
+                Ok(Ok(true)) => node.propagate_to_validators(Message::UnconfirmedTransaction(serialized), &[peer_ip]),
+                Ok(Ok(false)) => trace!(
+                    "[UnconfirmedTransaction] Not propagating '{}' from '{peer_ip}' - already in the BFT",
+                    fmt_id(transaction_id)
+                ),
+                Ok(Err(error)) => debug!(
+                    "[UnconfirmedTransaction] Not propagating '{}' from '{peer_ip}' - {}",
+                    fmt_id(transaction_id),
+                    flatten_error(error)
+                ),
+                Err(_) => trace!(
+                    "[UnconfirmedTransaction] Not propagating '{}' from '{peer_ip}' - evicted before verification",
+                    fmt_id(transaction_id)
+                ),
+            }
+        });
         true
     }
 }
