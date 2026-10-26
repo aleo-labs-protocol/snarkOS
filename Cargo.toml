@@ -48,7 +48,7 @@ default-features = false
 [workspace.dependencies.snarkvm]
 #path = "../snarkVM"
 git = "https://github.com/eranrund/snarkVM.git"
-rev = "fd64f0bbb76829918bb07cbaa2e004a345dc8cc7" # eran/authority-prune
+rev = "a7be0ff1e81945e53fdf37fa570b35c73978d3da" # eran/authority-prune
 #version = "=4.12.0"
 default-features = false
 
