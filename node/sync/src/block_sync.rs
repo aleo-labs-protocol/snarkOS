@@ -142,7 +142,7 @@ pub struct BlockRequestsSummary {
 
 #[derive(thiserror::Error, Debug)]
 pub enum InsertBlockResponseError<N: Network> {
-    #[error("Emppty block response (this could indicate the peer cannot serve the requested blocks)")]
+    #[error("Empty block response (this could indicate the peer cannot serve the requested blocks)")]
     EmptyBlockResponse,
     #[error("The peer did not send a consensus version")]
     NoConsensusVersion,
