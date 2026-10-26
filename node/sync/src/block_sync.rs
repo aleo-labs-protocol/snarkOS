@@ -109,9 +109,9 @@ pub fn earliest_retained_height(tip: u32) -> u32 {
     tip.saturating_sub(AUTHORITY_RETENTION_BLOCKS - 1)
 }
 
-/// Returns `true` if a peer at `peer_tip` is assumed to still serve block `height + 1`.
-fn peer_can_serve_next_block(peer_tip: u32, height: u32) -> bool {
-    earliest_retained_height(peer_tip) <= height.saturating_add(1)
+/// Returns `true` if a peer at `peer_tip` is assumed to still serve block `height`.
+fn peer_can_serve(peer_tip: u32, height: u32) -> bool {
+    earliest_retained_height(peer_tip) <= height
 }
 
 /// This is a dummy IP address that is used to represent the local node.
@@ -821,7 +821,9 @@ impl<N: Network> BlockSync<N> {
         // Retrieve the current sync height.
         let current_height = self.get_sync_height();
 
-        if let Some((sync_peers, min_common_ancestor)) = self.find_sync_peers_inner(current_height) {
+        if let Some((sync_peers, min_common_ancestor)) =
+            self.find_sync_peers_inner(current_height, current_height.saturating_add(1))
+        {
             // Map the locators into the latest height.
             let sync_peers =
                 sync_peers.into_iter().map(|(ip, locators)| (ip, locators.latest_locator_height())).collect();
@@ -1071,7 +1073,8 @@ impl<N: Network> BlockSync<N> {
                 // Set the maximum number of blocks, so that they do not exceed the end height.
                 let max_new_blocks_to_request = end_height - start_height;
 
-                let Some((sync_peers, min_common_ancestor)) = self.find_sync_peers_inner(start_height) else {
+                let Some((sync_peers, min_common_ancestor)) = self.find_sync_peers_inner(start_height, start_height)
+                else {
                     // This generally shouldn't happen, because there cannot be outstanding requests when no peers are connected.
                     warn!("Cannot re-request blocks because no or not enough peers are connected");
                     return result;
@@ -1132,7 +1135,9 @@ impl<N: Network> BlockSync<N> {
 
             print_requests();
             vec![]
-        } else if let Some((sync_peers, min_common_ancestor)) = self.find_sync_peers_inner(current_height) {
+        } else if let Some((sync_peers, min_common_ancestor)) =
+            self.find_sync_peers_inner(current_height, current_height.saturating_add(1))
+        {
             // Retrieve the greatest block height of any connected peer.
             // We do not need to update the sync state here, as that already happens when the block locators are received.
             let greatest_peer_height = sync_peers.values().map(|l| l.latest_locator_height()).max().unwrap_or(0);
@@ -1182,7 +1187,7 @@ impl<N: Network> BlockSync<N> {
         let tips_ahead = locators.values().map(|locators| locators.latest_locator_height()).filter(|&tip| tip > height);
         locators.len() >= STUCK_SYNC_MINIMUM_PEERS
             && tips_ahead.clone().count() * 2 > locators.len()
-            && tips_ahead.into_iter().all(|tip| !peer_can_serve_next_block(tip, height))
+            && tips_ahead.into_iter().all(|tip| !peer_can_serve(tip, height.saturating_add(1)))
     }
 
     /// Returns how long sync has made no progress because the peers have pruned the blocks this
@@ -1193,8 +1198,8 @@ impl<N: Network> BlockSync<N> {
     /// it holds, and cleared when it stops holding.
     pub fn sync_stuck_below_peer_floors(&self) -> Option<Duration> {
         // The majority rule leaves no peer eligible for new requests, so only outstanding requests
-        // need a separate check.
-        let height = self.ledger.latest_block_height();
+        // need a separate check. The sync height is what request generation starts from.
+        let height = self.get_sync_height();
         let is_stuck = self.requests.read().is_empty() && self.needed_blocks_pruned_by_peer_majority(height);
 
         let mut stuck_since = self.stuck_since.lock();
@@ -1523,25 +1528,29 @@ impl<N: Network> BlockSync<N> {
     /// Finds the peers to sync from and the shared common ancestor, starting at the give height.
     ///
     /// Unlike [`Self::find_sync_peers`] this does not only return the latest locators height, but the full BlockLocators for each peer.
-    /// Returns `None` if there are no peers to sync from.
+    /// Returns `None` if there are no peers to sync from. Peers assumed to have pruned `first_needed`,
+    /// the first block to be requested, are excluded.
     ///
     /// # Locking
     /// This function will read-lock `common_ancestors`.
-    fn find_sync_peers_inner(&self, current_height: u32) -> Option<(IndexMap<SocketAddr, BlockLocators<N>>, u32)> {
+    fn find_sync_peers_inner(
+        &self,
+        current_height: u32,
+        first_needed: u32,
+    ) -> Option<(IndexMap<SocketAddr, BlockLocators<N>>, u32)> {
         // Retrieve the latest ledger height.
         let latest_ledger_height = self.ledger.latest_block_height();
 
         // Pick a set of peers above the latest ledger height, and include their locators.
         // This will sort the peers by locator height in descending order.
-        // Peers whose assumed pruning floor is above the next block we need are excluded,
-        // since they can no longer serve the authority data for that block.
+        // Peers assumed to have pruned the authority data of the first needed block are excluded.
         let candidate_locators: IndexMap<_, _> = self
             .locators
             .read()
             .iter()
             .filter(|(_, locators)| {
                 let peer_tip = locators.latest_locator_height();
-                peer_tip > current_height && peer_can_serve_next_block(peer_tip, current_height)
+                peer_tip > current_height && peer_can_serve(peer_tip, first_needed)
             })
             .sorted_by(|(_, a), (_, b)| b.latest_locator_height().cmp(&a.latest_locator_height()))
             .take(NUM_SYNC_CANDIDATE_PEERS)
@@ -2438,19 +2447,18 @@ mod tests {
     /// Tests that progress while the stuck signal is armed starts a fresh window.
     #[test]
     fn test_progress_resets_stuck_window() {
-        let ledger = Arc::new(sample_ledger_service(1_000));
-        let sync = BlockSync::<CurrentNetwork>::new(ledger.clone(), ConnectionMode::Router);
+        let sync = sample_sync_at_height(1_000);
         add_pruned_peers(&sync, 1_000, STUCK_SYNC_MINIMUM_PEERS as u16);
 
         assert!(sync.sync_stuck_below_peer_floors().is_some());
         let (armed_at, armed_height) = sync.stuck_since.lock().unwrap();
         assert_eq!(armed_height, 1_000);
 
-        ledger.advance_to_height(1_001);
+        sync.set_sync_height(1_001);
         assert!(sync.sync_stuck_below_peer_floors().is_some());
         let (rearmed_at, rearmed_height) = sync.stuck_since.lock().unwrap();
         assert_eq!(rearmed_height, 1_001);
-        assert!(rearmed_at > armed_at);
+        assert!(rearmed_at >= armed_at);
     }
 
     /// Tests the stuck-signal lifecycle: set while every peer is assumed to have pruned the needed

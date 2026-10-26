@@ -413,7 +413,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
     ) -> Result<ErasedJson, RestError> {
         let latest_height = rest.ledger.latest_height();
         let (start_height, end_height) = check_block_range(block_range, MAX_BLOCK_RANGE, "blocks", latest_height)?;
-        if cfg!(feature = "prune-authority-data") && end_height > 1 {
+        if cfg!(feature = "prune-authority-data") && start_height < end_height && end_height > 1 {
             check_block_retained(start_height.max(1), latest_height)?;
         }
 

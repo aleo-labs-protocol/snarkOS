@@ -202,7 +202,7 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Validator<N, C> {
             }
         };
 
-        // Reply empty rather than disconnect: the peer learns we cannot serve this range (e.g. pruned).
+        // An empty response tells the peer this node cannot serve the range (e.g. pruned).
         let blocks = match self.ledger.get_blocks(*start_height..*end_height) {
             Ok(blocks) => DataBlocks(blocks),
             Err(err) => {
