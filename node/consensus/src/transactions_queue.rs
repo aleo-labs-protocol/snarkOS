@@ -44,12 +44,13 @@ impl<N: Network> TransactionsQueue<N> {
         self.executions.contains(transaction_id) || self.deployments.contains(transaction_id)
     }
 
+    /// Inserts the transaction, returning the ID of the transaction it evicted (if any).
     pub fn insert(
         &mut self,
         transaction_id: N::TransactionID,
         transaction: Transaction<N>,
         priority_fee: U64<N>,
-    ) -> Result<()> {
+    ) -> Result<Option<N::TransactionID>> {
         let result = if transaction.is_execute() {
             self.executions.insert(transaction_id, transaction, priority_fee)
         } else {
@@ -114,18 +115,19 @@ impl<N: Network> TransactionsQueueInner<N> {
         self.fifo_queue.contains(transaction_id) || self.priority_queue.transactions.contains_key(transaction_id)
     }
 
+    /// Inserts the transaction, returning the ID of the transaction it evicted (if any).
     fn insert(
         &mut self,
         transaction_id: N::TransactionID,
         transaction: Transaction<N>,
         priority_fee: U64<N>,
-    ) -> Result<()> {
+    ) -> Result<Option<N::TransactionID>> {
         // Duplicates are a no-op: they must not evict anything or refresh recency.
         // Note: the transaction ID is the root of the transaction tree, which includes a leaf for the fee
         // transition. A transaction with the same ID therefore always has the same priority fee, and a
         // resubmission with a higher fee has a different ID, so there is nothing to replace here.
         if self.contains(&transaction_id) {
-            return Ok(());
+            return Ok(None);
         }
 
         // If the queue is not full, insert in the appropriate queue.
@@ -137,10 +139,10 @@ impl<N: Network> TransactionsQueueInner<N> {
             }
 
             debug_assert!(self.len() <= self.capacity, "The mempool exceeded its capacity");
-            return Ok(());
+            return Ok(None);
         }
 
-        match (self.priority_queue.len() < self.capacity, *priority_fee) {
+        let evicted = match (self.priority_queue.len() < self.capacity, *priority_fee) {
             (_, 0) => {
                 #[cfg(feature = "metrics")]
                 metrics::increment_counter(metrics::consensus::DROPPED_TRANSACTIONS);
@@ -156,12 +158,14 @@ impl<N: Network> TransactionsQueueInner<N> {
                 );
 
                 // Remove an entry from the low-priority queue to make room for the high-priority transaction.
-                if self.fifo_queue.pop_lru().is_some() {
+                let evicted = self.fifo_queue.pop_lru().map(|(id, _)| id);
+                if evicted.is_some() {
                     #[cfg(feature = "metrics")]
                     metrics::increment_counter(metrics::consensus::DROPPED_TRANSACTIONS);
                 }
 
-                self.priority_queue.insert(transaction_id, transaction, priority_fee)
+                self.priority_queue.insert(transaction_id, transaction, priority_fee);
+                evicted
             }
             // Invariant: if the queue is at capacity but the priority queue is
             // equal to the capacity, the low-priority queue must be empty.
@@ -173,10 +177,10 @@ impl<N: Network> TransactionsQueueInner<N> {
 
                 self.priority_queue.compare_insert(transaction_id, transaction, priority_fee)?
             }
-        }
+        };
 
         debug_assert!(self.len() <= self.capacity, "The mempool exceeded its capacity");
-        Ok(())
+        Ok(evicted)
     }
 
     pub fn pop(&mut self) -> Option<(N::TransactionID, Transaction<N>)> {
@@ -221,10 +225,10 @@ impl<N: Network> PriorityQueue<N> {
         transaction_id: N::TransactionID,
         transaction: Transaction<N>,
         fee: U64<N>,
-    ) -> Result<()> {
+    ) -> Result<Option<N::TransactionID>> {
         // Make sure the collection isn't empty.
         if self.transaction_ids.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
 
         // If the lowest fee in the collection is higher than the new fee, reject the new transaction.
@@ -248,7 +252,7 @@ impl<N: Network> PriorityQueue<N> {
         metrics::increment_counter(metrics::consensus::DROPPED_TRANSACTIONS);
 
         self.insert(transaction_id, transaction, fee);
-        Ok(())
+        Ok(Some(id))
     }
 
     fn pop(&mut self) -> Option<(N::TransactionID, Transaction<N>)> {
