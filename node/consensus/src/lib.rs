@@ -66,14 +66,11 @@ use locktick::parking_lot::{Mutex, RwLock};
 use lru::LruCache;
 #[cfg(not(feature = "locktick"))]
 use parking_lot::{Mutex, RwLock};
-use std::{future::Future, net::SocketAddr, num::NonZeroUsize, sync::Arc};
+use std::{collections::HashMap, future::Future, net::SocketAddr, num::NonZeroUsize, sync::Arc};
 use tokio::{
     sync::{Notify, oneshot},
     task::JoinHandle,
 };
-
-#[cfg(feature = "metrics")]
-use std::collections::HashMap;
 
 /// The capacity of the queue reserved for deployments.
 /// Note: This is an inbound queue capacity, not a Narwhal-enforced capacity.
@@ -89,6 +86,11 @@ const CAPACITY_FOR_SOLUTIONS: usize = 1 << 10;
 const MAX_DEPLOYMENTS_PER_INTERVAL: usize = 1;
 
 type BftRunArgs<N> = Arc<Mutex<Option<(ConsensusSender<N>, PrimaryReceiver<N>)>>>;
+
+/// Resolves once the BFT worker has checked a queued transaction: `Ok(true)` if it was added to the
+/// worker's ready queue, `Ok(false)` if the BFT already had it, `Err` if it failed the check.
+/// The receiver errors if the memory pool evicted the transaction before it was checked.
+pub type TransactionVerified = oneshot::Receiver<Result<bool>>;
 
 /// Wrapper around `BFT` that adds additional functionality, such as a mempool.
 ///
@@ -112,6 +114,8 @@ pub struct Consensus<N: Network> {
     seen_solutions: Arc<Mutex<LruCache<SolutionID<N>, ()>>>,
     /// The recently-seen unconfirmed transactions.
     seen_transactions: Arc<Mutex<LruCache<N::TransactionID, ()>>>,
+    /// The verification callbacks of the transactions in the queue.
+    transaction_callbacks: Arc<Mutex<HashMap<N::TransactionID, oneshot::Sender<Result<bool>>>>>,
     #[cfg(feature = "metrics")]
     transmissions_tracker: Arc<Mutex<HashMap<TransmissionID<N>, i64>>>,
     /// The spawned handles.
@@ -177,6 +181,7 @@ impl<N: Network> Consensus<N> {
             transactions_queue: Default::default(),
             seen_solutions: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(1 << 16).unwrap()))),
             seen_transactions: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(1 << 16).unwrap()))),
+            transaction_callbacks: Default::default(),
             #[cfg(feature = "metrics")]
             transmissions_tracker: Default::default(),
             handles: Default::default(),
@@ -390,11 +395,17 @@ impl<N: Network> Consensus<N> {
 
     /// Adds the given unconfirmed transaction to the memory pool, which will then eventually be passed
     /// to the BFT layer for inclusion in a batch.
-    pub async fn add_unconfirmed_transaction(&self, transaction: Transaction<N>) -> Result<()> {
+    ///
+    /// Returns `Ok(None)` if the transaction was recently seen, and otherwise a handle that resolves
+    /// once the BFT worker has checked the transaction (see [`TransactionVerified`]).
+    pub async fn add_unconfirmed_transaction(
+        &self,
+        transaction: Transaction<N>,
+    ) -> Result<Option<TransactionVerified>> {
         // Calculate the transmission checksum.
         let checksum = Data::<Transaction<N>>::Buffer(transaction.to_bytes_le()?.into()).to_checksum::<N>()?;
         // Queue the unconfirmed transaction.
-        {
+        let verified = {
             let transaction_id = transaction.id();
 
             // Check that the transaction is not a fee transaction.
@@ -404,7 +415,7 @@ impl<N: Network> Consensus<N> {
             // Check if the transaction was recently seen.
             if self.seen_transactions.lock().put(transaction_id, ()).is_some() {
                 // If the transaction was recently seen, return early.
-                return Ok(());
+                return Ok(None);
             }
             // Check if the transaction already exists in the ledger.
             if self.ledger.contains_transmission(&TransmissionID::Transaction(transaction_id, checksum))? {
@@ -414,9 +425,19 @@ impl<N: Network> Consensus<N> {
             if self.contains_transaction(&transaction_id) {
                 bail!("Transaction '{}' exists in the memory pool", fmt_id(transaction_id));
             }
-            // Add the transaction to the memory pool.
+            // Add the transaction to the memory pool, registering its verification callback.
             let priority_fee = transaction.priority_fee_amount()?;
-            self.transactions_queue.write().insert(transaction_id, transaction, priority_fee)?;
+            let (callback, verified) = oneshot::channel();
+            {
+                let mut tx_queue = self.transactions_queue.write();
+                let evicted = tx_queue.insert(transaction_id, transaction, priority_fee)?;
+                let mut callbacks = self.transaction_callbacks.lock();
+                // Drop the callback of the evicted transaction, if any.
+                if let Some(evicted) = evicted {
+                    callbacks.remove(&evicted);
+                }
+                callbacks.insert(transaction_id, callback);
+            }
             #[cfg(feature = "metrics")]
             {
                 metrics::increment_gauge(metrics::consensus::UNCONFIRMED_TRANSACTIONS, 1f64);
@@ -426,10 +447,12 @@ impl<N: Network> Consensus<N> {
                     .insert(TransmissionID::Transaction(transaction_id, checksum), timestamp);
             }
             trace!("Received unconfirmed transaction '{}' in the queue", fmt_id(transaction_id));
-        }
+            verified
+        };
 
         // Try to process the unconfirmed transactions in the memory pool.
-        self.process_unconfirmed_transactions().await
+        self.process_unconfirmed_transactions().await?;
+        Ok(Some(verified))
     }
 
     /// Processes unconfirmed transactions in the mempool, and passes them to the BFT layer
@@ -493,8 +516,12 @@ impl<N: Network> Consensus<N> {
                 Transaction::Fee(..) => "fee",
             };
             trace!("Adding unconfirmed {tx_type_str} transaction '{}' to the memory pool...", fmt_id(transaction_id));
+            // Take the verification callback registered when the transaction was queued.
+            let callback = self.transaction_callbacks.lock().remove(&transaction_id);
             // Send the unconfirmed transaction to the primary.
-            match self.primary_sender.send_unconfirmed_transaction(transaction_id, Data::Object(transaction)).await {
+            let result =
+                self.primary_sender.send_unconfirmed_transaction(transaction_id, Data::Object(transaction)).await;
+            match &result {
                 Ok(true) => {}
                 Ok(false) => debug!(
                     "Unable to add unconfirmed {tx_type_str} transaction '{}' to the memory pool. Already exists.",
@@ -503,13 +530,17 @@ impl<N: Network> Consensus<N> {
                 Err(err) => {
                     // If the BFT is synced, then log the warning.
                     if self.bft.is_synced() {
-                        let err = err.context(format!(
-                            "Unable to add unconfirmed {tx_type_str} transaction '{}' to the memory pool",
-                            fmt_id(transaction_id)
-                        ));
-                        warn!("{}", flatten_error(err));
+                        warn!(
+                            "Unable to add unconfirmed {tx_type_str} transaction '{}' to the memory pool - {}",
+                            fmt_id(transaction_id),
+                            flatten_error(err)
+                        );
                     }
                 }
+            }
+            // Resolve the verification handle, if anyone is still waiting on it.
+            if let Some(callback) = callback {
+                callback.send(result).ok();
             }
         }
         Ok(())
