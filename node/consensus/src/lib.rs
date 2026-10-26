@@ -91,6 +91,8 @@ type BftRunArgs<N> = Arc<Mutex<Option<(ConsensusSender<N>, PrimaryReceiver<N>)>>
 /// worker's ready queue, `Ok(false)` if the BFT already had it, `Err` if it failed the check.
 /// The receiver errors if the memory pool evicted the transaction before it was checked.
 pub type TransactionVerified = oneshot::Receiver<Result<bool>>;
+/// The verification callbacks of the transactions in the queue, keyed by transaction ID.
+type TransactionCallbacks<N> = Arc<Mutex<HashMap<<N as Network>::TransactionID, oneshot::Sender<Result<bool>>>>>;
 
 /// Wrapper around `BFT` that adds additional functionality, such as a mempool.
 ///
@@ -115,7 +117,7 @@ pub struct Consensus<N: Network> {
     /// The recently-seen unconfirmed transactions.
     seen_transactions: Arc<Mutex<LruCache<N::TransactionID, ()>>>,
     /// The verification callbacks of the transactions in the queue.
-    transaction_callbacks: Arc<Mutex<HashMap<N::TransactionID, oneshot::Sender<Result<bool>>>>>,
+    transaction_callbacks: TransactionCallbacks<N>,
     #[cfg(feature = "metrics")]
     transmissions_tracker: Arc<Mutex<HashMap<TransmissionID<N>, i64>>>,
     /// The spawned handles.
