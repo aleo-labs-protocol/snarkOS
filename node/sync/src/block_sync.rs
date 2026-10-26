@@ -2374,8 +2374,9 @@ mod tests {
     fn test_floor_excludes_peers_that_pruned_the_needed_blocks() {
         let sync = sample_sync_at_height(0);
 
-        // A peer at tip 200,000 is assumed to have pruned everything below ~101,000, so it cannot serve block 1.
-        sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(200_000)).unwrap();
+        // A peer two retention windows ahead is assumed to have pruned everything below
+        // `AUTHORITY_RETENTION_BLOCKS + RETENTION_SLACK`, so it cannot serve block 1.
+        sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(2 * AUTHORITY_RETENTION_BLOCKS)).unwrap();
 
         assert!(sync.prepare_block_requests().is_empty());
         // The sync pool records that the needed blocks are below every peer's retention floor.
@@ -2385,10 +2386,11 @@ mod tests {
     /// Tests that a peer whose retained window covers the next needed block is selected for sync.
     #[test]
     fn test_floor_includes_peers_that_retain_the_needed_blocks() {
-        let sync = sample_sync_at_height(150_000);
+        let sync = sample_sync_at_height(AUTHORITY_RETENTION_BLOCKS + AUTHORITY_RETENTION_BLOCKS / 2);
 
-        // A peer at tip 200,000 is assumed to retain blocks from ~101,000, so it can serve block 150,001.
-        sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(200_000)).unwrap();
+        // A peer two retention windows ahead is assumed to retain blocks from
+        // `AUTHORITY_RETENTION_BLOCKS + RETENTION_SLACK`, so it can serve the next needed block.
+        sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(2 * AUTHORITY_RETENTION_BLOCKS)).unwrap();
 
         let (requests, _) = sync.prepare_block_requests().pop().unwrap();
         assert!(!requests.is_empty());
@@ -2399,15 +2401,16 @@ mod tests {
     /// must be at or below the next needed block for the peer to be eligible.
     #[test]
     fn test_floor_boundary() {
-        // The next needed block is 1,001. A peer at tip 100,001 has an assumed floor of exactly 1,001 — eligible.
-        let sync = sample_sync_at_height(1_000);
-        sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(100_001)).unwrap();
+        // The next needed block is `RETENTION_SLACK + 1`. A peer at tip `AUTHORITY_RETENTION_BLOCKS + 1`
+        // has an assumed floor of exactly that height — eligible.
+        let sync = sample_sync_at_height(RETENTION_SLACK);
+        sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(AUTHORITY_RETENTION_BLOCKS + 1)).unwrap();
         assert!(!sync.prepare_block_requests().is_empty());
         assert!(sync.sync_stuck_below_peer_floors().is_none());
 
-        // A peer one block further ahead has an assumed floor of 1,002 — no longer eligible.
-        let sync = sample_sync_at_height(1_000);
-        sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(100_002)).unwrap();
+        // A peer one block further ahead has an assumed floor one block higher — no longer eligible.
+        let sync = sample_sync_at_height(RETENTION_SLACK);
+        sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(AUTHORITY_RETENTION_BLOCKS + 2)).unwrap();
         assert!(sync.prepare_block_requests().is_empty());
         assert!(sync.sync_stuck_below_peer_floors().is_some());
     }
@@ -2423,14 +2426,14 @@ mod tests {
         assert!(sync.sync_stuck_below_peer_floors().is_none());
 
         // With only a peer that pruned the needed blocks, the stuck signal is set and persists.
-        sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(200_000)).unwrap();
+        sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(2 * AUTHORITY_RETENTION_BLOCKS)).unwrap();
         assert!(sync.prepare_block_requests().is_empty());
         assert!(sync.sync_stuck_below_peer_floors().is_some());
         assert!(sync.prepare_block_requests().is_empty());
         assert!(sync.sync_stuck_below_peer_floors().is_some());
 
         // Once a peer that retains the needed blocks appears, the signal clears.
-        sync.update_peer_locators(sample_peer_ip(2), &sample_block_locators(50_000)).unwrap();
+        sync.update_peer_locators(sample_peer_ip(2), &sample_block_locators(AUTHORITY_RETENTION_BLOCKS / 10)).unwrap();
         assert!(!sync.prepare_block_requests().is_empty());
         assert!(sync.sync_stuck_below_peer_floors().is_none());
     }
