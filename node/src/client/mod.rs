@@ -447,12 +447,9 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
                         };
                         // Check if the state root is in the ledger.
                         if !_node.ledger().contains_state_root(&state_root).unwrap_or(false) {
-                            debug!("Failed to find global state root for deployment from peer_ip {peer_ip}, propagating anyway");
-                            // Propagate the `UnconfirmedTransaction`.
-                            _node.propagate(Message::UnconfirmedTransaction(serialized), &[peer_ip]);
+                            debug!("Failed to find global state root for deployment from peer_ip {peer_ip}, dropping");
                             _node.num_verifying_deploys.fetch_sub(1, Relaxed);
                             return;
-                            // Also skip the `check_transaction_basic` call if it is already propagated.
                         }
                         // Check the deployment.
                         match _node.ledger.check_transaction_basic(&transaction, None, &mut rand::rng()) {
@@ -517,12 +514,9 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
 
                         for state_root in state_roots {
                             if !_node.ledger().contains_state_root(&state_root).unwrap_or(false) {
-                                debug!("Failed to find global state root for execution from peer_ip {peer_ip}, propagating anyway");
-                                // Propagate the `UnconfirmedTransaction`.
-                                _node.propagate(Message::UnconfirmedTransaction(serialized), &[peer_ip]);
+                                debug!("Failed to find global state root for execution from peer_ip {peer_ip}, dropping");
                                 _node.num_verifying_executions.fetch_sub(1, Relaxed);
                                 return;
-                                // Also skip the `check_transaction_basic` call if it is already propagated.
                             }
                         }
                         // Check the execution.
