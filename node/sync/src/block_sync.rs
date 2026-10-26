@@ -90,19 +90,20 @@ const MAX_BLOCK_REQUESTS: usize = 50; // 50 requests
 /// The maximum number of blocks tolerated before the primary is considered behind its peers.
 pub const MAX_BLOCKS_BEHIND: u32 = 1; // blocks
 
-/// A peer's advertised tip is only a snapshot: by the time our block request arrives, the peer may
-/// have advanced by a few blocks and pruned a corresponding number of old ones. We therefore do not
-/// assume a peer serves exactly `tip - AUTHORITY_RETENTION_BLOCKS`, but leave this many blocks of slack.
-const RETENTION_SLACK: u32 = 1_000;
-
 /// The duration after which a node that cannot request its needed blocks from any peer
 /// (see [`BlockSync::sync_stuck_below_peer_floors`]) should give up and shut down.
 pub const STUCK_SYNC_SHUTDOWN_THRESHOLD: Duration = Duration::from_secs(5 * 60);
 
-/// Returns the lowest block height the peer with the given tip is assumed to still serve,
-/// given that peers prune authority data older than `AUTHORITY_RETENTION_BLOCKS` blocks.
+/// Returns the lowest block height the peer with the given tip is assumed to still serve: peers
+/// prune authority data older than `AUTHORITY_RETENTION_BLOCKS` blocks, so a peer at `tip` retains
+/// `tip - (AUTHORITY_RETENTION_BLOCKS - 1)..=tip`.
+///
+/// The advertised tip is only a snapshot, so by the time a request arrives the peer may have
+/// advanced and pruned a little more. No slack is applied for that: such a request gets an empty
+/// response and is re-issued, and if the gap is real the stuck detector shuts the node down after
+/// [`STUCK_SYNC_SHUTDOWN_THRESHOLD`].
 fn assumed_peer_floor(peer_tip: u32) -> u32 {
-    peer_tip.saturating_sub(AUTHORITY_RETENTION_BLOCKS.saturating_sub(RETENTION_SLACK))
+    peer_tip.saturating_sub(AUTHORITY_RETENTION_BLOCKS - 1)
 }
 
 /// This is a dummy IP address that is used to represent the local node.
@@ -2375,7 +2376,7 @@ mod tests {
         let sync = sample_sync_at_height(0);
 
         // A peer two retention windows ahead is assumed to have pruned everything below
-        // `AUTHORITY_RETENTION_BLOCKS + RETENTION_SLACK`, so it cannot serve block 1.
+        // `AUTHORITY_RETENTION_BLOCKS + 1`, so it cannot serve block 1.
         sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(2 * AUTHORITY_RETENTION_BLOCKS)).unwrap();
 
         assert!(sync.prepare_block_requests().is_empty());
@@ -2389,7 +2390,7 @@ mod tests {
         let sync = sample_sync_at_height(AUTHORITY_RETENTION_BLOCKS + AUTHORITY_RETENTION_BLOCKS / 2);
 
         // A peer two retention windows ahead is assumed to retain blocks from
-        // `AUTHORITY_RETENTION_BLOCKS + RETENTION_SLACK`, so it can serve the next needed block.
+        // `AUTHORITY_RETENTION_BLOCKS + 1`, so it can serve the next needed block.
         sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(2 * AUTHORITY_RETENTION_BLOCKS)).unwrap();
 
         let (requests, _) = sync.prepare_block_requests().pop().unwrap();
@@ -2397,20 +2398,20 @@ mod tests {
         assert!(sync.sync_stuck_below_peer_floors().is_none());
     }
 
-    /// Tests the boundary of the assumed peer floor: `peer_tip − (AUTHORITY_RETENTION_BLOCKS − RETENTION_SLACK)`
+    /// Tests the boundary of the assumed peer floor: `peer_tip − (AUTHORITY_RETENTION_BLOCKS − 1)`
     /// must be at or below the next needed block for the peer to be eligible.
     #[test]
     fn test_floor_boundary() {
-        // The next needed block is `RETENTION_SLACK + 1`. A peer at tip `AUTHORITY_RETENTION_BLOCKS + 1`
-        // has an assumed floor of exactly that height — eligible.
-        let sync = sample_sync_at_height(RETENTION_SLACK);
-        sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(AUTHORITY_RETENTION_BLOCKS + 1)).unwrap();
+        // The next needed block is 1,001. A peer at tip `1_000 + AUTHORITY_RETENTION_BLOCKS` has an
+        // assumed floor of exactly that height — eligible.
+        let sync = sample_sync_at_height(1_000);
+        sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(1_000 + AUTHORITY_RETENTION_BLOCKS)).unwrap();
         assert!(!sync.prepare_block_requests().is_empty());
         assert!(sync.sync_stuck_below_peer_floors().is_none());
 
         // A peer one block further ahead has an assumed floor one block higher — no longer eligible.
-        let sync = sample_sync_at_height(RETENTION_SLACK);
-        sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(AUTHORITY_RETENTION_BLOCKS + 2)).unwrap();
+        let sync = sample_sync_at_height(1_000);
+        sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(1_001 + AUTHORITY_RETENTION_BLOCKS)).unwrap();
         assert!(sync.prepare_block_requests().is_empty());
         assert!(sync.sync_stuck_below_peer_floors().is_some());
     }
