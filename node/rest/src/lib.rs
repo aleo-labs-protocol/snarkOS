@@ -629,6 +629,7 @@ mod tests {
             Router::new()
                 .route("/not_found", get(|| async { Err::<(), RestError>(RestError::not_found(anyhow!("missing"))) }))
                 .route("/bad_request", get(|| async { Err::<(), RestError>(RestError::bad_request(anyhow!("bad"))) }))
+                .route("/gone", get(|| async { Err::<(), RestError>(RestError::gone(anyhow!("pruned"))) }))
                 .route(
                     "/service_unavailable",
                     get(|| async { Err::<(), RestError>(RestError::service_unavailable(anyhow!("gone"))) }),
@@ -650,6 +651,9 @@ mod tests {
             app.clone().oneshot(Request::builder().uri("/bad_request").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
+        let res = app.clone().oneshot(Request::builder().uri("/gone").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
         let res =
             app.oneshot(Request::builder().uri("/service_unavailable").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -666,6 +670,9 @@ mod tests {
         let res =
             app.clone().oneshot(Request::builder().uri("/v2/bad_request").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        let res = app.clone().oneshot(Request::builder().uri("/v2/gone").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(res.status(), StatusCode::GONE);
 
         let res =
             app.oneshot(Request::builder().uri("/v2/service_unavailable").body(Body::empty()).unwrap()).await.unwrap();

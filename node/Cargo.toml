@@ -46,7 +46,7 @@ metrics = [
 # The names stay so existing build commands keep resolving.
 history = []
 history-staking-rewards = []
-prune-authority-data = [ "snarkvm/prune-authority-data" ]
+prune-authority-data = [ "snarkos-node-rest/prune-authority-data", "snarkvm/prune-authority-data" ]
 cuda = [
   "snarkvm/cuda",
   "snarkos-account/cuda",

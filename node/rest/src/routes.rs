@@ -18,7 +18,7 @@ use snarkos_node_network::PeerPoolHandling;
 use snarkos_node_router::messages::UnconfirmedSolution;
 use snarkos_node_sync::BftSyncMode;
 use snarkvm::{
-    ledger::puzzle::Solution,
+    ledger::{puzzle::Solution, store::AUTHORITY_RETENTION_BLOCKS},
     prelude::{
         Address,
         ConsensusVersion,
@@ -109,6 +109,27 @@ fn map_missing_resource_error(err: anyhow::Error) -> RestError {
     });
 
     if is_missing_resource { RestError::not_found(err) } else { RestError::from(err) }
+}
+
+/// The earliest height whose full block a node built with `prune-authority-data` still serves:
+/// authority data older than `AUTHORITY_RETENTION_BLOCKS` is pruned, and a block below this
+/// height can no longer be assembled. Genesis is never pruned.
+#[cfg_attr(not(feature = "prune-authority-data"), allow(dead_code))]
+fn earliest_retained_height(latest_height: u32) -> u32 {
+    latest_height.saturating_sub(AUTHORITY_RETENTION_BLOCKS - 1)
+}
+
+/// Returns a `410 Gone` if the block at `height` is below this node's authority retention window.
+#[cfg_attr(not(feature = "prune-authority-data"), allow(dead_code))]
+fn check_block_retained(height: u32, latest_height: u32) -> Result<(), RestError> {
+    let earliest = earliest_retained_height(latest_height);
+    if height > 0 && height < earliest {
+        return Err(RestError::gone(anyhow!(
+            "block {height} is below this node's authority retention window (earliest {earliest}); \
+            use /block/{height}/header, /block/{height}/transactions, or an archival node"
+        )));
+    }
+    Ok(())
 }
 
 /// Deserialize a CSV string into a vector of strings.
@@ -341,11 +362,18 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         // Manually parse the height or the height of the hash, axum doesn't support different types
         // for the same path param.
         let hash = if let Ok(height) = height_or_hash.parse::<u32>() {
+            #[cfg(feature = "prune-authority-data")]
+            check_block_retained(height, rest.ledger.latest_height())?;
             rest.ledger
                 .get_hash(height)
                 .with_context(|| "Failed to get a block's hash")
                 .map_err(map_missing_resource_error)?
         } else if let Ok(hash) = height_or_hash.parse::<N::BlockHash>() {
+            // A hash the node does not know falls through to the lookup below, which reports it.
+            #[cfg(feature = "prune-authority-data")]
+            if let Ok(height) = rest.ledger.get_height(&hash) {
+                check_block_retained(height, rest.ledger.latest_height())?;
+            }
             hash
         } else {
             return Err(RestError::bad_request(anyhow!("invalid input: neither a block height nor a block hash")));
@@ -380,13 +408,16 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
     ///
     /// `start` is inclusive and `end` is exclusive. A height the node does not have is a 404. With
     /// `allow_partial=true`, a range that reaches past the tip is clamped to it instead, so the
-    /// array is shorter than the range, and empty when `start` is past the tip.
+    /// array is shorter than the range, and empty when `start` is past the tip. On a node built
+    /// with `prune-authority-data`, a range starting below the retention window is a 410 as a whole.
     pub(crate) async fn get_blocks(
         State(rest): State<Self>,
         Query(block_range): Query<BlockRange>,
     ) -> Result<ErasedJson, RestError> {
-        let (start_height, end_height) =
-            check_block_range(block_range, MAX_BLOCK_RANGE, "blocks", rest.ledger.latest_height())?;
+        let latest_height = rest.ledger.latest_height();
+        let (start_height, end_height) = check_block_range(block_range, MAX_BLOCK_RANGE, "blocks", latest_height)?;
+        #[cfg(feature = "prune-authority-data")]
+        check_block_retained(start_height, latest_height)?;
 
         // Prepare a closure for the blocking work.
         let get_json_blocks = move || -> Result<ErasedJson, RestError> {
@@ -1808,6 +1839,42 @@ mod route_error_tests {
         let err = map_missing_resource_error(anyhow::anyhow!(message));
         assert_eq!(err, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(err.to_string(), message);
+    }
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn the_retention_window_ends_at_the_tip_and_spans_the_retained_blocks() {
+        assert_eq!(earliest_retained_height(0), 0);
+        assert_eq!(earliest_retained_height(AUTHORITY_RETENTION_BLOCKS - 1), 0);
+        assert_eq!(earliest_retained_height(AUTHORITY_RETENTION_BLOCKS), 1);
+        assert_eq!(earliest_retained_height(2 * AUTHORITY_RETENTION_BLOCKS), AUTHORITY_RETENTION_BLOCKS + 1);
+    }
+
+    #[test]
+    fn blocks_inside_the_window_are_retained() {
+        let latest = 2 * AUTHORITY_RETENTION_BLOCKS;
+        let earliest = earliest_retained_height(latest);
+        check_block_retained(earliest, latest).unwrap();
+        check_block_retained(latest, latest).unwrap();
+        // Genesis is never pruned.
+        check_block_retained(0, latest).unwrap();
+        // A young ledger has pruned nothing.
+        check_block_retained(1, AUTHORITY_RETENTION_BLOCKS - 1).unwrap();
+    }
+
+    #[test]
+    fn blocks_below_the_window_are_gone() {
+        let latest = 2 * AUTHORITY_RETENTION_BLOCKS;
+        let earliest = earliest_retained_height(latest);
+        let err = check_block_retained(earliest - 1, latest).unwrap_err();
+        assert_eq!(err, StatusCode::GONE);
+        assert!(err.to_string().contains(&format!("(earliest {earliest})")), "{err}");
+        assert!(err.to_string().contains(&format!("/block/{}/header", earliest - 1)), "{err}");
     }
 }
 
