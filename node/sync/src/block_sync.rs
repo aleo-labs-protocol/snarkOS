@@ -94,6 +94,11 @@ pub const MAX_BLOCKS_BEHIND: u32 = 1; // blocks
 /// (see [`BlockSync::sync_stuck_below_peer_floors`]) should give up and shut down.
 pub const STUCK_SYNC_SHUTDOWN_THRESHOLD: Duration = Duration::from_secs(5 * 60);
 
+/// The number of peers that must have sent locators before their majority can declare the blocks
+/// this node needs pruned (see [`BlockSync::sync_stuck_below_peer_floors`]); the router's minimum
+/// peer count.
+const STUCK_SYNC_MINIMUM_PEERS: usize = 3;
+
 /// Returns the earliest block whose authority data a node at `tip` still retains: nodes prune
 /// authority data older than `AUTHORITY_RETENTION_BLOCKS` blocks, so a node at `tip` retains
 /// `tip - (AUTHORITY_RETENTION_BLOCKS - 1)..=tip`.
@@ -996,8 +1001,6 @@ impl<N: Network> BlockSync<N> {
     ///    `Client::try_issuing_block_requests` which calls this function.
     ///  - Provers do not call this function.
     pub fn prepare_block_requests(&self) -> Vec<BlockRequestBatch<N>> {
-        self.update_stuck_tracking();
-
         let _block_requests_lock = self.prepare_requests_lock.lock();
 
         // Used to print more information when we max out on requests.
@@ -1168,30 +1171,27 @@ impl<N: Network> BlockSync<N> {
     }
 
     /// Returns `true` if the peers corroborate that the blocks this node needs (from `height + 1`)
-    /// have been pruned network-wide: a strict majority of the peers that sent locators are ahead
-    /// of `height`, and every one of those has an assumed pruning floor above `height + 1`.
+    /// have been pruned network-wide: at least `STUCK_SYNC_MINIMUM_PEERS` peers have sent locators,
+    /// a strict majority of them are ahead of `height`, and every one of those has an assumed
+    /// pruning floor above `height + 1`.
     ///
     /// A lone peer fabricating a far-ahead tip is a minority among honest peers at this height, so
     /// it cannot trigger a shutdown.
     fn needed_blocks_pruned_by_peer_majority(&self, height: u32) -> bool {
         let locators = self.locators.read();
         let tips_ahead = locators.values().map(|locators| locators.latest_locator_height()).filter(|&tip| tip > height);
-        tips_ahead.clone().count() * 2 > locators.len()
+        locators.len() >= STUCK_SYNC_MINIMUM_PEERS
+            && tips_ahead.clone().count() * 2 > locators.len()
             && tips_ahead.into_iter().all(|tip| !peer_can_serve_next_block(tip, height))
     }
 
     /// Returns how long sync has made no progress because the peers have pruned the blocks this
     /// node needs, if that is currently the case (see [`Self::needed_blocks_pruned_by_peer_majority`]).
-    pub fn sync_stuck_below_peer_floors(&self) -> Option<Duration> {
-        self.stuck_since.lock().map(|(since, _)| since.elapsed())
-    }
-
-    /// Records whether sync is stuck because the peers have pruned the blocks this node needs
-    /// (see [`Self::sync_stuck_below_peer_floors`]), and since when.
     ///
-    /// The timer measures a stretch without progress: it is armed when the condition first holds,
-    /// restarted if the ledger height advances while it holds, and cleared when it stops holding.
-    fn update_stuck_tracking(&self) {
+    /// The condition is evaluated on every call, so a window armed earlier cannot outlive it. The
+    /// window is armed when the condition first holds, restarted if the ledger height advances while
+    /// it holds, and cleared when it stops holding.
+    pub fn sync_stuck_below_peer_floors(&self) -> Option<Duration> {
         // The majority rule leaves no peer eligible for new requests, so only outstanding requests
         // need a separate check.
         let height = self.ledger.latest_block_height();
@@ -1200,18 +1200,20 @@ impl<N: Network> BlockSync<N> {
         let mut stuck_since = self.stuck_since.lock();
         if !is_stuck {
             *stuck_since = None;
-            return;
+            return None;
         }
-        match *stuck_since {
-            Some((_, armed_height)) if height <= armed_height => {}
-            Some(_) => *stuck_since = Some((Instant::now(), height)),
+        let (since, armed_height) = match *stuck_since {
+            Some((since, armed_height)) if height <= armed_height => (since, armed_height),
+            Some(_) => (Instant::now(), height),
             None => {
                 warn!(
                     "The blocks this node needs are older than what the connected peers retain; block synchronization cannot progress"
                 );
-                *stuck_since = Some((Instant::now(), height));
+                (Instant::now(), height)
             }
-        }
+        };
+        *stuck_since = Some((since, armed_height));
+        Some(since.elapsed())
     }
 
     /// Should only be called by validators when they successfully process a block request.
@@ -2373,7 +2375,6 @@ mod tests {
         sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(1_001 + AUTHORITY_RETENTION_BLOCKS))
             .unwrap();
         assert!(sync.prepare_block_requests().is_empty());
-        assert!(sync.sync_stuck_below_peer_floors().is_some());
     }
 
     #[test]
@@ -2398,23 +2399,40 @@ mod tests {
         assert!(sync.sync_stuck_below_peer_floors().is_none());
     }
 
+    /// Adds `num_peers` peers whose tip is two retention windows ahead of `height`, so that none of
+    /// them can serve block `height + 1`.
+    fn add_pruned_peers(sync: &BlockSync<CurrentNetwork>, height: u32, num_peers: u16) {
+        for id in 1..=num_peers {
+            let locators = sample_block_locators(height + 2 * AUTHORITY_RETENTION_BLOCKS);
+            sync.update_peer_locators(sample_peer_ip(id), &locators).unwrap();
+        }
+    }
+
     /// Tests that a majority of peers ahead that have all pruned the needed blocks arms the stuck
     /// signal, and that without progress the window keeps its start.
     #[test]
     fn test_pruned_peer_majority_arms_stuck_signal() {
         let sync = sample_sync_at_height(1_000);
-        sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(1_000 + 2 * AUTHORITY_RETENTION_BLOCKS))
-            .unwrap();
-        sync.update_peer_locators(sample_peer_ip(2), &sample_block_locators(1_000 + 2 * AUTHORITY_RETENTION_BLOCKS))
-            .unwrap();
+        add_pruned_peers(&sync, 1_000, 2);
         sync.update_peer_locators(sample_peer_ip(3), &sample_block_locators(1_000)).unwrap();
 
         assert!(sync.prepare_block_requests().is_empty());
+        assert!(sync.sync_stuck_below_peer_floors().is_some());
         let armed = *sync.stuck_since.lock();
-        assert!(armed.is_some());
+
+        assert!(sync.sync_stuck_below_peer_floors().is_some());
+        assert_eq!(*sync.stuck_since.lock(), armed);
+    }
+
+    /// Tests that fewer than `STUCK_SYNC_MINIMUM_PEERS` peers cannot arm the stuck signal, however
+    /// far ahead they claim to be.
+    #[test]
+    fn test_too_few_peers_do_not_arm_stuck_signal() {
+        let sync = sample_sync_at_height(1_000);
+        add_pruned_peers(&sync, 1_000, STUCK_SYNC_MINIMUM_PEERS as u16 - 1);
 
         assert!(sync.prepare_block_requests().is_empty());
-        assert_eq!(*sync.stuck_since.lock(), armed);
+        assert!(sync.sync_stuck_below_peer_floors().is_none());
     }
 
     /// Tests that progress while the stuck signal is armed starts a fresh window.
@@ -2422,22 +2440,22 @@ mod tests {
     fn test_progress_resets_stuck_window() {
         let ledger = Arc::new(sample_ledger_service(1_000));
         let sync = BlockSync::<CurrentNetwork>::new(ledger.clone(), ConnectionMode::Router);
-        sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(1_000 + 2 * AUTHORITY_RETENTION_BLOCKS))
-            .unwrap();
+        add_pruned_peers(&sync, 1_000, STUCK_SYNC_MINIMUM_PEERS as u16);
 
-        assert!(sync.prepare_block_requests().is_empty());
+        assert!(sync.sync_stuck_below_peer_floors().is_some());
         let (armed_at, armed_height) = sync.stuck_since.lock().unwrap();
         assert_eq!(armed_height, 1_000);
 
         ledger.advance_to_height(1_001);
-        assert!(sync.prepare_block_requests().is_empty());
+        assert!(sync.sync_stuck_below_peer_floors().is_some());
         let (rearmed_at, rearmed_height) = sync.stuck_since.lock().unwrap();
         assert_eq!(rearmed_height, 1_001);
         assert!(rearmed_at > armed_at);
     }
 
     /// Tests the stuck-signal lifecycle: set while every peer is assumed to have pruned the needed
-    /// blocks, cleared when an eligible peer appears, and never set when there are no peers at all.
+    /// blocks, cleared when an eligible peer appears or the pruned peers leave, and never set when
+    /// there are no peers at all.
     #[test]
     fn test_stuck_signal_lifecycle() {
         let sync = sample_sync_at_height(0);
@@ -2446,16 +2464,24 @@ mod tests {
         assert!(sync.prepare_block_requests().is_empty());
         assert!(sync.sync_stuck_below_peer_floors().is_none());
 
-        // With only a peer that pruned the needed blocks, the stuck signal is set and persists.
-        sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(2 * AUTHORITY_RETENTION_BLOCKS)).unwrap();
+        // With only peers that pruned the needed blocks, the stuck signal is set and persists.
+        add_pruned_peers(&sync, 0, STUCK_SYNC_MINIMUM_PEERS as u16);
         assert!(sync.prepare_block_requests().is_empty());
         assert!(sync.sync_stuck_below_peer_floors().is_some());
-        assert!(sync.prepare_block_requests().is_empty());
         assert!(sync.sync_stuck_below_peer_floors().is_some());
 
         // Once a peer that retains the needed blocks appears, the signal clears.
-        sync.update_peer_locators(sample_peer_ip(2), &sample_block_locators(AUTHORITY_RETENTION_BLOCKS / 10)).unwrap();
+        let retaining_peer = sample_peer_ip(STUCK_SYNC_MINIMUM_PEERS as u16 + 1);
+        sync.update_peer_locators(retaining_peer, &sample_block_locators(AUTHORITY_RETENTION_BLOCKS / 10)).unwrap();
         assert!(!sync.prepare_block_requests().is_empty());
+        assert!(sync.sync_stuck_below_peer_floors().is_none());
+
+        // The signal is also cleared when the pruned peers disconnect, without any new request round.
+        sync.remove_peer(&retaining_peer);
+        assert!(sync.sync_stuck_below_peer_floors().is_some());
+        for id in 1..=STUCK_SYNC_MINIMUM_PEERS as u16 {
+            sync.remove_peer(&sample_peer_ip(id));
+        }
         assert!(sync.sync_stuck_below_peer_floors().is_none());
     }
 

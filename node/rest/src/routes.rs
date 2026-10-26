@@ -405,15 +405,16 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
     /// `start` is inclusive and `end` is exclusive. A height the node does not have is a 404. With
     /// `allow_partial=true`, a range that reaches past the tip is clamped to it instead, so the
     /// array is shorter than the range, and empty when `start` is past the tip. On a node built
-    /// with `prune-authority-data`, a range starting below the retention window is a 410 as a whole.
+    /// with `prune-authority-data`, a range that reaches below the retention window (genesis aside)
+    /// is a 410 as a whole.
     pub(crate) async fn get_blocks(
         State(rest): State<Self>,
         Query(block_range): Query<BlockRange>,
     ) -> Result<ErasedJson, RestError> {
         let latest_height = rest.ledger.latest_height();
         let (start_height, end_height) = check_block_range(block_range, MAX_BLOCK_RANGE, "blocks", latest_height)?;
-        if cfg!(feature = "prune-authority-data") {
-            check_block_retained(start_height, latest_height)?;
+        if cfg!(feature = "prune-authority-data") && end_height > 1 {
+            check_block_retained(start_height.max(1), latest_height)?;
         }
 
         // Prepare a closure for the blocking work.

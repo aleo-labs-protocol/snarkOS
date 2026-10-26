@@ -204,10 +204,10 @@ pub async fn load_blocks<N: Network>(
     let cdn_height = {
         let mut attempts = 0;
         loop {
+            attempts += 1;
             match cdn_height::<BLOCKS_PER_FILE>(&client, base_url).await {
                 Ok(cdn_height) => break cdn_height,
                 Err(error) if attempts < MAXIMUM_HEIGHT_REQUEST_ATTEMPTS && !stoppable.is_stopped() => {
-                    attempts += 1;
                     warn!("{error} - retrying ({attempts} attempt(s) so far)");
                     tokio::time::sleep(Duration::from_secs(attempts as u64 * 2)).await;
                 }
@@ -215,8 +215,13 @@ pub async fn load_blocks<N: Network>(
             }
         }
     };
-    // If the CDN height is less than the start height, return.
+    // If the CDN height is less than the start height, there is nothing to fetch. Without an end
+    // height the caller is syncing to the tip, which is then already reached; otherwise, return.
     if cdn_height < start_height {
+        if end_height.is_none() {
+            debug!("The CDN height ({cdn_height}) is below the start height ({start_height}); nothing to fetch");
+            return Ok(start_height.saturating_sub(1));
+        }
         return Err((
             start_height,
             anyhow!("The given start height ({start_height}) must be less than the CDN height ({cdn_height})"),
