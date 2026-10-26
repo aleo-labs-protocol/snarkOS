@@ -29,6 +29,7 @@ locktick = [
   "snarkvm/locktick"
 ]
 metrics = [ "dep:snarkos-node-metrics", "snarkos-node/metrics" ]
+prune-authority-data = [ "snarkvm/prune-authority-data", "snarkos-node/prune-authority-data" ]
 cuda = [
   "snarkvm/cuda",
   "snarkos-account/cuda",

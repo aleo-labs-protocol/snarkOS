@@ -282,6 +282,8 @@ default = [ "snarkos-cli/metrics", "snarkos-node-metrics", "snarkos-node/metrics
 # The names stay so existing build commands keep resolving.
 history = []
 history-staking-rewards = []
+# Prune authority data (certificates) older than snarkVM's AUTHORITY_RETENTION_BLOCKS.
+prune-authority-data = [ "snarkos-cli/prune-authority-data", "snarkos-node/prune-authority-data" ]
 # Deprecated alias for the metrics feature, which now carries the validator telemetry.
 # Retained so that build commands naming this feature keep resolving.
 telemetry = [ "snarkos-node/metrics" ]

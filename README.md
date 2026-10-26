@@ -595,6 +595,9 @@ telemetry described in [Validator Telemetry Metrics](#321-validator-telemetry-me
 
 * **history** -
   Enables a /history REST endpoint.
+* **prune-authority-data** -
+  Prunes the authority data (certificates) of blocks older than snarkVM's `AUTHORITY_RETENTION_BLOCKS`.
+  Peers assume this retention window regardless of whether the feature is enabled, and fetch older blocks from the CDN.
 * **telemetry** -
   Deprecated alias for **metrics**, kept so that existing build commands keep working.
   Validator telemetry is part of **metrics**.
