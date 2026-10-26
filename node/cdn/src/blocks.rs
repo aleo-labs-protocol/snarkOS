@@ -50,6 +50,11 @@ const CONCURRENT_REQUESTS: u32 = 16;
 const MAXIMUM_PENDING_BLOCKS: u32 = BLOCKS_PER_FILE * CONCURRENT_REQUESTS * 2;
 /// Maximum number of attempts for a request to the CDN.
 const MAXIMUM_REQUEST_ATTEMPTS: u8 = 10;
+/// Maximum number of attempts to fetch the CDN height before giving up on the CDN.
+///
+/// Fewer than for block bundles: this runs before any blocks are fetched, so a node that is close
+/// enough to the tip to sync from peers should not wait long for an unreachable CDN.
+const MAXIMUM_HEIGHT_REQUEST_ATTEMPTS: u8 = 3;
 
 /// The CDN base url.
 pub const CDN_BASE_URL: &str = "https://cdn.provable.com/v0/blocks";
@@ -197,10 +202,20 @@ pub async fn load_blocks<N: Network>(
         }
     };
 
-    // Fetch the CDN height.
-    let cdn_height = match cdn_height::<BLOCKS_PER_FILE>(&client, base_url).await {
-        Ok(cdn_height) => cdn_height,
-        Err(error) => return Err((start_height, error)),
+    // Fetch the CDN height, retrying with a linear backoff.
+    let cdn_height = {
+        let mut attempts = 0;
+        loop {
+            match cdn_height::<BLOCKS_PER_FILE>(&client, base_url).await {
+                Ok(cdn_height) => break cdn_height,
+                Err(error) if attempts < MAXIMUM_HEIGHT_REQUEST_ATTEMPTS && !stoppable.is_stopped() => {
+                    attempts += 1;
+                    warn!("{error} - retrying ({attempts} attempt(s) so far)");
+                    tokio::time::sleep(Duration::from_secs(attempts as u64 * 10)).await;
+                }
+                Err(error) => return Err((start_height, error)),
+            }
+        }
     };
     // If the CDN height is less than the start height, return.
     if cdn_height < start_height {
