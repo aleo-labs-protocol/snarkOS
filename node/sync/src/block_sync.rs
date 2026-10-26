@@ -1186,6 +1186,7 @@ impl<N: Network> BlockSync<N> {
         let locators = self.locators.read();
         let tips_ahead = locators.values().map(|locators| locators.latest_locator_height()).filter(|&tip| tip > height);
         locators.len() >= STUCK_SYNC_MINIMUM_PEERS
+            // A strict majority of the peers that sent locators, written without division so it is exact.
             && tips_ahead.clone().count() * 2 > locators.len()
             && tips_ahead.into_iter().all(|tip| !peer_can_serve(tip, height.saturating_add(1)))
     }
