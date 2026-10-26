@@ -135,18 +135,6 @@ impl<N: Network> Sync<N> {
         }
     }
 
-    /// Waits until the node is synced (has connected peers and is block-synced).
-    /// Returns immediately if already synced.
-    pub async fn wait_for_synced(&self) {
-        self.block_sync.wait_for_synced().await;
-    }
-
-    /// Returns `None` if the node is already synced.
-    /// Otherwise, returns a future that completes once the node becomes synced.
-    pub fn wait_for_synced_if_syncing(&self) -> Option<futures::future::BoxFuture<()>> {
-        self.block_sync.wait_for_synced_if_syncing()
-    }
-
     /// Initializes the sync module and sync the storage with the ledger at bootup.
     pub fn initialize(&self, sync_callback: Option<Arc<dyn SyncCallback<N>>>) -> Result<()> {
         // If a callback was provided, set it.
@@ -323,12 +311,6 @@ impl<N: Network> Sync<N> {
     async fn try_issuing_block_requests(&self) {
         self.block_sync.try_issuing_block_requests(&self.gateway).await;
     }
-
-    /// Test-only method that allows setting the sync height to the given nubmer    
-    #[cfg(test)]
-    pub(crate) fn testing_only_set_sync_height_testing_only(&self, height: u32) {
-        self.block_sync.set_sync_height(height);
-    }
 }
 
 // Callbacks used when receiving messages from the Gateway
@@ -354,15 +336,6 @@ impl<N: Network> Sync<N> {
     /// A peer disconnected.
     fn remove_peer(&self, peer_ip: SocketAddr) {
         self.block_sync.remove_peer(&peer_ip)
-    }
-
-    #[cfg(test)]
-    pub fn testing_only_update_peer_locators_testing_only(
-        &self,
-        peer_ip: SocketAddr,
-        locators: BlockLocators<N>,
-    ) -> Result<()> {
-        self.update_peer_locators(peer_ip, locators)
     }
 }
 
@@ -445,7 +418,7 @@ impl<N: Network> Sync<N> {
                 }
 
                 // Update the validator telemetry.
-                #[cfg(feature = "telemetry")]
+                #[cfg(feature = "metrics")]
                 self.gateway.validator_telemetry().insert_subdag(subdag);
             }
         }
@@ -1091,7 +1064,12 @@ impl<N: Network> Sync<N> {
         let exists = self.pending.get_peers(certificate.id()).unwrap_or_default().contains(&peer_ip);
         // If the peer IP exists, finish the pending request.
         if exists {
-            // TODO: Validate the certificate.
+            // Ensure the certificate is valid before notifying any of the callbacks.
+            // This protects against a malicious invalid certificate response.
+            if let Err(error) = self.storage.check_incoming_certificate(&certificate) {
+                warn!("Skipping invalid certificate {} from '{peer_ip}' - {error}", fmt_id(certificate.id()));
+                return;
+            }
             // Remove the certificate ID from the pending queue.
             self.pending.remove(certificate.id(), Some(certificate));
         }
@@ -1120,7 +1098,12 @@ impl<N: Network> Sync<N> {
 mod tests {
     use super::*;
 
-    use crate::{BFT, helpers::now, ledger_service::CoreLedgerService, storage_service::BFTMemoryService};
+    use crate::{
+        BFT,
+        helpers::now,
+        ledger_service::{CoreLedgerService, MockLedgerService},
+        storage_service::BFTMemoryService,
+    };
 
     use snarkos_account::Account;
     use snarkos_node_network::ConnectionMode;
@@ -1198,7 +1181,7 @@ mod tests {
 
         // Sample 5 rounds of batch certificates starting at the genesis round from a static set of 4 authors.
         let (round_to_certificates_map, committee) = {
-            let addresses = vec![
+            let addresses = [
                 Address::try_from(private_keys[0]).unwrap(),
                 Address::try_from(private_keys[1]).unwrap(),
                 Address::try_from(private_keys[2]).unwrap(),
@@ -1286,7 +1269,7 @@ mod tests {
 
         // Create a list of all certificates.
         let certificates: Vec<_> =
-            round_to_certificates_map.into_iter().flat_map(|(_, certificates)| certificates.into_iter()).collect();
+            round_to_certificates_map.into_values().flat_map(|certificates| certificates.into_iter()).collect();
 
         // insert all certificates into storage.
         for certificate in certificates.iter() {
@@ -1394,6 +1377,7 @@ mod tests {
             false,
             NodeDataDir::new_test(None),
             None,
+            1,
         )
         .unwrap();
 
@@ -1463,6 +1447,7 @@ mod tests {
             false,
             NodeDataDir::new_test(None),
             None,
+            1,
         )
         .unwrap();
 
@@ -1554,6 +1539,7 @@ mod tests {
             false,
             NodeDataDir::new_test(None),
             None,
+            1,
         )
         .unwrap();
 
@@ -1639,6 +1625,7 @@ mod tests {
             false,
             NodeDataDir::new_test(None),
             None,
+            1,
         )
         .unwrap();
 
@@ -1721,6 +1708,7 @@ mod tests {
             false,
             NodeDataDir::new_test(None),
             None,
+            1,
         )
         .unwrap();
 
@@ -1959,6 +1947,84 @@ mod tests {
         }
         // Check that the set of pending certificates is equal to the set of candidate pending certificates.
         assert_eq!(pending_certificates, candidate_pending_certificates);
+
+        Ok(())
+    }
+
+    /// A certificate ID commits to the batch header only, so a malicious peer can answer a
+    /// certificate request with the genuine header paired with signatures that are cryptographically
+    /// valid but do not come from the committee. Such a response still matches the requested ID and
+    /// therefore reaches `finish_certificate_request`.
+    ///
+    /// Ensure it neither clears the pending entry nor fires the callbacks, since `Pending::remove`
+    /// notifies *every* waiting peer; otherwise a single malicious validator could fail the fetch
+    /// for all of them, and the later response from an honest peer would find no pending entry.
+    #[tokio::test]
+    async fn test_finish_certificate_request_rejects_invalid_certificate() -> anyhow::Result<()> {
+        let rng = &mut TestRng::default();
+        let max_gc_rounds = BatchHeader::<CurrentNetwork>::MAX_GC_ROUNDS as u64;
+
+        // Sample a committee of 5 validators, and keep their private keys.
+        let (committee, private_keys) =
+            snarkvm::ledger::committee::test_helpers::sample_committee_and_keys_for_round(0, 5, rng);
+        let committee_id = committee.id();
+
+        // Initialize the ledger, storage, gateway, and sync.
+        let ledger = Arc::new(MockLedgerService::new(committee));
+        let storage = Storage::new(ledger.clone(), Arc::new(BFTMemoryService::new()), max_gc_rounds)?;
+        let account = Account::new(rng)?;
+        let gateway = Gateway::new(
+            account,
+            storage.clone(),
+            ledger.clone(),
+            None,
+            &[],
+            false,
+            NodeDataDir::new_test(None),
+            None,
+        )?;
+        let block_sync = Arc::new(BlockSync::new(ledger.clone(), ConnectionMode::Gateway));
+        let sync = Sync::new(gateway, storage, ledger.clone(), block_sync);
+
+        // Construct a batch header at round 1, authored by a committee member.
+        let batch_header =
+            BatchHeader::new(&private_keys[0], 1, now(), committee_id, Default::default(), IndexSet::new(), rng)?;
+        let certificate_id = batch_header.batch_id();
+
+        // The genuine certificate, endorsed by the rest of the committee.
+        let mut valid_signatures = IndexSet::new();
+        for private_key in private_keys.iter().skip(1) {
+            valid_signatures.insert(private_key.sign(&[certificate_id], rng)?);
+        }
+        let valid_certificate = BatchCertificate::from(batch_header.clone(), valid_signatures)?;
+
+        // The forged certificate: the same header, so the same ID, but endorsed by keys outside the
+        // committee. The signatures are cryptographically valid, so this survives deserialization.
+        let mut invalid_signatures = IndexSet::new();
+        for _ in 0..4 {
+            invalid_signatures.insert(PrivateKey::<CurrentNetwork>::new(rng)?.sign(&[certificate_id], rng)?);
+        }
+        let invalid_certificate = BatchCertificate::from(batch_header, invalid_signatures)?;
+        assert_eq!(invalid_certificate.id(), valid_certificate.id(), "the attack requires a matching ID");
+
+        // Register a pending request for the certificate from a malicious and an honest peer.
+        let malicious_peer: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        let honest_peer: SocketAddr = "127.0.0.1:5678".parse().unwrap();
+        let (malicious_sender, _malicious_receiver) = oneshot::channel();
+        let (honest_sender, honest_receiver) = oneshot::channel();
+        sync.pending.insert(certificate_id, malicious_peer, Some((malicious_sender, true)));
+        sync.pending.insert(certificate_id, honest_peer, Some((honest_sender, true)));
+        assert_eq!(sync.pending.num_callbacks(certificate_id), 2);
+
+        // The forged response must leave the pending entry, and both callbacks, untouched.
+        sync.finish_certificate_request(malicious_peer, invalid_certificate.into());
+        assert!(sync.pending.contains(certificate_id), "the forged response cleared the pending entry");
+        assert_eq!(sync.pending.num_callbacks(certificate_id), 2, "the forged response consumed a callback");
+
+        // The honest response is still able to complete the fetch.
+        sync.finish_certificate_request(honest_peer, valid_certificate.clone().into());
+        assert!(!sync.pending.contains(certificate_id));
+        assert_eq!(honest_receiver.await?, valid_certificate);
 
         Ok(())
     }

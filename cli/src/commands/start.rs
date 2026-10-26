@@ -24,7 +24,7 @@ use snarkos_node::{
     Node,
     bft::MEMORY_POOL_PORT,
     network::{NodeType, bootstrap_peers},
-    rest::DEFAULT_REST_PORT,
+    rest::{DEFAULT_REST_PORT, RestVerificationLimits},
     router::DEFAULT_NODE_PORT,
 };
 use snarkos_utilities::{DevHotswapConfig, NodeDataDir, SignalHandler, jwt_secret_file, node_data};
@@ -45,10 +45,10 @@ use snarkvm::{
     utilities::to_bytes_le,
 };
 
-use aleo_std::{StorageMode, aleo_ledger_dir};
+use aleo_std::{StorageMode, aleo_dir, aleo_ledger_dir};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use base64::prelude::{BASE64_STANDARD, Engine};
-use clap::Parser;
+use clap::{Parser, builder::RangedU64ValueParser};
 use colored::Colorize;
 use core::str::FromStr;
 use indexmap::IndexMap;
@@ -75,6 +75,31 @@ use ureq::http;
 /// Validators should be able to handle at least 1000 concurrent connections, each requiring 2 sockets.
 #[cfg(target_family = "unix")]
 const RECOMMENDED_MIN_NOFILES_LIMIT: u64 = 2048;
+
+/// Default (and maximum) concurrent REST deploy verifications.
+const DEFAULT_NUM_VERIFYING_DEPLOYS: usize =
+    VM::<MainnetV0, ConsensusMemory<MainnetV0>>::MAX_PARALLEL_DEPLOY_VERIFICATIONS;
+/// Default (and maximum) concurrent REST execute verifications.
+const DEFAULT_NUM_VERIFYING_EXECUTIONS: usize =
+    VM::<MainnetV0, ConsensusMemory<MainnetV0>>::MAX_PARALLEL_EXECUTE_VERIFICATIONS;
+/// Default (and maximum) concurrent REST solution verifications.
+const DEFAULT_NUM_VERIFYING_SOLUTIONS: usize = MainnetV0::MAX_SOLUTIONS;
+
+fn num_verifying_deploys_parser() -> RangedU64ValueParser<usize> {
+    RangedU64ValueParser::<usize>::new().range(1..=DEFAULT_NUM_VERIFYING_DEPLOYS as u64)
+}
+
+fn num_verifying_executions_parser() -> RangedU64ValueParser<usize> {
+    RangedU64ValueParser::<usize>::new().range(1..=DEFAULT_NUM_VERIFYING_EXECUTIONS as u64)
+}
+
+fn num_verifying_solutions_parser() -> RangedU64ValueParser<usize> {
+    RangedU64ValueParser::<usize>::new().range(1..=DEFAULT_NUM_VERIFYING_SOLUTIONS as u64)
+}
+
+fn proposal_spent_limit_multiplier_parser() -> RangedU64ValueParser<u64> {
+    RangedU64ValueParser::<u64>::new().range(1..)
+}
 
 // A mapping of `staker_address` to `(validator_address, withdrawal_address, amount)`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -155,6 +180,19 @@ pub struct Start {
     #[clap(long, requires = "validator")]
     pub bft: Option<SocketAddr>,
 
+    /// Multiply the batch spend limit used when this validator builds a proposal.
+    ///
+    /// This argument is only allowed for validator nodes.
+    /// The default of 1 leaves the batch spend limit unchanged.
+    #[clap(
+        long,
+        requires = "validator",
+        conflicts_with_all = ["client", "prover", "bootstrap_client"],
+        default_value_t = 1,
+        value_parser = proposal_spent_limit_multiplier_parser()
+    )]
+    pub proposal_spent_limit_multiplier: u64,
+
     /// Specify the host:port address pairs of the peer(s) to connect to (as a comma-separated list).
     ///
     /// These peers will be set as "trusted", which means the node will not disconnect from them when performing peer rotation.
@@ -184,6 +222,53 @@ pub struct Start {
     /// Specify the requests per second (RPS) rate limit per IP for the REST server
     #[clap(long, default_value_t = 10, group = "rest_flags")]
     pub rest_rps: u32,
+
+    /// Specify the maximum number of concurrent REST deploy transaction verifications.
+    ///
+    /// Defaults to, and cannot exceed, `MAX_PARALLEL_DEPLOY_VERIFICATIONS`.
+    #[clap(
+        long,
+        default_value_t = DEFAULT_NUM_VERIFYING_DEPLOYS,
+        value_parser = num_verifying_deploys_parser(),
+        group = "rest_flags"
+    )]
+    pub num_verifying_deploys: usize,
+
+    /// Specify the maximum number of concurrent REST execute transaction verifications.
+    ///
+    /// Defaults to, and cannot exceed, `MAX_PARALLEL_EXECUTE_VERIFICATIONS`.
+    #[clap(
+        long,
+        default_value_t = DEFAULT_NUM_VERIFYING_EXECUTIONS,
+        value_parser = num_verifying_executions_parser(),
+        group = "rest_flags"
+    )]
+    pub num_verifying_executions: usize,
+
+    /// Specify the maximum number of concurrent REST solution verifications.
+    ///
+    /// Defaults to, and cannot exceed, `MAX_SOLUTIONS`.
+    #[clap(
+        long,
+        default_value_t = DEFAULT_NUM_VERIFYING_SOLUTIONS,
+        value_parser = num_verifying_solutions_parser(),
+        group = "rest_flags"
+    )]
+    pub num_verifying_solutions: usize,
+
+    /// Serve the routes of the removed `history` feature (`/program/{id}/mapping/{name}/{key}/history/{height}`,
+    /// `/staking/rewards/{address}/{height}`, ...) from the Provable historical staking API instead of local
+    /// tables. Takes an optional base URL of that API; by default, the network's own instance is used.
+    #[clap(long, value_name = "URL", num_args = 0..=1, group = "rest_flags", conflicts_with = "history_json")]
+    pub history_compat_mode: Option<Option<String>>,
+
+    /// Write credits.aleo mapping history as JSON while this node finalizes blocks.
+    ///
+    /// Files are `history-{network}/group-{g}/block-{height}/block-{height}-{mapping}.json` beside the
+    /// ledger. A client or a validator can set this flag. `GET /block/{height}/history/{mapping}` reads
+    /// those files.
+    #[clap(long, conflicts_with = "history_compat_mode")]
+    pub history_json: bool,
 
     /// Specify the JWT secret for the REST server (16B, base64-encoded).
     #[clap(long, group = "jwt_flags")]
@@ -301,12 +386,6 @@ pub struct Start {
     /// If the flag is set, the node will attempt to automatically migrate the node data to the new format.
     #[clap(long)]
     pub auto_migrate_node_data: bool,
-
-    /// Paths to Slipstream plugin config files (JSON5). May be repeated for multiple plugins.
-    /// Requires the node to be compiled with --features slipstream-plugins.
-    #[cfg(feature = "slipstream-plugins")]
-    #[clap(long = "slipstream-config", value_name = "PATH", verbatim_doc_comment)]
-    pub slipstream_configs: Vec<PathBuf>,
 }
 
 impl Start {
@@ -378,6 +457,34 @@ impl Start {
             true => Ok(vec![]),
             false => list.split(',').map(resolve_potential_hostnames).collect(),
         }
+    }
+
+    /// Returns the base URL of the historical staking API to serve the `history` routes from, if
+    /// `--history-compat-mode` is set: the given URL, or by default the network's own instance,
+    /// `https://{network}.historical-staking.provable.com` (mainnet and testnet have one; canary
+    /// does not, so it needs an explicit URL).
+    ///
+    /// A `--dev` network has no upstream: its heights and addresses are unrelated to any public
+    /// network's, so the default would serve unrelated data, and an explicit URL is required.
+    fn parse_history_api_url<N: Network>(&self) -> Result<Option<String>> {
+        let Some(url) = &self.history_compat_mode else {
+            return Ok(None);
+        };
+        let url = match url {
+            Some(url) => url.clone(),
+            None if self.dev.is_some() => {
+                bail!("`--history-compat-mode` needs an explicit URL on a development network")
+            }
+            None => format!("https://{}.historical-staking.provable.com", N::SHORT_NAME),
+        };
+        // Fail at startup rather than on every request.
+        let parsed =
+            http::Uri::try_from(&url).with_context(|| format!("Invalid `--history-compat-mode` URL '{url}'"))?;
+        ensure!(
+            parsed.scheme().is_some() && parsed.host().is_some(),
+            "The `--history-compat-mode` URL '{url}' must be absolute, e.g. https://mainnet.historical-staking.provable.com"
+        );
+        Ok(Some(url))
     }
 
     /// Returns the CDN to prefetch initial blocks from, or `None` if fetching from the CDN is disabled.
@@ -746,7 +853,7 @@ impl Start {
 
         // Initialize the storage mode.
         let storage_mode = match &self.ledger_storage {
-            Some(path) => StorageMode::Custom(path.clone()),
+            Some(path) => StorageMode::from(path.clone()),
             None => match self.dev {
                 Some(id) => StorageMode::Development(id),
                 None => StorageMode::Production,
@@ -756,13 +863,13 @@ impl Start {
         // Users may have unintentionally set a custom path for the ledger, but not for the node data.
         // For validators, we make this an errors, so important files like the proposal cache are stored at the location
         // exepcted by the node operator.
-        if self.node_data_storage.is_some() && !matches!(storage_mode, StorageMode::Custom(_)) {
+        if self.node_data_storage.is_some() && !matches!(storage_mode, StorageMode::Custom(..)) {
             if node_type == NodeType::Validator {
                 bail!("Custom path set for `--node-data-storage`, but not for `--ledger-storage`.")
             } else {
                 warn!("Custom path set for `--node-data-storage`, but not for `--ledger-storage`. The latter will use the default path.");   
             }
-        } else if matches!(storage_mode, StorageMode::Custom(_)) && self.node_data_storage.is_none() {
+        } else if matches!(storage_mode, StorageMode::Custom(..)) && self.node_data_storage.is_none() {
             if node_type == NodeType::Validator {
                 bail!("Custom path set for `--ledger-storage`, but not for `--node-data-storage`.");
             } else {
@@ -865,6 +972,20 @@ impl Start {
             dev_num_validators: self.dev_num_validators,
         });
 
+        // JSON history is written while a client or validator finalizes blocks.
+        if self.history_json && !matches!(node_type, NodeType::Client | NodeType::Validator) {
+            bail!("`--history-json` writes JSON history and is only supported on a client or validator");
+        }
+        if self.history_json {
+            println!("Indexing credits.aleo history as JSON");
+        }
+
+        // Determine the historical API to serve the `history` routes from, if in compatibility mode.
+        let history_api_url = self.parse_history_api_url::<N>()?;
+        if let (Some(url), Some(_)) = (&history_api_url, rest_ip) {
+            println!("🕰️  History compatibility mode is enabled; historical routes are served from {url}");
+        }
+
         // TODO(kaimast): start the display earlier and show sync progress.
         if !self.nodisplay && cdn.is_some() {
             println!("🪧 The terminal UI will not start until the node has finished syncing from the CDN. If this step takes too long, consider restarting with `--nodisplay`.");
@@ -873,17 +994,17 @@ impl Start {
         // Register the signal handler.
         let signal_handler = SignalHandler::new(Some(handle));
 
-        // Collect slipstream plugin config paths (empty slice when feature is disabled).
-        #[cfg(feature = "slipstream-plugins")]
-        let slipstream_configs: &[PathBuf] = &self.slipstream_configs;
-        #[cfg(not(feature = "slipstream-plugins"))]
-        let slipstream_configs: &[PathBuf] = &[];
+        let rest_verification_limits = RestVerificationLimits::new::<N, ConsensusMemory<N>>(
+            self.num_verifying_deploys,
+            self.num_verifying_executions,
+            self.num_verifying_solutions,
+        )?;
 
         // Initialize the node.
         let node = match node_type {
-            NodeType::Validator => Node::new_validator(node_ip, self.bft, rest_ip, self.rest_rps, account, &trusted_peers, &trusted_validators, genesis, cdn, storage_mode, node_data_dir, self.trusted_peers_only, self.auto_db_checkpoints.clone(), dev_txs, self.dev, slipstream_configs, dev_hotswap_config, signal_handler.clone()).await,
+            NodeType::Validator => Node::new_validator(node_ip, self.bft, rest_ip, self.rest_rps, rest_verification_limits, history_api_url.clone(), self.history_json, account, &trusted_peers, &trusted_validators, genesis, cdn, storage_mode, node_data_dir, self.trusted_peers_only, self.auto_db_checkpoints.clone(), dev_txs, self.dev, dev_hotswap_config, self.proposal_spent_limit_multiplier, signal_handler.clone()).await,
             NodeType::Prover => Node::new_prover(node_ip, account, &trusted_peers, genesis, node_data_dir, self.trusted_peers_only, self.dev, signal_handler.clone()).await,
-            NodeType::Client => Node::new_client(node_ip, rest_ip, self.rest_rps, account, &trusted_peers, genesis, cdn, storage_mode, node_data_dir, self.trusted_peers_only, self.auto_db_checkpoints.clone(), self.dev, slipstream_configs, signal_handler.clone()).await,
+            NodeType::Client => Node::new_client(node_ip, rest_ip, self.rest_rps, rest_verification_limits, history_api_url.clone(), self.history_json, account, &trusted_peers, genesis, cdn, storage_mode, node_data_dir, self.trusted_peers_only, self.auto_db_checkpoints.clone(), self.dev, signal_handler.clone()).await,
             NodeType::BootstrapClient => Node::new_bootstrap_client(node_ip, account, *genesis.header(), self.dev).await,
         }?;
 
@@ -988,10 +1109,17 @@ impl Start {
         let num_cores = num_cpus::get();
 
         // Initialize the number of tokio worker threads, max tokio blocking threads, and rayon cores.
-        // Note: We intentionally set the number of tokio worker threads and number of rayon cores to be
-        // more than the number of physical cores, because the node is expected to be I/O-bound.
+        //
+        // One worker per core is enough because the async runtime only drives I/O and coordination:
+        // everything CPU-bound is handed to the blocking pool, and from there to rayon. Adding
+        // workers beyond the core count buys no parallelism, it only adds threads for the OS to
+        // schedule against rayon.
+        //
+        // The blocking pool is a safety valve rather than a target, so its cap sits well above the
+        // concurrency the node is expected to reach. Lowering it to around peak demand would turn
+        // bursts into queueing ahead of rayon.
         let (num_tokio_worker_threads, max_tokio_blocking_threads, num_rayon_cores_global) =
-            (2 * num_cores, 512, num_cores);
+            (num_cores, 256, num_cores);
 
         // Set up the rayon thread pool.
         // A custom panic handler is not needed here, as rayon propagates the panic to the calling thread by default (except for `rayon::spawn` which we do not use).
@@ -1125,23 +1253,29 @@ fn load_or_compute_genesis<N: Network>(
         Block::from_bytes_le(&buffer)
     };
 
-    // Construct the file path.
-    let file_path = std::env::temp_dir().join(hash);
+    // Cached dev genesis blocks live in ~/.aleo/dev-genesis, named by this preimage hash.
+    // The CI fleet keeps that directory between runs, keyed by Cargo.lock and this file; see .github/actions/job-home.
+    let cache_dir = aleo_dir().join("dev-genesis");
+    let file_path = cache_dir.join(&hash);
     // Check if the genesis block exists.
     if file_path.exists() {
         // If the block loads successfully, return it.
         if let Ok(block) = load_block(&file_path) {
+            info!("Loaded dev genesis block from {}", file_path.display());
             return Ok(block);
         }
     }
 
     /* Otherwise, compute the genesis block and store it. */
 
+    info!("Computing dev genesis block");
+
     // Initialize a new VM.
     let vm = VM::from(ConsensusStore::<N, ConsensusMemory<N>>::open(StorageMode::new_test(None))?)?;
     // Initialize the genesis block.
     let block = vm.genesis_quorum(&genesis_private_key, committee, public_balances, bonded_balances, rng)?;
     // Write the genesis block to the file.
+    std::fs::create_dir_all(&cache_dir)?;
     std::fs::write(&file_path, block.to_bytes_le()?)?;
     // Return the genesis block.
     Ok(block)
@@ -1440,6 +1574,76 @@ mod tests {
     }
 
     #[test]
+    fn history_compat_mode_flag() {
+        type N = snarkvm::prelude::MainnetV0;
+
+        // Absent.
+        let config = Start::try_parse_from(["snarkos"].iter()).unwrap();
+        assert_eq!(config.parse_history_api_url::<N>().unwrap(), None);
+
+        // Present without a URL: the network's own instance.
+        let config = Start::try_parse_from(["snarkos", "--history-compat-mode"].iter()).unwrap();
+        assert_eq!(
+            config.parse_history_api_url::<N>().unwrap().as_deref(),
+            Some("https://mainnet.historical-staking.provable.com")
+        );
+
+        // Present with a URL.
+        let config =
+            Start::try_parse_from(["snarkos", "--history-compat-mode", "http://127.0.0.1:8080"].iter()).unwrap();
+        assert_eq!(config.parse_history_api_url::<N>().unwrap().as_deref(), Some("http://127.0.0.1:8080"));
+
+        // A URL without a scheme, or an empty one, is refused at startup.
+        for url in ["example.com", ""] {
+            let config = Start::try_parse_from(["snarkos", "--history-compat-mode", url].iter()).unwrap();
+            assert!(config.parse_history_api_url::<N>().is_err(), "{url:?}");
+        }
+
+        // A development network has no default upstream.
+        let config = Start::try_parse_from(["snarkos", "--dev", "0", "--history-compat-mode"].iter()).unwrap();
+        assert!(config.parse_history_api_url::<N>().is_err());
+        let config =
+            Start::try_parse_from(["snarkos", "--dev", "0", "--history-compat-mode", "http://127.0.0.1:8080"].iter())
+                .unwrap();
+        assert_eq!(config.parse_history_api_url::<N>().unwrap().as_deref(), Some("http://127.0.0.1:8080"));
+
+        // The flag belongs to the REST server.
+        assert!(Start::try_parse_from(["snarkos", "--norest", "--history-compat-mode"].iter()).is_err());
+    }
+
+    #[test]
+    fn proposal_spent_limit_multiplier_requires_validator() {
+        assert!(Start::try_parse_from(["snarkos", "--proposal-spent-limit-multiplier", "5"]).is_err());
+        assert!(Start::try_parse_from(["snarkos", "--client", "--proposal-spent-limit-multiplier", "5"]).is_err());
+        assert!(Start::try_parse_from(["snarkos", "--prover", "--proposal-spent-limit-multiplier", "5"]).is_err());
+        assert!(
+            Start::try_parse_from(["snarkos", "--bootstrap-client", "--proposal-spent-limit-multiplier", "5"]).is_err()
+        );
+        assert!(Start::try_parse_from(["snarkos", "--validator", "--proposal-spent-limit-multiplier", "0"]).is_err());
+
+        let config = Start::try_parse_from(["snarkos", "--client"]).unwrap();
+        assert_eq!(config.proposal_spent_limit_multiplier, 1);
+
+        let config = Start::try_parse_from(["snarkos", "--validator"]).unwrap();
+        assert_eq!(config.proposal_spent_limit_multiplier, 1);
+
+        let config =
+            Start::try_parse_from(["snarkos", "--validator", "--proposal-spent-limit-multiplier", "5"]).unwrap();
+        assert_eq!(config.proposal_spent_limit_multiplier, 5);
+    }
+
+    #[test]
+    fn history_json_flag_conflicts_with_compat_mode() {
+        let config = Start::try_parse_from(["snarkos", "--client", "--history-json"].iter()).unwrap();
+        assert!(config.history_json);
+        assert!(config.history_compat_mode.is_none());
+
+        assert!(
+            Start::try_parse_from(["snarkos", "--client", "--history-json", "--history-compat-mode"].iter()).is_err()
+        );
+    }
+
+    #[test]
     fn clap_snarkos_start() {
         let arg_vec = vec![
             "snarkos",
@@ -1546,5 +1750,96 @@ mod tests {
         } else {
             panic!("Unexpected result of clap parsing!");
         }
+    }
+
+    #[test]
+    fn rest_verification_limits_default_to_protocol_maximums() {
+        let config = Start::try_parse_from(["snarkos"].iter()).unwrap();
+        assert_eq!(config.num_verifying_deploys, DEFAULT_NUM_VERIFYING_DEPLOYS);
+        assert_eq!(config.num_verifying_executions, DEFAULT_NUM_VERIFYING_EXECUTIONS);
+        assert_eq!(config.num_verifying_solutions, DEFAULT_NUM_VERIFYING_SOLUTIONS);
+        assert_eq!(
+            RestVerificationLimits::new::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>(
+                config.num_verifying_deploys,
+                config.num_verifying_executions,
+                config.num_verifying_solutions,
+            )
+            .unwrap(),
+            RestVerificationLimits::max::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>()
+        );
+    }
+
+    #[test]
+    fn rest_verification_limits_accept_values_at_or_below_maximums() {
+        let config = Start::try_parse_from(
+            [
+                "snarkos",
+                "--num-verifying-deploys",
+                "1",
+                "--num-verifying-executions",
+                "1",
+                "--num-verifying-solutions",
+                "1",
+            ]
+            .iter(),
+        )
+        .unwrap();
+        assert_eq!(config.num_verifying_deploys, 1);
+        assert_eq!(config.num_verifying_executions, 1);
+        assert_eq!(config.num_verifying_solutions, 1);
+    }
+
+    #[test]
+    fn rest_verification_limits_reject_values_above_maximums() {
+        assert!(
+            Start::try_parse_from(
+                ["snarkos", "--num-verifying-deploys", &(DEFAULT_NUM_VERIFYING_DEPLOYS + 1).to_string()].iter()
+            )
+            .is_err()
+        );
+        assert!(
+            Start::try_parse_from(
+                ["snarkos", "--num-verifying-executions", &(DEFAULT_NUM_VERIFYING_EXECUTIONS + 1).to_string()].iter()
+            )
+            .is_err()
+        );
+        assert!(
+            Start::try_parse_from(
+                ["snarkos", "--num-verifying-solutions", &(DEFAULT_NUM_VERIFYING_SOLUTIONS + 1).to_string()].iter()
+            )
+            .is_err()
+        );
+
+        assert!(
+            RestVerificationLimits::new::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>(
+                DEFAULT_NUM_VERIFYING_DEPLOYS + 1,
+                DEFAULT_NUM_VERIFYING_EXECUTIONS,
+                DEFAULT_NUM_VERIFYING_SOLUTIONS,
+            )
+            .is_err()
+        );
+        assert!(
+            RestVerificationLimits::new::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>(
+                DEFAULT_NUM_VERIFYING_DEPLOYS,
+                DEFAULT_NUM_VERIFYING_EXECUTIONS + 1,
+                DEFAULT_NUM_VERIFYING_SOLUTIONS,
+            )
+            .is_err()
+        );
+        assert!(
+            RestVerificationLimits::new::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>(
+                DEFAULT_NUM_VERIFYING_DEPLOYS,
+                DEFAULT_NUM_VERIFYING_EXECUTIONS,
+                DEFAULT_NUM_VERIFYING_SOLUTIONS + 1,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rest_verification_limits_conflict_with_norest() {
+        assert!(Start::try_parse_from(["snarkos", "--norest", "--num-verifying-deploys", "1"].iter()).is_err());
+        assert!(Start::try_parse_from(["snarkos", "--norest", "--num-verifying-executions", "1"].iter()).is_err());
+        assert!(Start::try_parse_from(["snarkos", "--norest", "--num-verifying-solutions", "1"].iter()).is_err());
     }
 }

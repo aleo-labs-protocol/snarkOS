@@ -17,7 +17,6 @@ use crate::{
     helpers::{PeerPair, PrepareSyncRequest, SyncRequest},
     locators::BlockLocators,
 };
-use futures::future::BoxFuture;
 use snarkos_node_bft_ledger_service::{BeginLedgerUpdateError, LedgerService};
 use snarkos_node_network::ConnectionMode;
 use snarkos_node_router::messages::DataBlocks;
@@ -31,7 +30,6 @@ use snarkvm::{
 };
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use futures::FutureExt;
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
 #[cfg(feature = "locktick")]
@@ -268,9 +266,6 @@ pub struct BlockSync<N: Network> {
     /// Tracks since when the blocks this node needs are below the assumed pruning floor of every
     /// connected peer, i.e. no peer can serve them and sync cannot progress.
     unservable_since: Mutex<Option<Instant>>,
-
-    /// Condition variable that wakes up waiting tasks when the node is synced.
-    synced_notify: Notify,
 }
 
 impl<N: Network> BlockSync<N> {
@@ -293,7 +288,6 @@ impl<N: Network> BlockSync<N> {
             prepare_requests_lock: Default::default(),
             failed_requests: Default::default(),
             last_response_at: Default::default(),
-            synced_notify: Default::default(),
             unservable_since: Default::default(),
         }
     }
@@ -323,56 +317,6 @@ impl<N: Network> BlockSync<N> {
     #[inline]
     pub fn is_block_synced(&self) -> bool {
         self.sync_state.read().is_block_synced()
-    }
-
-    /// This futures blocks until the node is synced.
-    ///
-    /// # Concurrency
-    /// Multiple tasks can wait on this at the same time safely.
-    pub async fn wait_for_synced(&self) {
-        loop {
-            let mut fut = std::pin::pin!(self.synced_notify.notified());
-
-            {
-                let sync_state = self.sync_state.read();
-                if sync_state.is_block_synced() {
-                    return;
-                }
-
-                // Register this task as waiting before dropping the lock.
-                fut.as_mut().enable();
-            }
-
-            fut.await;
-        }
-    }
-
-    /// Similar as [`Self::wait_for_synced`] but returns `None` if the node is already synced.
-    /// Otherwise, it will return a future that behaves like `wait_for_synced`.
-    ///
-    /// # Concurrency
-    /// * This method is atomic, unlike calling `is_synced` and `wait_for_synced` sequentially.
-    /// * Multiple tasks can wait on this at the same time safely.
-    pub fn wait_for_synced_if_syncing(&self) -> Option<BoxFuture<()>> {
-        let mut notified = Box::pin(self.synced_notify.notified());
-
-        {
-            let sync_state = self.sync_state.read();
-            if sync_state.is_block_synced() {
-                return None;
-            }
-
-            // Register this task as waiting before dropping the lock.
-            notified.as_mut().enable();
-        }
-
-        Some(
-            async move {
-                notified.await;
-                self.wait_for_synced().await;
-            }
-            .boxed(),
-        )
     }
 
     /// Returns the number of blocks the node is behind the greatest peer height,
@@ -505,11 +449,6 @@ impl<N: Network> BlockSync<N> {
         BlockLocators::new(recents, checkpoints)
     }
 
-    /// Returns true if there are pending responses to block requests that need to be processed.
-    pub fn has_pending_responses(&self) -> bool {
-        self.requests.read().iter().filter(|(_, req)| req.response.is_some() && req.sync_ips().is_empty()).count() > 0
-    }
-
     /// Send a batch of block requests.
     pub async fn send_block_requests<C: CommunicationService>(
         &self,
@@ -626,7 +565,8 @@ impl<N: Network> BlockSync<N> {
     pub async fn try_issuing_block_requests<C: CommunicationService>(&self, communication: &C) {
         self.handle_block_request_timeouts();
 
-        if self.is_block_synced() {
+        // Clients fetch the tip even while within the validator sync tolerance.
+        if self.connection_mode == ConnectionMode::Gateway && self.is_block_synced() {
             trace!("Node is already synced. Will not issue new block requests");
             return;
         }
@@ -978,21 +918,12 @@ impl<N: Network> BlockSync<N> {
             }
         }
 
-        // -- Finally, update sync state and notify the sync loop about the change. --
-        let is_synced = if let Some(greatest_peer_height) =
-            self.locators.read().values().map(|l| l.latest_locator_height()).max()
-        {
+        // -- Finally, update sync state. --
+        if let Some(greatest_peer_height) = self.locators.read().values().map(|l| l.latest_locator_height()).max() {
             let mut sync_state = self.sync_state.write();
             sync_state.set_greatest_peer_height(greatest_peer_height);
-            sync_state.is_block_synced()
         } else {
             error!("Got new block locators but greatest peer height is zero.");
-            false
-        };
-
-        // For the unlikely case a peer's height gets lowered.
-        if is_synced {
-            self.synced_notify.notify_waiters();
         }
 
         // Even if the greatest peer height did not change, we still received new block locators
@@ -1020,7 +951,7 @@ impl<N: Network> BlockSync<N> {
         // Remove all block requests to the peer.
         self.remove_block_requests_to_peer(peer_ip);
 
-        let synced = {
+        {
             // Do not lock sync state and locators at the same time.
             let max_height = self.locators.read().values().map(|l| l.latest_locator_height()).max();
             let mut sync_state = self.sync_state.write();
@@ -1032,13 +963,6 @@ impl<N: Network> BlockSync<N> {
                 // There are no more peers left.
                 sync_state.clear_greatest_peer_height();
             }
-
-            sync_state.is_block_synced()
-        };
-
-        // For the case where the maximum peer height gets lowered.
-        if synced {
-            self.synced_notify.notify_waiters();
         }
 
         // Notify the sync loop that something changed.
@@ -1315,18 +1239,14 @@ impl<N: Network> BlockSync<N> {
     /// This is a no-op if `new_height` is equal or less to the current sync height.
     pub fn set_sync_height(&self, new_height: u32) {
         // Scope state lock to avoid locking state and metrics at the same time.
-        let (synced, fully_synced) = {
+        let fully_synced = {
             let mut state = self.sync_state.write();
             state.set_sync_height(new_height);
-            (state.is_block_synced(), !state.can_issue_new_block_requests())
+            !state.can_issue_new_block_requests()
         };
 
         if fully_synced {
             self.metrics.mark_fully_synced();
-        }
-
-        if synced {
-            self.synced_notify.notify_waiters();
         }
     }
 
@@ -1871,7 +1791,10 @@ mod tests {
     #[cfg(not(feature = "locktick"))]
     use parking_lot::RwLock;
     use rand::RngExt;
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::{
+        collections::BTreeSet,
+        net::{IpAddr, Ipv4Addr},
+    };
 
     type CurrentNetwork = snarkvm::prelude::MainnetV0;
 
@@ -1925,7 +1848,6 @@ mod tests {
             common_ancestors: RwLock::new(sync.common_ancestors.read().clone()),
             requests: RwLock::new(sync.requests.read().clone()),
             sync_state: RwLock::new(sync.sync_state.read().clone()),
-            synced_notify: Notify::new(),
             advance_with_sync_blocks_lock: Default::default(),
             metrics: Default::default(),
             prepare_requests_lock: Default::default(),
@@ -2232,20 +2154,35 @@ mod tests {
         sync.insert_block_request(10, (None, None, indexset![sample_peer_ip(1)])).unwrap();
     }
 
+    /// Returns the peer heights for `test_update_peer_locators`, in ascending order.
+    ///
+    /// These are every 17th height below `5 * NUM_RECENT_BLOCKS`, plus the heights next to each of `boundaries`.
+    /// Some pairs of them are `NUM_RECENT_BLOCKS - 1`, `NUM_RECENT_BLOCKS` and `NUM_RECENT_BLOCKS + 1` apart,
+    /// both near genesis and across a checkpoint.
+    fn sample_peer_locator_heights() -> Vec<u32> {
+        let recent = NUM_RECENT_BLOCKS as u32;
+        let mut heights: BTreeSet<u32> = (0..5 * recent).step_by(17).collect();
+        let boundaries =
+            [recent, 2 * recent, CHECKPOINT_INTERVAL, CHECKPOINT_INTERVAL + recent, 2 * CHECKPOINT_INTERVAL];
+        for boundary in boundaries {
+            heights.extend(boundary - 2..=boundary + 1);
+        }
+        heights.into_iter().collect()
+    }
+
     #[test]
     fn test_update_peer_locators() {
         let sync = sample_sync_at_height(0);
+        let heights = sample_peer_locator_heights();
 
         // Test 2 peers.
         let peer1_ip = sample_peer_ip(1);
-        for peer1_height in 0..500u32 {
+        for &peer1_height in &heights {
             sync.update_peer_locators(peer1_ip, &sample_block_locators(peer1_height)).unwrap();
             assert_eq!(sync.get_peer_height(&peer1_ip), Some(peer1_height));
 
             let peer2_ip = sample_peer_ip(2);
-            for peer2_height in 0..500u32 {
-                println!("Testing peer 1 height at {peer1_height} and peer 2 height at {peer2_height}");
-
+            for &peer2_height in &heights {
                 sync.update_peer_locators(peer2_ip, &sample_block_locators(peer2_height)).unwrap();
                 assert_eq!(sync.get_peer_height(&peer2_ip), Some(peer2_height));
 

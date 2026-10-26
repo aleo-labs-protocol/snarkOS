@@ -19,6 +19,7 @@ use crate::{
     Connection,
     ConnectionSide,
     P2P,
+    Stats,
     Tcp,
     connections::DisconnectOrigin,
     protocols::{DisconnectOnDrop, ProtocolHandler, ReturnableConnection},
@@ -30,6 +31,7 @@ use futures_util::StreamExt;
 use std::{
     io,
     net::SocketAddr,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::{
@@ -45,8 +47,8 @@ use tracing::*;
 ///
 /// Each inbound message is isolated by the user-supplied [`Reading::Codec`], creating a [`Reading::Message`],
 /// which is immediately queued (with a [`Reading::MESSAGE_QUEUE_DEPTH`] limit) to be processed by
-/// [`Reading::process_message`]. The configured fatal IO errors result in an immediate disconnect
-/// (in order to e.g. avoid accidentally reading "borked" messages).
+/// [`Reading::process_message`]. Errors result in an immediate disconnect (in order to e.g. avoid
+/// accidentally reading "borked" messages).
 #[async_trait]
 pub trait Reading: P2P
 where
@@ -161,7 +163,6 @@ impl<R: Reading> ReadingInternal for R {
             while let Some((msg, _guard)) = inbound_message_receiver.recv().await {
                 if let Err(e) = self_clone.process_message(addr, msg).await {
                     error!(parent: &conn_span, "can't process a message: {e}");
-                    node.known_peers().register_failure(addr.ip());
                 }
                 // _guard drops here, after process_message completes
             }
@@ -203,7 +204,6 @@ impl<R: Reading> ReadingInternal for R {
                     Some(Ok(msg)) => {
                         // send the message for further processing
                         if let Err(e) = inbound_message_sender.try_send((msg, QueuedMessageGuard::new())) {
-                            node.stats().register_failure();
                             match e {
                                 mpsc::error::TrySendError::Full(_) => {
                                     // avoid log flooding
@@ -221,15 +221,10 @@ impl<R: Reading> ReadingInternal for R {
                             warn_about_dropped_messages(&conn_span, &mut dropped_count, &mut last_drop_log);
                             debug!(parent: &conn_span, "the inbound queue is no longer saturated");
                         }
-                        #[cfg(feature = "metrics")]
-                        metrics::increment_gauge(metrics::tcp::TCP_TASKS, 1f64);
                     }
                     Some(Err(e)) => {
                         error!(parent: &conn_span, "can't read: {e}");
-                        node.known_peers().register_failure(addr.ip());
-                        if node.config().fatal_io_errors.contains(&e.kind()) {
-                            break;
-                        }
+                        break;
                     }
                     None => break, // end of stream
                 }
@@ -249,7 +244,13 @@ impl<R: Reading> ReadingInternal for R {
         framed: FramedRead<T, Self::Codec>,
         conn: &Connection,
     ) -> FramedRead<T, CountingCodec<Self::Codec>> {
-        framed.map_decoder(|codec| CountingCodec { codec, node: self.tcp().clone(), acc: 0, span: conn.span().clone() })
+        framed.map_decoder(|codec| CountingCodec {
+            codec,
+            node: self.tcp().clone(),
+            stats: Arc::clone(conn.stats()),
+            acc: 0,
+            span: conn.span().clone(),
+        })
     }
 }
 
@@ -257,6 +258,7 @@ impl<R: Reading> ReadingInternal for R {
 struct CountingCodec<D: Decoder> {
     codec: D,
     node: Tcp,
+    stats: Arc<Stats>,
     acc: usize,
     span: Span,
 }
@@ -279,7 +281,7 @@ impl<D: Decoder> Decoder for CountingCodec<D> {
 
             if ret.is_some() {
                 self.acc = 0;
-                // self.node.known_peers().register_received_message(self.addr.ip(), read_len);
+                self.stats.register_received_message(read_len);
                 self.node.stats().register_received_message(read_len);
             } else {
                 self.acc = read_len;
@@ -290,16 +292,19 @@ impl<D: Decoder> Decoder for CountingCodec<D> {
     }
 }
 
-/// Decrements the TCP_TASKS gauge on drop. Paired with each queued message so the gauge stays
-/// balanced whether the message is processed normally or discarded when the inbound channel is
-/// dropped (e.g. on connection abort). The caller must hold this guard until processing is
-/// complete; dropping it earlier will decrement the gauge prematurely.
+/// Maintains the [`metrics::tcp::QUEUED_INBOUND_MESSAGES`] gauge. Paired with each queued message
+/// so the gauge stays balanced whether the message is processed normally or discarded when the
+/// inbound channel is dropped (e.g. on connection abort). The caller must hold this guard until
+/// processing is complete; dropping it earlier will decrement the gauge prematurely.
+///
+/// This is the only thing that may touch the gauge: a second increment anywhere else makes it
+/// drift upward forever, since nothing else decrements it.
 struct QueuedMessageGuard;
 
 impl QueuedMessageGuard {
     fn new() -> Self {
         #[cfg(feature = "metrics")]
-        metrics::increment_gauge(metrics::tcp::TCP_TASKS, 1f64);
+        metrics::increment_gauge(metrics::tcp::QUEUED_INBOUND_MESSAGES, 1f64);
         Self
     }
 }
@@ -307,7 +312,7 @@ impl QueuedMessageGuard {
 impl Drop for QueuedMessageGuard {
     fn drop(&mut self) {
         #[cfg(feature = "metrics")]
-        metrics::decrement_gauge(metrics::tcp::TCP_TASKS, 1f64);
+        metrics::decrement_gauge(metrics::tcp::QUEUED_INBOUND_MESSAGES, 1f64);
     }
 }
 

@@ -40,32 +40,3 @@ pub trait CommunicationService: Send + Sync {
     /// If no peer with the given IP exists, this function returns None.
     async fn send(&self, peer_ip: SocketAddr, message: Self::Message) -> Option<oneshot::Receiver<io::Result<()>>>;
 }
-
-#[cfg(any(test, feature = "test-helpers"))]
-pub mod test_helpers {
-    use super::*;
-
-    #[derive(Clone)]
-    pub struct DummyMessage {}
-
-    /// A communication service that does not do anything (for testing).
-    #[derive(Default)]
-    pub struct DummyCommunicationService;
-
-    #[async_trait]
-    impl CommunicationService for DummyCommunicationService {
-        type Message = DummyMessage;
-
-        fn prepare_block_request(_start: u32, _end: u32) -> Self::Message {
-            Self::Message {}
-        }
-
-        async fn send(
-            &self,
-            _peer_ip: SocketAddr,
-            _message: Self::Message,
-        ) -> Option<oneshot::Receiver<io::Result<()>>> {
-            None
-        }
-    }
-}

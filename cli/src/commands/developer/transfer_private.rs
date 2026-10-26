@@ -13,20 +13,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{DEFAULT_ENDPOINT, Developer};
-use crate::{
-    commands::StoreFormat,
-    helpers::args::{parse_private_key, prepare_endpoint},
-};
+use super::{DEFAULT_ENDPOINT, Developer, ParsedQuery};
+use crate::{commands::StoreFormat, helpers::args::parse_private_key};
 use snarkvm::{
     console::network::Network,
-    ledger::store::helpers::memory::BlockMemory,
     prelude::{
         Address,
         Locator,
         VM,
         Value,
-        query::Query,
         store::{ConsensusStore, helpers::memory::ConsensusMemory},
     },
 };
@@ -63,8 +58,10 @@ pub struct TransferPrivate {
     #[clap(long, group = "key")]
     dev_key: Option<u16>,
     /// The endpoint to query node state from and broadcast to (if set to broadcast).
+    ///
+    /// The given value may also be a JSON serialized `StaticQuery` struct.
     #[clap(short, long, default_value=DEFAULT_ENDPOINT)]
-    endpoint: Uri,
+    endpoint: String,
     /// The priority fee in microcredits.
     #[clap(long)]
     priority_fee: u64,
@@ -102,10 +99,7 @@ impl Drop for TransferPrivate {
 impl TransferPrivate {
     /// Creates an Aleo transfer with the provided inputs.
     pub fn parse<N: Network>(self) -> Result<String> {
-        let endpoint = prepare_endpoint(self.endpoint.clone())?;
-
-        // Specify the query
-        let query = Query::<N, BlockMemory<N>>::from(endpoint.clone());
+        let ParsedQuery { query, endpoint } = Developer::parse_query::<N>(&self.endpoint)?;
 
         // Retrieve the recipient.
         let recipient = Address::<N>::from_str(&self.recipient)?;
@@ -153,7 +147,7 @@ impl TransferPrivate {
 
         // Determine if the transaction should be broadcast, stored, or displayed to the user.
         Developer::handle_transaction(
-            &endpoint,
+            endpoint.as_ref(),
             &self.broadcast,
             self.dry_run,
             &self.store,
@@ -163,5 +157,50 @@ impl TransferPrivate {
             transaction,
             locator.to_string(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::{CLI, Command, DeveloperCommand};
+
+    use anyhow::bail;
+
+    #[test]
+    fn clap_snarkos_transfer_private_static_query() -> Result<()> {
+        let query = r#"{"state_root": "sr1dz06ur5spdgzkguh4pr42mvft6u3nwsg5drh9rdja9v8jpcz3czsls9geg", "height": 14}"#;
+        let arg_vec = &[
+            "snarkos",
+            "developer",
+            "transfer-private",
+            "--private-key",
+            "PRIVATE_KEY",
+            "--input-record",
+            "RECORD",
+            "--recipient",
+            "RECIPIENT",
+            "--amount",
+            "1",
+            "--priority-fee",
+            "0",
+            "--fee-record",
+            "FEE_RECORD",
+            "--endpoint",
+            query,
+            "--dry-run",
+        ];
+        let cli = CLI::try_parse_from(arg_vec)?;
+
+        let Command::Developer(developer) = cli.command else {
+            bail!("Unexpected result of clap parsing!");
+        };
+        let DeveloperCommand::TransferPrivate(transfer) = developer.command else {
+            bail!("Unexpected result of clap parsing!");
+        };
+
+        assert_eq!(transfer.endpoint, query);
+
+        Ok(())
     }
 }

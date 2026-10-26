@@ -225,3 +225,198 @@ impl SyncState {
         metrics::gauge(metrics::bft::IS_SYNCED, self.status == SyncStatus::Synced);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A peer height that is far enough ahead to put the node out of sync.
+    const WAY_AHEAD: u32 = 1_000;
+
+    #[test]
+    fn a_fresh_state_is_synced_so_a_new_chain_can_produce_blocks() {
+        let state = SyncState::default();
+
+        // This default is load-bearing: a validator on a newly created chain has no peer locators,
+        // and would never propose a certificate if it started out unsynced.
+        assert_eq!(state.status, SyncStatus::Synced);
+        assert!(state.is_block_synced());
+        assert_eq!(state.get_sync_height(), 0);
+        assert_eq!(state.get_greatest_peer_height(), None);
+        assert_eq!(state.get_bft_sync_mode(), None);
+    }
+
+    #[test]
+    fn new_with_height_starts_synced_at_the_given_height() {
+        let state = SyncState::new_with_height(42);
+
+        assert_eq!(state.get_sync_height(), 42);
+        assert!(state.is_block_synced());
+        assert_eq!(state.get_greatest_peer_height(), None);
+    }
+
+    #[test]
+    fn num_blocks_behind_is_unknown_until_a_peer_locator_arrives() {
+        let mut state = SyncState::new_with_height(10);
+        assert_eq!(state.num_blocks_behind(), None);
+
+        state.set_greatest_peer_height(15);
+        assert_eq!(state.num_blocks_behind(), Some(5));
+    }
+
+    #[test]
+    fn num_blocks_behind_saturates_when_the_node_leads_every_peer() {
+        let mut state = SyncState::new_with_height(100);
+        state.set_greatest_peer_height(90);
+
+        // The node is ahead, not behind by a wrapped-around amount.
+        assert_eq!(state.num_blocks_behind(), Some(0));
+        assert!(state.is_block_synced());
+    }
+
+    #[test]
+    fn the_sync_height_only_moves_forward() {
+        let mut state = SyncState::new_with_height(10);
+
+        state.set_sync_height(20);
+        assert_eq!(state.get_sync_height(), 20);
+
+        // Equal and lower values are ignored; the sync height must not rewind when blocks are
+        // still being committed.
+        state.set_sync_height(20);
+        assert_eq!(state.get_sync_height(), 20);
+        state.set_sync_height(5);
+        assert_eq!(state.get_sync_height(), 20);
+    }
+
+    #[test]
+    fn the_greatest_peer_height_may_move_backwards() {
+        let mut state = SyncState::default();
+
+        state.set_greatest_peer_height(100);
+        assert_eq!(state.get_greatest_peer_height(), Some(100));
+
+        // Unlike the sync height, this one is not monotonic: it tracks the peers we can currently
+        // see, so it must be able to fall when the tallest peer disconnects.
+        state.set_greatest_peer_height(50);
+        assert_eq!(state.get_greatest_peer_height(), Some(50));
+    }
+
+    #[test]
+    fn the_status_flips_at_the_max_blocks_behind_boundary() {
+        let mut state = SyncState::default();
+
+        // Exactly `MAX_BLOCKS_BEHIND` behind still counts as synced...
+        state.set_greatest_peer_height(MAX_BLOCKS_BEHIND);
+        assert_eq!(state.num_blocks_behind(), Some(MAX_BLOCKS_BEHIND));
+        assert_eq!(state.status, SyncStatus::Synced);
+        assert!(state.is_block_synced());
+
+        // ...one block further behind does not.
+        state.set_greatest_peer_height(MAX_BLOCKS_BEHIND + 1);
+        assert_eq!(state.status, SyncStatus::Syncing);
+        assert!(!state.is_block_synced());
+    }
+
+    #[test]
+    fn catching_up_with_the_network_returns_the_state_to_synced() {
+        let mut state = SyncState::default();
+
+        state.set_greatest_peer_height(WAY_AHEAD);
+        assert_eq!(state.status, SyncStatus::Syncing);
+
+        state.set_sync_height(WAY_AHEAD);
+        assert_eq!(state.status, SyncStatus::Synced);
+        assert!(state.is_block_synced());
+    }
+
+    #[test]
+    fn losing_every_peer_marks_the_node_unsynced() {
+        let mut state = SyncState::default();
+        state.set_greatest_peer_height(WAY_AHEAD);
+        state.set_sync_height(WAY_AHEAD);
+        assert_eq!(state.status, SyncStatus::Synced);
+
+        state.clear_greatest_peer_height();
+
+        // With no peer height there is nothing to compare against, which is distinct from being
+        // caught up.
+        assert_eq!(state.get_greatest_peer_height(), None);
+        assert_eq!(state.num_blocks_behind(), None);
+        assert_eq!(state.status, SyncStatus::Unsynced);
+        assert!(!state.is_block_synced());
+    }
+
+    #[test]
+    fn clearing_an_absent_peer_height_leaves_the_state_alone() {
+        let mut state = SyncState::default();
+
+        // The early return matters: without it, a node that never saw a peer would be knocked out
+        // of its initial `Synced` state by a routine disconnect sweep.
+        state.clear_greatest_peer_height();
+
+        assert_eq!(state.status, SyncStatus::Synced);
+        assert!(state.is_block_synced());
+    }
+
+    #[test]
+    fn no_block_requests_are_issued_before_any_peer_locator_arrives() {
+        let state = SyncState::new_with_height(10);
+
+        assert!(!state.can_issue_new_block_requests());
+    }
+
+    #[test]
+    fn block_requests_are_issued_while_any_blocks_remain() {
+        let mut state = SyncState::default();
+        state.set_greatest_peer_height(WAY_AHEAD);
+
+        assert!(state.can_issue_new_block_requests());
+    }
+
+    #[test]
+    fn block_requests_stop_once_the_node_draws_level() {
+        let mut state = SyncState::default();
+        state.set_greatest_peer_height(WAY_AHEAD);
+        state.set_sync_height(WAY_AHEAD);
+
+        assert!(!state.can_issue_new_block_requests());
+    }
+
+    #[test]
+    fn a_synced_node_still_requests_the_blocks_within_the_tolerance() {
+        let mut state = SyncState::default();
+        state.set_greatest_peer_height(MAX_BLOCKS_BEHIND);
+
+        // Being "synced" is a tolerance, not a guarantee of equality: the node reports itself
+        // synced while still fetching the last block or so.
+        assert!(state.is_block_synced());
+        assert!(state.can_issue_new_block_requests());
+    }
+
+    #[test]
+    fn the_bft_sync_mode_reports_the_previous_value_when_set() {
+        let mut state = SyncState::default();
+
+        // `None` distinguishes nodes without a BFT layer from those that have not chosen a mode.
+        assert_eq!(state.set_bft_sync_mode(BftSyncMode::Fast), None);
+        assert_eq!(state.get_bft_sync_mode(), Some(BftSyncMode::Fast));
+
+        assert_eq!(state.set_bft_sync_mode(BftSyncMode::Dag), Some(BftSyncMode::Fast));
+        assert_eq!(state.get_bft_sync_mode(), Some(BftSyncMode::Dag));
+    }
+
+    #[test]
+    fn the_bft_sync_mode_is_independent_of_the_sync_status() {
+        let mut state = SyncState::default();
+        state.set_bft_sync_mode(BftSyncMode::Dag);
+
+        state.set_greatest_peer_height(WAY_AHEAD);
+        assert_eq!(state.status, SyncStatus::Syncing);
+        assert_eq!(state.get_bft_sync_mode(), Some(BftSyncMode::Dag));
+
+        state.clear_greatest_peer_height();
+        assert_eq!(state.status, SyncStatus::Unsynced);
+        assert_eq!(state.get_bft_sync_mode(), Some(BftSyncMode::Dag));
+    }
+}

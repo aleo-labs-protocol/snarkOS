@@ -60,7 +60,6 @@ use snarkvm::{
 use aleo_std::StorageMode;
 use anyhow::{Context, Result, bail};
 use cfg_if::cfg_if;
-use colored::Colorize;
 use indexmap::IndexMap;
 #[cfg(feature = "locktick")]
 use locktick::parking_lot::{Mutex, RwLock};
@@ -143,6 +142,7 @@ impl<N: Network> Consensus<N> {
         node_data_dir: NodeDataDir,
         ping: Arc<Ping<N>>,
         dev: Option<u16>,
+        proposal_spent_limit_multiplier: u64,
     ) -> Result<Self> {
         // Initialize the primary channels.
         let (primary_sender, primary_receiver) = init_primary_channels::<N>();
@@ -162,6 +162,7 @@ impl<N: Network> Consensus<N> {
             trusted_peers_only,
             node_data_dir,
             dev,
+            proposal_spent_limit_multiplier,
         )?;
         // Initialize the consensus channels.
         let (consensus_sender, consensus_receiver) = init_consensus_channels();
@@ -317,19 +318,19 @@ impl<N: Network> Consensus<N> {
             }
             // Check if the solution already exists in the ledger.
             if self.ledger.contains_transmission(&TransmissionID::Solution(solution_id, checksum))? {
-                bail!("Solution '{}' exists in the ledger {}", fmt_id(solution_id), "(skipping)".dimmed());
+                bail!("Solution '{}' exists in the ledger (skipping)", fmt_id(solution_id));
+            }
+            // Add the solution to the memory pool.
+            if self.solutions_queue.lock().put(solution_id, solution).is_some() {
+                bail!("Solution '{}' exists in the memory pool", fmt_id(solution_id));
             }
             #[cfg(feature = "metrics")]
             {
                 metrics::increment_gauge(metrics::consensus::UNCONFIRMED_SOLUTIONS, 1f64);
                 let timestamp = snarkos_node_bft::helpers::now();
-                self.transmissions_tracker.lock().insert(TransmissionID::Solution(solution.id(), checksum), timestamp);
+                self.transmissions_tracker.lock().insert(TransmissionID::Solution(solution_id, checksum), timestamp);
             }
-            // Add the solution to the memory pool.
             trace!("Received unconfirmed solution '{}' in the queue", fmt_id(solution_id));
-            if self.solutions_queue.lock().put(solution_id, solution).is_some() {
-                bail!("Solution '{}' exists in the memory pool", fmt_id(solution_id));
-            }
         }
 
         // Try to process the unconfirmed solutions in the memory pool.
@@ -398,7 +399,7 @@ impl<N: Network> Consensus<N> {
 
             // Check that the transaction is not a fee transaction.
             if transaction.is_fee() {
-                bail!("Transaction '{}' is a fee transaction {}", fmt_id(transaction_id), "(skipping)".dimmed());
+                bail!("Transaction '{}' is a fee transaction (skipping)", fmt_id(transaction_id));
             }
             // Check if the transaction was recently seen.
             if self.seen_transactions.lock().put(transaction_id, ()).is_some() {
@@ -407,24 +408,24 @@ impl<N: Network> Consensus<N> {
             }
             // Check if the transaction already exists in the ledger.
             if self.ledger.contains_transmission(&TransmissionID::Transaction(transaction_id, checksum))? {
-                bail!("Transaction '{}' exists in the ledger {}", fmt_id(transaction_id), "(skipping)".dimmed());
+                bail!("Transaction '{}' exists in the ledger (skipping)", fmt_id(transaction_id));
             }
             // Check that the transaction is not in the mempool.
             if self.contains_transaction(&transaction_id) {
                 bail!("Transaction '{}' exists in the memory pool", fmt_id(transaction_id));
             }
+            // Add the transaction to the memory pool.
+            let priority_fee = transaction.priority_fee_amount()?;
+            self.transactions_queue.write().insert(transaction_id, transaction, priority_fee)?;
             #[cfg(feature = "metrics")]
             {
                 metrics::increment_gauge(metrics::consensus::UNCONFIRMED_TRANSACTIONS, 1f64);
                 let timestamp = snarkos_node_bft::helpers::now();
                 self.transmissions_tracker
                     .lock()
-                    .insert(TransmissionID::Transaction(transaction.id(), checksum), timestamp);
+                    .insert(TransmissionID::Transaction(transaction_id, checksum), timestamp);
             }
-            // Add the transaction to the memory pool.
             trace!("Received unconfirmed transaction '{}' in the queue", fmt_id(transaction_id));
-            let priority_fee = transaction.priority_fee_amount()?;
-            self.transactions_queue.write().insert(transaction_id, transaction, priority_fee)?;
         }
 
         // Try to process the unconfirmed transactions in the memory pool.
@@ -453,14 +454,34 @@ impl<N: Network> Consensus<N> {
             // Note: interleaving ensures we will never have consecutive invalid deployments blocking the queue.
             let selector_iter = (0..num_deployments).map(|_| true).interleave((0..num_executions).map(|_| false));
             // Drain the transactions from the queue, interleaving deployments and executions.
-            selector_iter
+            let transactions = selector_iter
                 .filter_map(
                     |select_deployment| {
                         if select_deployment { tx_queue.deployments.pop() } else { tx_queue.executions.pop() }
                     },
                 )
                 .map(|(_, tx)| tx)
-                .collect_vec()
+                .collect_vec();
+            #[cfg(feature = "metrics")]
+            {
+                metrics::gauge(
+                    metrics::consensus::DEPLOYMENTS_PRIORITY_QUEUE_SIZE,
+                    tx_queue.deployments.priority_len() as f64,
+                );
+                metrics::gauge(
+                    metrics::consensus::DEPLOYMENTS_ZERO_FEE_QUEUE_SIZE,
+                    tx_queue.deployments.zero_fee_len() as f64,
+                );
+                metrics::gauge(
+                    metrics::consensus::EXECUTIONS_PRIORITY_QUEUE_SIZE,
+                    tx_queue.executions.priority_len() as f64,
+                );
+                metrics::gauge(
+                    metrics::consensus::EXECUTIONS_ZERO_FEE_QUEUE_SIZE,
+                    tx_queue.executions.zero_fee_len() as f64,
+                );
+            }
+            transactions
         };
         // Iterate over the transactions.
         for transaction in transactions.into_iter() {
@@ -529,16 +550,13 @@ impl<N: Network> Consensus<N> {
 
         // Process the unconfirmed transactions in the memory pool.
         //
-        // This loop wakes up either when a block is committed (signaled via notify) or after a timeout.
-        // When a block is committed, the BFT workers have freed capacity for more transmissions.
+        // Local proposals and block commits wake this loop to refill available worker capacity.
         // The timeout serves as a fallback for startup or idle periods when blocks are not being produced.
-        //
-        // TODO(kaimast): wake up the loop after a proposal is created, not only when a block commits.
         let self_ = self.clone();
         self.spawn(async move {
             loop {
-                // Wait for either a block commit notification or timeout.
                 tokio::select! {
+                    _ = self_.bft.primary().wait_for_proposal() => {}
                     _ = self_.block_commit_notify.notified() => {}
                     _ = tokio::time::sleep(MAX_BATCH_DELAY) => {}
                 }
@@ -609,6 +627,18 @@ impl<N: Network> Consensus<N> {
         let prepare_instant = std::time::Instant::now();
         let block = match ledger_update.prepare_advance_to_next_quorum_block(subdag, transmissions) {
             Ok(block) => block,
+            Err(CheckBlockError::BlockAlreadyExists { .. }) => {
+                debug!("The given block hash already exists in the ledger");
+                return Ok(false);
+            }
+            Err(CheckBlockError::InvalidHeight { .. }) => {
+                debug!("The ledger advanced while we were constructing the next block");
+                return Ok(false);
+            }
+            Err(CheckBlockError::InvalidRound { new, previous }) => {
+                debug!("The subDAG round is too low. Expected >{previous}, got {new}");
+                return Ok(false);
+            }
             Err(err) => return Err(err.into_anyhow()),
         };
         let prepare_elapsed = prepare_instant.elapsed();
@@ -662,7 +692,7 @@ impl<N: Network> Consensus<N> {
         #[cfg(feature = "metrics")]
         metrics::histogram(metrics::consensus::ADVANCE_TO_NEXT_BLOCK_SECS, advance_elapsed.as_secs_f64());
 
-        #[cfg(feature = "telemetry")]
+        #[cfg(feature = "metrics")]
         // Fetch the committee lookback for the latest round.
         // Note: Do not abort here if this returns an error, because the committee is only needed for telemetry,
         // not for block advancement itself.
@@ -694,11 +724,13 @@ impl<N: Network> Consensus<N> {
         #[cfg(feature = "metrics")]
         {
             let now_utc = snarkos_node_bft::helpers::now_utc();
-            let elapsed = std::time::Duration::from_secs((now_utc.unix_timestamp() - start) as u64);
+            let elapsed_secs = (now_utc.unix_timestamp() - start) as f64;
             let next_block_timestamp = block.header().metadata().timestamp();
             let next_block_utc = snarkos_node_bft::helpers::to_utc_datetime(next_block_timestamp);
+            // Both endpoints are on-chain block timestamps (`i64` seconds by protocol design), so this
+            // value can only ever be a whole number of seconds without a snarkVM protocol change.
             let block_latency = next_block_timestamp - current_block_timestamp;
-            let block_lag = (now_utc - next_block_utc).whole_milliseconds();
+            let block_lag = (now_utc - next_block_utc).whole_seconds() as f64;
 
             let proof_target = block.header().proof_target();
             let coinbase_target = block.header().coinbase_target();
@@ -708,25 +740,32 @@ impl<N: Network> Consensus<N> {
             metrics::add_transmission_latency_metric(&self.transmissions_tracker, &block);
 
             metrics::gauge(metrics::consensus::COMMITTED_CERTIFICATES, num_committed_certificates as f64);
-            metrics::histogram(metrics::consensus::CERTIFICATE_COMMIT_LATENCY, elapsed.as_secs_f64());
+            metrics::histogram(metrics::consensus::CERTIFICATE_COMMIT_LATENCY, elapsed_secs);
             metrics::histogram(metrics::consensus::BLOCK_LATENCY, block_latency as f64);
-            metrics::histogram(metrics::consensus::BLOCK_LAG, block_lag as f64);
+            metrics::histogram(metrics::consensus::BLOCK_LAG, block_lag);
             metrics::gauge(metrics::blocks::PROOF_TARGET, proof_target as f64);
             metrics::gauge(metrics::blocks::COINBASE_TARGET, coinbase_target as f64);
             metrics::gauge(metrics::blocks::CUMULATIVE_PROOF_TARGET, cumulative_proof_target as f64);
 
             // If telemetry is enabled, update participation scores.
-            #[cfg(feature = "telemetry")]
+            #[cfg(feature = "metrics")]
             {
+                let telemetry = self.bft().primary().gateway().validator_telemetry();
+
+                // Publish the vintage of the snapshot the scores are read from, and the number of
+                // updates that never reached it. The scores are eventually consistent, so a reader
+                // comparing them against block height needs both to tell a lagging snapshot and a
+                // lossy one apart from an actual change in participation.
+                metrics::gauge(
+                    metrics::consensus::VALIDATOR_PARTICIPATION_GC_ROUND,
+                    telemetry.published_gc_round() as f64,
+                );
+                metrics::gauge(metrics::consensus::VALIDATOR_PARTICIPATION_DROPPED, telemetry.num_dropped() as f64);
+
                 match latest_committee {
                     Ok(latest_committee) => {
                         // Retrieve the individual participation scores.
-                        let participation_scores = self
-                            .bft()
-                            .primary()
-                            .gateway()
-                            .validator_telemetry()
-                            .get_participation_scores(&latest_committee);
+                        let participation_scores = telemetry.get_participation_scores(&latest_committee);
 
                         // Export the certificate and signature participation scores as individual gauges.
                         for (address, (certificate_score, signature_score)) in participation_scores {
@@ -763,13 +802,13 @@ impl<N: Network> Consensus<N> {
                 Ok(false) => debug!(
                     "Unable to reinsert transmission {}:{} into the memory pool. Already exists.",
                     fmt_id(transmission_id),
-                    fmt_id(transmission_id.checksum().unwrap_or_default()).dimmed()
+                    fmt_id(transmission_id.checksum().unwrap_or_default())
                 ),
                 Err(err) => {
                     let err = err.context(format!(
                         "Unable to reinsert transmission {}.{} into the memory pool",
                         fmt_id(transmission_id),
-                        fmt_id(transmission_id.checksum().unwrap_or_default()).dimmed()
+                        fmt_id(transmission_id.checksum().unwrap_or_default())
                     ));
                     warn!("{}", flatten_error(err));
                 }

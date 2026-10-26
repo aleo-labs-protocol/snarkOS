@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt,
     io,
     net::{IpAddr, SocketAddr},
@@ -44,9 +44,8 @@ use tracing::*;
 use crate::{
     BannedPeers,
     Config,
-    KnownPeers,
     Stats,
-    connections::{Connection, ConnectionSide, Connections, DisconnectOrigin, create_connection_span},
+    connections::{Connection, ConnectionSide, Connections, DisconnectOrigin, canonical_ip, create_connection_span},
     protocols::{Protocol, Protocols},
 };
 
@@ -74,6 +73,8 @@ pub trait ApplicationError: Send + Sync + std::fmt::Debug + std::fmt::Display + 
 pub enum ConnectError {
     #[error("already reached the maximum number of {limit} connections")]
     MaximumConnectionsReached { limit: u16 },
+    #[error("already reached the maximum number of {limit} connections with IP '{ip}'")]
+    MaximumConnectionsPerIpReached { ip: IpAddr, limit: u16 },
     #[error("already connecting to node at {address:?}")]
     AlreadyConnecting { address: SocketAddr },
     #[error("already connected to node at {address:?}")]
@@ -145,8 +146,6 @@ pub struct InnerTcp {
     connecting: Mutex<HashSet<SocketAddr>>,
     /// Contains objects related to the node's active connections.
     pub(crate) connections: Connections,
-    /// Collects statistics related to the node's peers.
-    known_peers: KnownPeers,
     /// Contains the set of currently banned peers.
     banned_peers: BannedPeers,
     /// Collects statistics related to the node itself.
@@ -166,6 +165,10 @@ impl Tcp {
         // Create a tracing span containing the node's name.
         let span = crate::helpers::create_span(config.name.as_deref().unwrap());
 
+        // A zero here would render the node inoperable, and would do so obscurely (at the first
+        // connection) rather than up front.
+        assert!(config.max_connections_per_ip != 0, "Config::max_connections_per_ip must not be 0");
+
         // Initialize the Tcp stack.
         let tcp = Tcp(Arc::new(InnerTcp {
             span,
@@ -174,7 +177,6 @@ impl Tcp {
             protocols: Default::default(),
             connecting: Default::default(),
             connections: Default::default(),
-            known_peers: Default::default(),
             banned_peers: Default::default(),
             stats: Stats::new(Instant::now()),
             tasks: Default::default(),
@@ -187,7 +189,7 @@ impl Tcp {
 
     /// How long has this node accepting connections?
     pub fn uptime(&self) -> Duration {
-        self.stats.timestamp().elapsed()
+        self.stats.created().elapsed()
     }
 
     /// Returns the name assigned.
@@ -239,10 +241,14 @@ impl Tcp {
         self.connecting.lock().iter().copied().collect()
     }
 
-    /// Returns a reference to the collection of statistics of known peers.
-    #[inline]
-    pub fn known_peers(&self) -> &KnownPeers {
-        &self.known_peers
+    /// Returns the statistics of the active connection with the given address, if any.
+    pub fn connection_stats(&self, addr: SocketAddr) -> Option<Arc<Stats>> {
+        self.connections.stats(addr)
+    }
+
+    /// Returns the statistics of every active connection.
+    pub fn connection_stats_snapshot(&self) -> HashMap<SocketAddr, Arc<Stats>> {
+        self.connections.stats_snapshot()
     }
 
     /// Returns a reference to the set of currently banned peers.
@@ -303,10 +309,7 @@ impl Tcp {
             }
         }
 
-        if !self.can_add_connection() {
-            error!(parent: self.span(), "Too many connections; refusing to connect to {addr}");
-            return Err(ConnectError::MaximumConnectionsReached { limit: self.config.max_connections });
-        }
+        self.can_add_connection(addr)?;
 
         if self.is_connected(addr) {
             trace!(parent: self.span(), "Already connected to {addr}");
@@ -345,7 +348,6 @@ impl Tcp {
 
         if let Err(ref e) = ret {
             self.connecting.lock().remove(&addr);
-            self.known_peers().register_failure(addr.ip());
             error!(parent: self.span(), "Unable to initiate a connection with {addr}: {e}");
         }
 
@@ -519,7 +521,7 @@ impl Tcp {
     fn handle_connection(&self, stream: TcpStream, addr: SocketAddr, permit: OwnedSemaphorePermit) {
         debug!(parent: self.span(), "Received a connection from {addr}");
 
-        if !self.can_add_connection() || self.is_self_connect(addr) {
+        if self.can_add_connection(addr).is_err() || self.is_self_connect(addr) {
             debug!(parent: self.span(), "Rejecting the connection from {addr}");
             return;
         }
@@ -533,7 +535,6 @@ impl Tcp {
 
             if let Err(e) = tcp.adapt_stream(stream, addr, ConnectionSide::Responder).await {
                 tcp.connecting.lock().remove(&addr);
-                tcp.known_peers().register_failure(addr.ip());
                 error!(parent: tcp.span(), "Failed to connect with {addr}: {e}");
             }
         });
@@ -553,8 +554,11 @@ impl Tcp {
         }
     }
 
-    /// Checks whether the `Tcp` can handle an additional connection.
-    fn can_add_connection(&self) -> bool {
+    /// Checks whether the `Tcp` can handle an additional connection with the given address.
+    ///
+    /// Pending connections count towards both the global and the per-IP limit, as they are all
+    /// expected to conclude successfully.
+    fn can_add_connection(&self, addr: SocketAddr) -> Result<(), ConnectError> {
         // Retrieve the number of connected peers.
         let num_connected = self.num_connected();
         // Retrieve the maximum number of connected peers.
@@ -562,19 +566,49 @@ impl Tcp {
 
         if num_connected >= limit {
             warn!(parent: self.span(), "Maximum number of active connections ({limit}) reached");
-            false
+            return Err(ConnectError::MaximumConnectionsReached { limit: self.config.max_connections });
         } else if num_connected + self.num_connecting() >= limit {
             warn!(parent: self.span(), "Maximum number of active & pending connections ({limit}) reached");
-            false
-        } else {
-            true
+            return Err(ConnectError::MaximumConnectionsReached { limit: self.config.max_connections });
         }
+
+        // Retrieve the number of connections already charged to the address' IP.
+        let num_with_ip = self.num_connections_with_ip(addr);
+        // Retrieve the maximum number of connections permitted per IP.
+        let ip_limit = self.config.max_connections_per_ip as usize;
+
+        if num_with_ip >= ip_limit {
+            warn!(
+                parent: self.span(),
+                "Maximum number of connections ({ip_limit}) with IP '{}' reached", addr.ip(),
+            );
+            return Err(ConnectError::MaximumConnectionsPerIpReached {
+                ip: addr.ip(),
+                limit: self.config.max_connections_per_ip,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Returns the number of active and pending connections charged to the given address' IP.
+    ///
+    /// Both are counted, as a pending connection is expected to conclude successfully. IPs are
+    /// compared canonically (see [`canonical_ip`]), so the native and IPv4-mapped spellings of a
+    /// host share one allowance.
+    fn num_connections_with_ip(&self, addr: SocketAddr) -> usize {
+        let ip = canonical_ip(addr);
+
+        // The two collections are counted under separate locks, in the same order as elsewhere, so
+        // that no lock is held while the other is acquired.
+        let num_connected = self.connections.num_with_ip(addr);
+        let num_connecting = self.connecting.lock().iter().filter(|addr| canonical_ip(**addr) == ip).count();
+
+        num_connected.saturating_add(num_connecting)
     }
 
     /// Prepares the freshly acquired connection to handle the protocols the Tcp implements.
     async fn adapt_stream(&self, stream: TcpStream, peer_addr: SocketAddr, own_side: ConnectionSide) -> io::Result<()> {
-        self.known_peers.add(peer_addr.ip());
-
         // Register the port seen by the peer.
         if own_side == ConnectionSide::Initiator {
             if let Ok(addr) = stream.local_addr() {
@@ -773,12 +807,12 @@ mod tests {
         });
         let peer_ip = peer.enable_listener().await.unwrap();
 
-        assert!(tcp.can_add_connection());
+        assert!(tcp.can_add_connection(peer_ip).is_ok());
 
         // Simulate an active connection.
         let stream = TcpStream::connect(peer_ip).await.unwrap();
         tcp.connections.add(Connection::new(peer_ip, stream, ConnectionSide::Initiator, Span::none()));
-        assert!(!tcp.can_add_connection());
+        assert!(tcp.can_add_connection(peer_ip).is_err());
 
         // Ensure that we cannot invoke connect() successfully in this case.
         // Use a non-local IP, to ensure it is never qual to peer IP.
@@ -788,11 +822,11 @@ mod tests {
 
         // Remove the active connection.
         tcp.connections.remove(peer_ip);
-        assert!(tcp.can_add_connection());
+        assert!(tcp.can_add_connection(peer_ip).is_ok());
 
         // Simulate a pending connection.
         tcp.connecting.lock().insert(peer_ip);
-        assert!(!tcp.can_add_connection());
+        assert!(tcp.can_add_connection(peer_ip).is_err());
 
         // Ensure that we cannot invoke connect() successfully in this case either.
         let another_ip = SocketAddr::from_str("1.2.3.4:4242").unwrap();
@@ -801,18 +835,99 @@ mod tests {
 
         // Remove the pending connection.
         tcp.connecting.lock().remove(&peer_ip);
-        assert!(tcp.can_add_connection());
+        assert!(tcp.can_add_connection(peer_ip).is_ok());
 
         // Simulate an active and a pending connection (this case should never occur).
         let stream = TcpStream::connect(peer_ip).await.unwrap();
         tcp.connections.add(Connection::new(peer_ip, stream, ConnectionSide::Responder, Span::none()));
         tcp.connecting.lock().insert(peer_ip);
-        assert!(!tcp.can_add_connection());
+        assert!(tcp.can_add_connection(peer_ip).is_err());
 
         // Remove the active and pending connection.
         tcp.connections.remove(peer_ip);
         tcp.connecting.lock().remove(&peer_ip);
-        assert!(tcp.can_add_connection());
+        assert!(tcp.can_add_connection(peer_ip).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_max_connections_per_ip() {
+        let tcp = Tcp::new(Config { max_connections: 10, max_connections_per_ip: 2, ..Default::default() });
+
+        // Initialize a listener to source real streams from; the addresses the connections are
+        // registered under are independent of it.
+        let peer = Tcp::new(Config {
+            listener_ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            desired_listening_port: Some(0),
+            ..Default::default()
+        });
+        let peer_ip = peer.enable_listener().await.unwrap();
+
+        // Two addresses sharing an IP, and a third on a different IP.
+        let first = SocketAddr::from_str("1.2.3.4:1111").unwrap();
+        let second = SocketAddr::from_str("1.2.3.4:2222").unwrap();
+        let third = SocketAddr::from_str("1.2.3.4:3333").unwrap();
+        let other_ip = SocketAddr::from_str("5.6.7.8:1111").unwrap();
+
+        // The per-IP limit counts active connections...
+        for addr in [first, second] {
+            assert!(tcp.can_add_connection(addr).is_ok());
+            let stream = TcpStream::connect(peer_ip).await.unwrap();
+            tcp.connections.add(Connection::new(addr, stream, ConnectionSide::Initiator, Span::none()));
+        }
+        assert_eq!(tcp.num_connections_with_ip(first), 2);
+        assert!(matches!(
+            tcp.can_add_connection(third),
+            Err(ConnectError::MaximumConnectionsPerIpReached { limit: 2, .. })
+        ));
+
+        // ...while leaving the global limit, and therefore other IPs, unaffected.
+        assert!(tcp.can_add_connection(other_ip).is_ok());
+
+        // Pending connections count towards the limit too.
+        tcp.connections.remove(second);
+        assert!(tcp.can_add_connection(third).is_ok());
+        tcp.connecting.lock().insert(second);
+        assert_eq!(tcp.num_connections_with_ip(first), 2);
+        assert!(matches!(
+            tcp.can_add_connection(third),
+            Err(ConnectError::MaximumConnectionsPerIpReached { limit: 2, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_max_connections_per_ip_canonicalizes_mapped_addresses() {
+        let tcp = Tcp::new(Config { max_connections: 10, max_connections_per_ip: 2, ..Default::default() });
+
+        let peer = Tcp::new(Config {
+            listener_ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            desired_listening_port: Some(0),
+            ..Default::default()
+        });
+        let peer_ip = peer.enable_listener().await.unwrap();
+
+        // The same host in its native form and as a dual-stack listener reports it.
+        let native = SocketAddr::from_str("1.2.3.4:1111").unwrap();
+        let mapped = SocketAddr::from_str("[::ffff:1.2.3.4]:2222").unwrap();
+        let also_mapped = SocketAddr::from_str("[::ffff:1.2.3.4]:3333").unwrap();
+
+        // Sanity: as raw IP addresses these are two distinct keys, which is the bypass being closed.
+        assert_ne!(native.ip(), mapped.ip());
+
+        for addr in [native, mapped] {
+            assert!(tcp.can_add_connection(addr).is_ok());
+            let stream = TcpStream::connect(peer_ip).await.unwrap();
+            tcp.connections.add(Connection::new(addr, stream, ConnectionSide::Initiator, Span::none()));
+        }
+
+        // Both spellings are charged to one bucket, so the allowance cannot be claimed twice.
+        assert_eq!(tcp.num_connections_with_ip(native), 2);
+        assert_eq!(tcp.num_connections_with_ip(mapped), 2);
+        for addr in [native, also_mapped] {
+            assert!(matches!(
+                tcp.can_add_connection(addr),
+                Err(ConnectError::MaximumConnectionsPerIpReached { limit: 2, .. })
+            ));
+        }
     }
 
     #[tokio::test]
@@ -835,7 +950,7 @@ mod tests {
         // Simulate an active connection.
         let stream = TcpStream::connect(peer1_ip).await.unwrap();
         tcp.connections.add(Connection::new(peer1_ip, stream, ConnectionSide::Responder, Span::none()));
-        assert!(!tcp.can_add_connection());
+        assert!(tcp.can_add_connection(peer1_ip).is_err());
         assert_eq!(tcp.num_connected(), 1);
         assert_eq!(tcp.num_connecting(), 0);
         assert!(tcp.is_connected(peer1_ip));
@@ -855,7 +970,7 @@ mod tests {
         let inbound_permits = Arc::new(Semaphore::new(1));
         let permit = inbound_permits.clone().acquire_owned().await.unwrap();
         tcp.handle_connection(stream, peer2_ip, permit);
-        assert!(!tcp.can_add_connection());
+        assert!(tcp.can_add_connection(peer1_ip).is_err());
         assert_eq!(tcp.num_connected(), 1);
         assert_eq!(tcp.num_connecting(), 0);
         assert!(tcp.is_connected(peer1_ip));

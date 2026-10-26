@@ -24,7 +24,7 @@ use snarkos_node_bft::{ledger_service::CoreLedgerService, spawn_blocking};
 use snarkos_node_cdn::CdnBlockSync;
 use snarkos_node_consensus::Consensus;
 use snarkos_node_network::{ConnectionMode, NodeType, PeerPoolHandling};
-use snarkos_node_rest::Rest;
+use snarkos_node_rest::{Rest, RestVerificationLimits};
 use snarkos_node_router::{
     Heartbeat,
     Inbound,
@@ -87,6 +87,9 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         bft_ip: Option<SocketAddr>,
         rest_ip: Option<SocketAddr>,
         rest_rps: u32,
+        rest_verification_limits: RestVerificationLimits,
+        history_api_url: Option<String>,
+        history_json: bool,
         account: Account<N>,
         trusted_peers: &[SocketAddr],
         trusted_validators: &[SocketAddr],
@@ -97,9 +100,9 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         trusted_peers_only: bool,
         dev_txs: bool,
         dev: Option<u16>,
-        _slipstream_configs: &[std::path::PathBuf],
         #[cfg(feature = "test_network")] dev_hotswap_config: Option<DevHotswapConfig>,
         #[cfg(not(feature = "test_network"))] _dev_hotswap_config: Option<DevHotswapConfig>,
+        proposal_spent_limit_multiplier: u64,
         signal_handler: Arc<SignalHandler>,
     ) -> Result<Self> {
         // Initialize the ledger, installing the dev committee override (when configured)
@@ -123,15 +126,9 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         }
         .with_context(|| "Failed to initialize the ledger")?;
 
-        // Initialize the Slipstream plugin manager (if any config files were provided).
-        #[cfg(feature = "slipstream-plugins")]
-        if !_slipstream_configs.is_empty() {
-            let manager =
-                snarkvm::slipstream_plugin_manager::SlipstreamPluginManager::from_config_files(_slipstream_configs)
-                    .context("Failed to initialize Slipstream plugin manager")?;
-            ledger.vm().finalize_store().set_slipstream_plugin_manager(manager);
-            let num_plugins = _slipstream_configs.len();
-            tracing::info!(target: "slipstream", "Slipstream plugin manager registered ({num_plugins} plugin(s))");
+        // Later blocks finalized by this node are written as JSON beside the ledger.
+        if history_json {
+            ledger.vm().finalize_store().set_record_history_json(true);
         }
 
         // If snarkVM picked the start round itself (no CLI flag and no persisted file),
@@ -175,6 +172,7 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
             node_data_dir.clone(),
             ping.clone(),
             dev,
+            proposal_spent_limit_multiplier,
         )
         .await?;
 
@@ -202,23 +200,25 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
                 Rest::start(
                     rest_ip,
                     rest_rps,
+                    history_api_url,
                     Some(consensus),
                     ledger.clone(),
                     Arc::new(node.clone()),
                     cdn_sync.clone(),
                     sync,
+                    rest_verification_limits,
                 )
                 .await?,
             );
         }
 
         // Set up everything else after CDN sync is done.
-        if let Some(cdn_sync) = cdn_sync {
-            if let Err(error) = cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN") {
-                crate::log_clean_error(&storage_mode);
-                node.shut_down().await;
-                return Err(error);
-            }
+        if let Some(cdn_sync) = cdn_sync
+            && let Err(error) = cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN")
+        {
+            crate::log_clean_error(&storage_mode);
+            node.shut_down().await;
+            return Err(error);
         }
 
         // Start the BFT and consensus handlers now that CDN sync is complete. This ensures that
@@ -537,12 +537,6 @@ impl<N: Network, C: ConsensusStorage<N>> NodeInterface<N> for Validator<N, C> {
         // Shut down the node.
         trace!("Shutting down the node...");
 
-        // Shut down the Slipstream plugin manager.
-        #[cfg(feature = "slipstream-plugins")]
-        if let Some(manager) = self.ledger.vm().finalize_store().slipstream_plugin_manager().write().as_mut() {
-            manager.unload();
-        }
-
         // Shut down the REST instance.
         if let Some(rest) = &self.rest {
             trace!("Shutting down the REST server...");
@@ -609,6 +603,9 @@ mod tests {
             None,
             Some(rest),
             10,
+            RestVerificationLimits::max::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>(),
+            None,
+            false,
             account,
             &[],
             &[],
@@ -619,8 +616,8 @@ mod tests {
             false,
             dev_txs,
             None,
-            &[],
             None,
+            1,
             SignalHandler::new(None),
         )
         .await

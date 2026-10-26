@@ -13,11 +13,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(feature = "telemetry")]
-use crate::helpers::Telemetry;
+#[cfg(feature = "metrics")]
+use crate::helpers::{Telemetry, TelemetryWorker};
 use crate::{
     CONTEXT,
     MAX_BATCH_DELAY,
+    MAX_FETCH_TIMEOUT,
     MEMORY_POOL_PORT,
     Worker,
     events::{DisconnectReason, EventCodec, PrimaryPing},
@@ -31,11 +32,13 @@ use snarkos_node_bft_events::{
     BlockResponse,
     CertificateRequest,
     CertificateResponse,
-    ChallengeRequest,
-    ChallengeResponse,
     DataBlocks,
     Event,
-    EventTrait,
+    HANDSHAKE_DOMAIN,
+    HandshakeHint,
+    InitiatorInfo,
+    PeerInfo,
+    ResponderProof,
     TransmissionRequest,
     TransmissionResponse,
     ValidatorsRequest,
@@ -50,7 +53,17 @@ use snarkos_node_network::{
     Resolver,
     bootstrap_peers,
     get_repo_commit_hash,
+    harden_socket,
     log_repo_sha_comparison,
+    noise::{
+        HandshakeProtocol,
+        NoiseSession,
+        PendingSession,
+        Role,
+        binding_message,
+        detect_handshake_protocol,
+        write_noise_magic,
+    },
     shorten_snarkos_sha,
 };
 use snarkos_node_sync::{MAX_BLOCKS_BEHIND, communication_service::CommunicationService};
@@ -71,12 +84,11 @@ use snarkvm::{
         committee::Committee,
         narwhal::{BatchHeader, Data},
     },
-    prelude::{Address, Field},
+    prelude::{Address, Field, Signature},
     utilities::flatten_error,
 };
 
-use colored::Colorize;
-use futures::{SinkExt, future::join_all};
+use futures::future::join_all;
 use indexmap::IndexMap;
 #[cfg(feature = "locktick")]
 use locktick::parking_lot::{Mutex, RwLock};
@@ -96,13 +108,41 @@ use tokio::{
     sync::{OnceCell, oneshot},
     task::{self, JoinHandle},
 };
-use tokio_stream::StreamExt;
-use tokio_util::codec::Framed;
+use tokio_util::sync::CancellationToken;
 
 /// The maximum interval of events to cache.
 const CACHE_EVENTS_INTERVAL: i64 = (MAX_BATCH_DELAY.as_secs()) as i64; // seconds
 /// The maximum interval of requests to cache.
 const CACHE_REQUESTS_INTERVAL: i64 = (MAX_BATCH_DELAY.as_secs()) as i64; // seconds
+
+/// The number of consensus rounds of traffic that a per-connection message queue must absorb.
+///
+/// A message that has not made it onto (or off of) the wire within `MAX_FETCH_TIMEOUT` is already
+/// useless to the peer: a requester has given up on it by then (see
+/// `Worker::send_transmission_request`), and any consensus event it carried is stale. Sizing the
+/// per-connection queues to this window therefore bounds them to the traffic that can still be
+/// delivered in time, rather than to the entire garbage-collection window (`MAX_GC_ROUNDS`, which
+/// is ~100 rounds, i.e. several minutes of traffic).
+const QUEUE_WINDOW_ROUNDS: usize = (MAX_FETCH_TIMEOUT.as_millis() / MAX_BATCH_DELAY.as_millis()) as usize;
+
+/// Computes the depth of the per-connection inbound and outbound message queues.
+///
+/// These queues are transient send/receive buffers, not backlogs: they only need to hold the
+/// traffic a peer can legitimately exchange with us over `QUEUE_WINDOW_ROUNDS` (see above).
+/// Per round, the worst case is every certificate in the round plus every transmission each of
+/// those certificates contains — that is, a peer that is missing an entire round and fetches all
+/// of it from us. The leading factor of 2 is headroom for the remaining, far smaller, event
+/// traffic (batch proposals and signatures, primary and worker pings, block and validator
+/// requests) and for requests that straddle a round boundary.
+///
+/// Note that each slot can hold a full `Transmission`, so this value is a direct multiplier on the
+/// heap a single peer can pin. It must stay small enough that `depth * max transmission size` is
+/// survivable on a commodity validator.
+fn per_connection_queue_depth<N: Network>() -> usize {
+    2 * QUEUE_WINDOW_ROUNDS
+        * N::LATEST_MAX_CERTIFICATES() as usize
+        * (BatchHeader::<N>::MAX_TRANSMISSIONS_PER_BATCH + 1)
+}
 
 /// The maximum number of connection attempts in an interval.
 #[cfg(not(test))]
@@ -124,6 +164,7 @@ const IP_BAN_TIME_IN_SECS: u64 = 300;
 pub trait Transport<N: Network>: Send + Sync {
     async fn send(&self, peer_ip: SocketAddr, event: Event<N>) -> Option<oneshot::Receiver<io::Result<()>>>;
     fn broadcast(&self, event: Event<N>);
+    fn broadcast_until(&self, event: Event<N>, token: CancellationToken);
 }
 
 /// The gateway maintains connections to other validators.
@@ -154,8 +195,15 @@ pub struct InnerGateway<N: Network> {
     resolver: RwLock<Resolver<N>>,
     /// The collection of both candidate and connected peers.
     peer_pool: RwLock<HashMap<SocketAddr, Peer<N>>>,
-    #[cfg(feature = "telemetry")]
+    /// The handle to the validator telemetry tracker.
+    #[cfg(feature = "metrics")]
     validator_telemetry: Telemetry<N>,
+    /// The telemetry worker, taken and spawned by `run`.
+    ///
+    /// This is a one-shot handoff from `new` to `run`, not a hot-path lock: the telemetry
+    /// state itself lives in the worker task, and is never shared.
+    #[cfg(feature = "metrics")]
+    telemetry_worker: Mutex<Option<TelemetryWorker<N>>>,
     /// The primary sender.
     primary_sender: OnceCell<PrimarySender<N>>,
     /// The worker senders.
@@ -241,6 +289,10 @@ impl<N: Network> Gateway<N> {
         // some of the cached validators to trusted ones.
         initial_peers.extend(trusted_validators.iter().copied().map(|addr| (addr, Peer::new_candidate(addr, true))));
 
+        // Initialize the validator telemetry. The worker is spawned later, by `run`.
+        #[cfg(feature = "metrics")]
+        let (validator_telemetry, telemetry_worker) = Telemetry::new();
+
         // Return the gateway.
         Ok(Self(Arc::new(InnerGateway {
             account,
@@ -250,8 +302,10 @@ impl<N: Network> Gateway<N> {
             cache: Default::default(),
             resolver: Default::default(),
             peer_pool: RwLock::new(initial_peers),
-            #[cfg(feature = "telemetry")]
-            validator_telemetry: Default::default(),
+            #[cfg(feature = "metrics")]
+            validator_telemetry,
+            #[cfg(feature = "metrics")]
+            telemetry_worker: Mutex::new(Some(telemetry_worker)),
             primary_sender: Default::default(),
             worker_senders: Default::default(),
             sync_sender: Default::default(),
@@ -280,6 +334,13 @@ impl<N: Network> Gateway<N> {
         // If the sync sender was provided, set the sync sender.
         if let Some(sync_sender) = sync_sender {
             self.sync_sender.set(sync_sender).expect("Sync sender already set in gateway");
+        }
+
+        // Spawn the validator telemetry worker, which owns all telemetry state.
+        // It is registered in `handles`, so `shut_down` aborts it along with everything else.
+        #[cfg(feature = "metrics")]
+        if let Some(telemetry_worker) = self.telemetry_worker.lock().take() {
+            self.spawn(telemetry_worker.run());
         }
 
         // Enable the TCP protocols.
@@ -390,7 +451,7 @@ impl<N: Network> Gateway<N> {
     }
 
     /// Returns the validator telemetry.
-    #[cfg(feature = "telemetry")]
+    #[cfg(feature = "metrics")]
     pub fn validator_telemetry(&self) -> &Telemetry<N> {
         &self.validator_telemetry
     }
@@ -523,6 +584,8 @@ impl<N: Network> Gateway<N> {
         };
         // Retrieve the event name.
         let name = event.name();
+        #[cfg(feature = "metrics")]
+        metrics::increment_counter_2(metrics::gateway::EVENTS, "direction", "outbound", "type", event.variant_name());
         // Send the event to the peer.
         trace!("{CONTEXT} Sending '{name}' to '{peer_ip}'");
         let result = self.unicast(peer_addr, event);
@@ -545,6 +608,8 @@ impl<N: Network> Gateway<N> {
             trace!("Dropping a {} from {peer_addr} - no longer connected.", event.name());
             return Ok(false);
         };
+        #[cfg(feature = "metrics")]
+        metrics::increment_counter_2(metrics::gateway::EVENTS, "direction", "inbound", "type", event.variant_name());
         // Ensure that the peer is an authorized committee member or a bootstrapper.
         if !(self.is_authorized_validator_ip(peer_ip)
             || self
@@ -646,7 +711,7 @@ impl<N: Network> Gateway<N> {
                 };
 
                 let self_ = self.clone();
-                tokio::spawn(async move {
+                self.spawn(async move {
                     // Send the `BlockResponse` message to the peer.
                     let event =
                         Event::BlockResponse(BlockResponse::new(block_request, blocks, latest_consensus_version));
@@ -801,7 +866,7 @@ impl<N: Network> Gateway<N> {
                 connected_peers.shuffle(&mut rand::rng());
 
                 let self_ = self.clone();
-                tokio::spawn(async move {
+                self.spawn(async move {
                     // Initialize the validators.
                     let mut validators = IndexMap::with_capacity(MAX_VALIDATORS_TO_SEND);
                     // Iterate over the validators.
@@ -889,9 +954,10 @@ impl<N: Network> Gateway<N> {
     }
 
     /// Spawns a task with the given future; it should only be used for long-running tasks.
-    #[allow(dead_code)]
     fn spawn<T: Future<Output = ()> + Send + 'static>(&self, future: T) {
-        self.handles.lock().push(tokio::spawn(future));
+        let mut handles = self.handles.lock();
+        handles.retain(|handle| !handle.is_finished());
+        handles.push(tokio::spawn(future));
     }
 
     /// Shuts down the gateway.
@@ -919,7 +985,7 @@ impl<N: Network> Gateway<N> {
         // Log the connected validators.
         self.log_connected_validators();
         // Log the validator participation scores.
-        #[cfg(feature = "telemetry")]
+        #[cfg(feature = "metrics")]
         self.log_participation_scores();
         // Keep the trusted validators connected.
         self.handle_trusted_validators();
@@ -950,13 +1016,12 @@ impl<N: Network> Gateway<N> {
         // Resolve the total number of connectable validators.
         let validators_total = committee.num_members().saturating_sub(1);
         // Format the total validators message.
-        let total_validators = format!("(of {validators_total} bonded validators)").dimmed();
-        // Construct the connections message.
-        let connections_msg = match connected_validators.len() {
-            0 => "No connected validators".to_string(),
-            num_connected => format!("Connected to {num_connected} validators {total_validators}"),
-        };
-        info!("{connections_msg}");
+        let total_validators = format!("(of {validators_total} bonded validators)");
+        // Log the connections.
+        match connected_validators.len() {
+            0 => info!("No connected validators"),
+            num_connected => info!("Connected to {num_connected} validators {total_validators}"),
+        }
 
         // Collect the connected validator addresses and stake.
         let mut connected_validator_addresses = HashSet::with_capacity(connected_validators.len());
@@ -978,21 +1043,18 @@ impl<N: Network> Gateway<N> {
             *connected_validator_shas.entry(short_peer_sha.clone()).or_default() += address_stake;
 
             debug!(
-                "{}",
-                format!(
-                    "  Connected to: {} - {} (connection age {:?})",
-                    peer.listener_addr,
-                    peer.aleo_addr,
-                    peer.first_seen.elapsed()
-                )
-                .dimmed()
+                dim = true,
+                "  Connected to: {} - {} (connection age {:?})",
+                peer.listener_addr,
+                peer.aleo_addr,
+                peer.first_seen.elapsed()
             );
         }
 
         // Log how much of the stake uses our git commit hash.
         if let Some(combined_stake) = connected_validator_shas.get(&our_sha) {
             let percentage = *combined_stake as f64 / committee.total_stake() as f64 * 100.0;
-            debug!("{}", format!("  Combined stake @ {our_sha}: {percentage:.2}%").dimmed());
+            debug!(dim = true, "  Combined stake @ {our_sha}: {percentage:.2}%");
             #[cfg(feature = "metrics")]
             metrics::gauge(metrics::bft::CONNECTED_STAKE_WITH_MATCHING_SHA, percentage);
         }
@@ -1015,9 +1077,8 @@ impl<N: Network> Gateway<N> {
                     let address_stake_as_percentage =
                         if total_stake == 0 { 0.0 } else { address_stake as f64 / total_stake_f64 * 100.0 };
                     debug!(
-                        "{}",
-                        format!("  Not connected to {address} ({address_stake_as_percentage:.2}% of total stake)")
-                            .dimmed()
+                        dim = true,
+                        "  Not connected to {address} ({address_stake_as_percentage:.2}% of total stake)"
                     );
                     address_stake
                 })
@@ -1041,7 +1102,7 @@ impl<N: Network> Gateway<N> {
         if !committee.is_quorum_threshold_reached(&connected_validator_addresses) {
             // Not being connected to a quorum of validators is begning during startup.
             if self.tcp().uptime() > Self::MISSING_VALIDATOR_CONNECTIONS_GRACE_PERIOD {
-                error!("Not connected to a quorum of validators");
+                warn!("Not connected to a quorum of validators");
             } else {
                 debug!("Not connected to a quorum of validators");
             }
@@ -1049,7 +1110,7 @@ impl<N: Network> Gateway<N> {
     }
 
     // Logs the validator participation scores.
-    #[cfg(feature = "telemetry")]
+    #[cfg(feature = "metrics")]
     fn log_participation_scores(&self) {
         if let Ok(committee_lookback) = self.ledger.get_committee_lookback_for_round(self.storage.current_round()) {
             // Retrieve the participation scores.
@@ -1058,10 +1119,7 @@ impl<N: Network> Gateway<N> {
             // Log the participation scores.
             debug!("Participation Scores (in the last {} rounds):", self.storage.max_gc_rounds());
             for (address, (cert_score, sig_score)) in participation_scores {
-                debug!(
-                    "{}",
-                    format!("  {address} - certificates: {cert_score:.2}%  signatures: {sig_score:.2}%").dimmed()
-                );
+                debug!(dim = true, "  {address} - certificates: {cert_score:.2}%  signatures: {sig_score:.2}%");
             }
         }
     }
@@ -1149,7 +1207,7 @@ impl<N: Network> Gateway<N> {
     /// This function attempts to disconnect any validators that are not in the current committee.
     fn handle_unauthorized_validators(&self) {
         let self_ = self.clone();
-        tokio::spawn(async move {
+        self.spawn(async move {
             // Retrieve the connected validators.
             let validators = self_.get_connected_peers();
             // Iterate over the validator IPs.
@@ -1225,7 +1283,7 @@ impl<N: Network> Gateway<N> {
             // Select a random validator IP.
             if let Some(validator_ip) = validators.into_iter().choose(&mut rand::rng()) {
                 let self_ = self.clone();
-                tokio::spawn(async move {
+                self.spawn(async move {
                     // Increment the number of outbound validators requests for this validator.
                     self_.cache.increment_outbound_validators_requests(validator_ip);
                     // Send a `ValidatorsRequest` to the validator.
@@ -1243,7 +1301,7 @@ impl<N: Network> Gateway<N> {
         {
             warn!("{CONTEXT} Disconnecting from '{peer_ip}' - {error}");
             let self_ = self.clone();
-            tokio::spawn(async move {
+            self.spawn(async move {
                 Transport::send(&self_, peer_ip, DisconnectReason::ProtocolViolation.into()).await;
                 // Disconnect from this peer.
                 self_.disconnect(peer_ip);
@@ -1266,7 +1324,32 @@ impl<N: Network> Transport<N> for Gateway<N> {
     /// This function returns as soon as the event is queued to be sent,
     /// without waiting for the actual delivery; instead, the caller is provided with a [`oneshot::Receiver`]
     /// which can be used to determine when and whether the event has been delivered.
-    async fn send(&self, peer_ip: SocketAddr, event: Event<N>) -> Option<oneshot::Receiver<io::Result<()>>> {
+    async fn send(&self, peer_ip: SocketAddr, mut event: Event<N>) -> Option<oneshot::Receiver<io::Result<()>>> {
+        // Serialize the payload here, rather than leaving it for the connection's writer task.
+        //
+        // `Data` defers serialization until the event is written to the stream, which puts it on
+        // the writer task -- a Tokio worker -- and inside the write timeout. For the large
+        // responses (`BlockResponse` in particular, which can carry `DataBlocks::MAXIMUM_NUMBER_
+        // OF_BLOCKS`) that is a substantial amount of compute on the reactor.
+        //
+        // The check keeps the hop off the common path: most events carry no payload, and a
+        // broadcast has already serialized its payload before fanning out here, so this is a no-op
+        // for every recipient after the first.
+        if event.has_unserialized_payload() {
+            let name = event.name();
+            event = match spawn_blocking!({
+                let mut event = event;
+                event.serialize_payload()?;
+                Ok(event)
+            }) {
+                Ok(event) => event,
+                Err(err) => {
+                    error!("{CONTEXT} Unable to serialize '{name}' for '{peer_ip}' - {err}");
+                    return None;
+                }
+            };
+        }
+
         macro_rules! send {
             ($self:ident, $cache_map:ident, $interval:expr, $freq:ident) => {{
                 // Rate limit the number of certificate requests sent to the peer.
@@ -1307,18 +1390,51 @@ impl<N: Network> Transport<N> for Gateway<N> {
     }
 
     /// Broadcasts the given event to all connected peers.
-    // TODO(ljedrz): the event should be checked for the presence of Data::Object, and
-    // serialized in advance if it's there.
     fn broadcast(&self, event: Event<N>) {
+        self.broadcast_until(event, CancellationToken::new());
+    }
+
+    /// Broadcasts the given event to all connected peers, concurrently.
+    ///
+    /// Sends that have not been queued by the time `token` is cancelled are dropped.
+    fn broadcast_until(&self, mut event: Event<N>, token: CancellationToken) {
         // Ensure there are connected peers.
         if self.number_of_connected_peers() > 0 {
             let self_ = self.clone();
             let connected_peers = self.connected_peers();
-            tokio::spawn(async move {
-                // Iterate through all connected peers.
-                for peer_ip in connected_peers {
-                    // Send the event to the peer.
-                    let _ = Transport::send(&self_, peer_ip, event.clone()).await;
+            self.spawn(async move {
+                // Skip the work below if the broadcast is no longer needed.
+                if token.is_cancelled() {
+                    debug!("{CONTEXT} Not broadcasting '{}' (cancelled)", event.name());
+                    return;
+                }
+                // Serialize the event's payload once, rather than once per recipient; every
+                // recipient then shares the resulting buffer. `Transport::send` would otherwise do
+                // this separately for each peer below.
+                if event.has_unserialized_payload() {
+                    let name = event.name();
+                    event = match spawn_blocking!({
+                        let mut event = event;
+                        event.serialize_payload()?;
+                        Ok(event)
+                    }) {
+                        Ok(event) => event,
+                        Err(err) => {
+                            error!("{CONTEXT} Unable to serialize '{name}' for broadcast - {err}");
+                            return;
+                        }
+                    };
+                }
+                // Send the event to all connected peers concurrently, so that a peer that is
+                // rate limited does not delay delivery to the others.
+                let name = event.name();
+                let sends = join_all(
+                    connected_peers.into_iter().map(|peer_ip| Transport::send(&self_, peer_ip, event.clone())),
+                );
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => debug!("{CONTEXT} Stopped broadcasting '{name}' (cancelled)"),
+                    _ = sends => {}
                 }
             });
         }
@@ -1349,7 +1465,7 @@ impl<N: Network> Reading for Gateway<N> {
             let self_ = self.clone();
             // Handle BlockRequest and BlockResponse messages in a separate task to not block the
             // inbound queue.
-            tokio::spawn(async move {
+            self.spawn(async move {
                 self_.process_message_inner(peer_addr, message).await;
             });
         } else {
@@ -1358,12 +1474,11 @@ impl<N: Network> Reading for Gateway<N> {
         Ok(())
     }
 
-    /// Computes the depth of per-connection queues used to process inbound messages, sufficient to process the maximum expected load at any givent moment.
+    /// Computes the depth of per-connection queues used to process inbound messages, sufficient to process the maximum expected load at any given moment.
     /// The greater it is, the more inbound messages the node can enqueue, but a too large value can make the node more susceptible to DoS attacks.
+    /// See [`per_connection_queue_depth`] for the derivation.
     fn message_queue_depth(&self) -> usize {
-        2 * BatchHeader::<N>::MAX_GC_ROUNDS
-            * N::LATEST_MAX_CERTIFICATES() as usize
-            * BatchHeader::<N>::MAX_TRANSMISSIONS_PER_BATCH
+        per_connection_queue_depth::<N>()
     }
 }
 
@@ -1378,13 +1493,12 @@ impl<N: Network> Writing for Gateway<N> {
         Default::default()
     }
 
-    /// Computes the depth of per-connection queues used to send outbound messages, sufficient to process the maximum expected load at any givent moment.
-    /// The greater it is, the more outbound messages the node can enqueue. A too large value large value might obscure potential issues with your implementation
-    /// (like slow serialization) or network.
+    /// Computes the depth of per-connection queues used to send outbound messages, sufficient to process the maximum expected load at any given moment.
+    /// The greater it is, the more outbound messages the node can enqueue. A too large value might obscure potential issues with your implementation
+    /// (like slow serialization) or network, and lets a peer that stops reading its socket pin an unreasonable amount of our heap.
+    /// See [`per_connection_queue_depth`] for the derivation.
     fn message_queue_depth(&self) -> usize {
-        2 * BatchHeader::<N>::MAX_GC_ROUNDS
-            * N::LATEST_MAX_CERTIFICATES() as usize
-            * BatchHeader::<N>::MAX_TRANSMISSIONS_PER_BATCH
+        per_connection_queue_depth::<N>()
     }
 }
 
@@ -1434,15 +1548,13 @@ impl<N: Network> Disconnect for Gateway<N> {
 #[async_trait]
 impl<N: Network> OnConnect for Gateway<N> {
     async fn on_connect(&self, peer_addr: SocketAddr) {
-        if let Some(listener_addr) = self.resolve_to_listener(&peer_addr) {
-            if let Some(peer) = self.get_connected_peer(listener_addr) {
-                if peer.node_type == NodeType::BootstrapClient {
-                    self.cache.increment_outbound_validators_requests(listener_addr);
-                    let _ =
-                        <Self as Transport<N>>::send(self, listener_addr, Event::ValidatorsRequest(ValidatorsRequest))
-                            .await;
-                }
-            }
+        if let Some(listener_addr) = self.resolve_to_listener(&peer_addr)
+            && let Some(peer) = self.get_connected_peer(listener_addr)
+            && peer.node_type == NodeType::BootstrapClient
+        {
+            self.cache.increment_outbound_validators_requests(listener_addr);
+            let _ =
+                <Self as Transport<N>>::send(self, listener_addr, Event::ValidatorsRequest(ValidatorsRequest)).await;
         }
     }
 }
@@ -1475,6 +1587,8 @@ impl<N: Network> Handshake for Gateway<N> {
         }
 
         let stream = self.borrow_stream(&mut connection);
+        // Make the socket more robust; every other handshake in the node does this too.
+        harden_socket(stream)?;
 
         // If this is an inbound connection, we log it, but don't know the listening address yet.
         // Otherwise, we can immediately register the listening address.
@@ -1490,16 +1604,27 @@ impl<N: Network> Handshake for Gateway<N> {
         let restrictions_id = self.ledger.latest_restrictions_id();
 
         // Perform the handshake; we pass on a mutable reference to peer_ip in case the process is broken at any point in time.
+        //
+        // Validators speak only the Noise handshake. A peer that opens with anything else is turned
+        // away before any key is derived.
         let handshake_result = if peer_side == ConnectionSide::Responder {
-            self.handshake_inner_initiator(peer_addr, restrictions_id, stream).await
+            write_noise_magic(stream).await?;
+            self.handshake_inner_initiator_noise(peer_addr, restrictions_id, stream).await
         } else {
-            self.handshake_inner_responder(peer_addr, &mut listener_addr, restrictions_id, stream).await
+            match detect_handshake_protocol(stream).await? {
+                (HandshakeProtocol::Noise, _) => {
+                    self.handshake_inner_responder_noise(peer_addr, &mut listener_addr, restrictions_id, stream).await
+                }
+                (HandshakeProtocol::Legacy, _) => {
+                    Err(ConnectError::other(format!("'{peer_addr}' did not offer the Noise handshake")))
+                }
+            }
         };
 
         // Register the peer, or roll it back, if the handshake got far enough to learn its listening
         // address.
         match (&handshake_result, listener_addr) {
-            (Ok(cr), Some(addr)) => {
+            (Ok(peer_info), Some(addr)) => {
                 let node_type = if bootstrap_peers::<N>(self.is_dev()).contains(&addr) {
                     NodeType::BootstrapClient
                 } else {
@@ -1517,21 +1642,21 @@ impl<N: Network> Handshake for Gateway<N> {
                     if let Peer::Candidate(peer) = peer
                         && let Some(old_aleo_addr) = peer.last_known_aleo_addr
                     {
-                        old_aleo_addr != cr.address || peer.listener_addr == addr
+                        old_aleo_addr != peer_info.address || peer.listener_addr == addr
                     } else {
                         true
                     }
                 });
 
                 if let Some(peer) = peer_pool.get_mut(&addr) {
-                    self.resolver.write().insert_peer(addr, peer_addr, Some(cr.address));
+                    self.resolver.write().insert_peer(addr, peer_addr, Some(peer_info.address));
                     peer.upgrade_to_connected(
                         peer_addr,
-                        cr.listener_port,
-                        cr.address,
+                        peer_info.listener_port,
+                        peer_info.address,
                         node_type,
-                        cr.version,
-                        cr.snarkos_sha,
+                        peer_info.version,
+                        peer_info.snarkos_sha,
                         ConnectionMode::Gateway,
                     );
                 }
@@ -1545,9 +1670,18 @@ impl<N: Network> Handshake for Gateway<N> {
                     }
                 }
             }
+            // The handshake cannot succeed before it has learned the peer's listening address, so
+            // this is unreachable; if it ever happened, the connection would go live with neither a
+            // peer pool nor a resolver entry, and every event on it would be discarded as coming
+            // from an unknown peer. Refuse it instead of leaving it in that state.
+            (Ok(_), None) => {
+                return Err(ConnectError::other(format!(
+                    "the handshake with '{peer_addr}' succeeded without a listening address"
+                )));
+            }
             // The handshake failed before the peer's listening address was known, so there is nothing
             // in the pool to roll back.
-            (_, None) => {}
+            (Err(_), None) => {}
         }
 
         // Abort the connection on failure whether or not the peer reached the pool.
@@ -1557,202 +1691,329 @@ impl<N: Network> Handshake for Gateway<N> {
     }
 }
 
-/// A macro unwrapping the expected handshake event or returning an error for unexpected events.
-macro_rules! expect_event {
-    ($event_ty:path, $framed:expr, $peer_addr:expr) => {
-        match $framed.try_next().await? {
-            // Received the expected event, proceed.
-            Some($event_ty(data)) => {
-                trace!("{CONTEXT} Received '{}' from '{}'", data.name(), $peer_addr);
-                data
-            }
-            // Received a disconnect event, abort.
-            Some(Event::Disconnect($crate::events::Disconnect { reason })) => {
-                return Err(ConnectError::other(format!("'{}' disconnected with reason \"{reason}\"", $peer_addr)));
-            }
-            // Received an unexpected event, abort.
-            Some(ty) => {
-                return Err(ConnectError::other(format!(
-                    "'{}' did not follow the handshake protocol: received {:?} instead of {}",
-                    $peer_addr,
-                    ty.name(),
-                    stringify!($msg_ty),
-                )));
-            }
-            // Received nothing.
-            None => return Err(ConnectError::IoError(io::ErrorKind::BrokenPipe.into())),
-        }
-    };
+/// Serializes a handshake payload for transmission inside a Noise message.
+fn encode_payload<T: ToBytes>(payload: &T) -> Result<Vec<u8>, ConnectError> {
+    snarkos_node_bft_events::encode_payload(payload)
 }
 
-/// Send the given message to the peer.
-async fn send_event<N: Network>(
-    framed: &mut Framed<&mut TcpStream, EventCodec<N>>,
+/// Deserializes a handshake payload received inside a Noise message.
+fn decode_payload<T: FromBytes>(peer_addr: SocketAddr, bytes: &[u8]) -> Result<T, ConnectError> {
+    snarkos_node_bft_events::decode_payload(peer_addr, bytes)
+}
+
+/// Verifies a peer's proof that it owns the Aleo address it claims: its signature over the binding
+/// message for this Noise session.
+///
+/// This is by far the most expensive step of the handshake, which is why both sides only reach it
+/// once every cheap check has already passed.
+#[must_use]
+async fn verify_binding_signature<N: Network>(
     peer_addr: SocketAddr,
-    event: Event<N>,
-) -> io::Result<()> {
-    trace!("{CONTEXT} Sending '{}' to '{peer_addr}'", event.name());
-    framed.send(event).await
+    signature: Data<Signature<N>>,
+    address: Address<N>,
+    binding: &[u8],
+) -> Option<DisconnectReason> {
+    // Perform the deferred non-blocking deserialization of the signature.
+    let Ok(signature) = spawn_blocking!(signature.deserialize_blocking()) else {
+        warn!("{CONTEXT} Handshake with '{peer_addr}' failed (cannot deserialize the signature)");
+        return Some(DisconnectReason::InvalidChallengeResponse);
+    };
+    // Verify the signature.
+    if !signature.verify_bytes(&address, binding) {
+        warn!("{CONTEXT} Handshake with '{peer_addr}' failed (invalid signature)");
+        return Some(DisconnectReason::InvalidChallengeResponse);
+    }
+
+    None
+}
+
+/// Concludes a Noise handshake, handing the stream back to the connection.
+///
+/// The stream deliberately goes back unframed. [`Reading`] builds a codec of its own, capped at the
+/// 256 MiB an event may be rather than the 64 KiB a Noise message may be, and takes full
+/// responsibility for the stream from here on. Handing it a bare stream is only sound because the
+/// session reads its messages exactly: anything the peer pipelined behind the last handshake message
+/// is still on the socket rather than in a buffer about to be dropped.
+fn finish_noise_handshake(noise: NoiseSession<&mut TcpStream>) {
+    // Note: the transport keys are discarded here, leaving the resulting connection unencrypted.
+    let _stream = noise.into_inner();
 }
 
 impl<N: Network> Gateway<N> {
-    /// The connection initiator side of the handshake.
-    async fn handshake_inner_initiator<'a>(
+    /// Returns the snarkOS commit hash to disclose to a peer, if any.
+    fn snarkos_sha(&self) -> Option<[u8; 40]> {
+        let current_block_height = self.ledger.latest_block_height();
+        let consensus_version = N::CONSENSUS_VERSION(current_block_height).unwrap();
+        match (self.is_dev(), consensus_version >= ConsensusVersion::V12, get_repo_commit_hash()) {
+            (true, _, Some(sha)) => Some(sha),
+            (_, true, Some(sha)) => Some(sha),
+            _ => None,
+        }
+    }
+
+    /// The connection initiator side of the Noise handshake.
+    ///
+    /// The initiator does the expensive work first: it signs before the responder has committed to
+    /// anything, and only learns whether it was accepted when the fourth message arrives. See
+    /// [`Gateway::handshake_inner_responder_noise`] for the other half of that bargain.
+    async fn handshake_inner_initiator_noise<'a>(
         &'a self,
         peer_addr: SocketAddr,
         restrictions_id: Field<N>,
         stream: &'a mut TcpStream,
-    ) -> Result<ChallengeRequest<N>, ConnectError> {
+    ) -> Result<PeerInfo<N>, ConnectError> {
+        // Note who answered here last time, before the pool entry becomes a connecting one and stops
+        // carrying it.
+        let expected_address = match self.peer_pool.read().get(&peer_addr) {
+            Some(Peer::Candidate(peer)) => peer.last_known_aleo_addr,
+            _ => None,
+        };
+
         // Introduce the peer into the peer pool.
         self.add_connecting_peer(peer_addr)?;
 
-        // Construct the stream.
-        let mut framed = Framed::new(stream, EventCodec::<N>::handshake());
+        let mut noise = NoiseSession::new(stream, Role::Initiator)?;
+        let our_info =
+            PeerInfo::new(self.local_ip().port(), self.account.address(), restrictions_id, self.snarkos_sha());
 
-        /* Step 1: Send the challenge request. */
+        /* Message 1: announce ourselves in the clear, so the responder can turn us away cheaply. */
 
-        // Sample a random nonce.
-        let our_nonce: u64 = rand::random();
-        // Determine the snarkOS SHA to send to the peer.
-        let current_block_height = self.ledger.latest_block_height();
-        let consensus_version = N::CONSENSUS_VERSION(current_block_height).unwrap();
-        let snarkos_sha = match (self.is_dev(), consensus_version >= ConsensusVersion::V12, get_repo_commit_hash()) {
-            (true, _, Some(sha)) => Some(sha),
-            (_, true, Some(sha)) => Some(sha),
-            _ => None,
+        let hint = HandshakeHint {
+            version: our_info.version,
+            listener_port: our_info.listener_port,
+            address: our_info.address,
         };
-        // Send a challenge request to the peer.
-        let our_request = ChallengeRequest::new(self.local_ip().port(), self.account.address(), our_nonce, snarkos_sha);
-        send_event(&mut framed, peer_addr, Event::ChallengeRequest(our_request)).await?;
+        noise.send(&encode_payload(&hint)?).await?;
 
-        /* Step 2: Receive the peer's challenge response followed by the challenge request. */
+        /* Message 2: receive the responder's metadata, which deliberately carries no signature. */
 
-        // Listen for the challenge response message.
-        let peer_response = expect_event!(Event::ChallengeResponse, framed, peer_addr);
-        // Listen for the challenge request message.
-        let peer_request = expect_event!(Event::ChallengeRequest, framed, peer_addr);
+        let peer_info: PeerInfo<N> = decode_payload(peer_addr, &noise.recv().await?)?;
 
-        // Verify the challenge response. If a disconnect reason was returned, send the disconnect message and abort.
-        if let Some(reason) = self
-            .verify_challenge_response(peer_addr, peer_request.address, peer_response, restrictions_id, our_nonce)
-            .await
-        {
-            send_event(&mut framed, peer_addr, reason.into()).await?;
-            return Err(ConnectError::application(reason));
-        }
+        // The handshake hash at this point already commits to both ephemeral keys, the responder's
+        // static key and every payload exchanged so far, so a signature over it is only valid for
+        // this session with this responder, and cannot be relayed into another one.
+        let binding = binding_message(HANDSHAKE_DOMAIN, Role::Initiator, &noise.handshake_hash()?);
 
-        // Verify the challenge request. If a disconnect reason was returned, send the disconnect message and abort.
-        if let Some(reason) = self.verify_challenge_request(peer_addr, &peer_request) {
-            send_event(&mut framed, peer_addr, reason.into()).await?;
+        // Check the peer over before signing anything for it.
+        if let Some(reason) = self.verify_peer_info(peer_addr, &peer_info, restrictions_id) {
             return Err(reason.into_connect_error(peer_addr));
         }
 
-        /* Step 3: Send the challenge response. */
+        // A validator is expected to keep its Aleo address and change its listening address rather
+        // than the other way around (the peer pool is pruned on that assumption), so a mismatch here
+        // is not a peer that has legitimately moved.
+        if let Some(expected) = expected_address
+            && peer_info.address != expected
+        {
+            warn!("{CONTEXT} Dropping '{peer_addr}': expected validator {expected}, got {}", peer_info.address);
+            return Err(DisconnectReason::InvalidChallengeResponse.into_connect_error(peer_addr));
+        }
 
-        // Sign the counterparty nonce.
-        let response_nonce: u64 = rand::random();
-        let data = [peer_request.nonce.to_le_bytes(), response_nonce.to_le_bytes()].concat();
-        let Ok(our_signature) = self.account.sign_bytes(&data, &mut rand::rng()) else {
-            return Err(ConnectError::other(anyhow!("Failed to sign the challenge request nonce")));
+        /* Message 3: disclose ourselves and prove that we own the Aleo address we claim. */
+
+        let Ok(our_signature) = self.account.sign_bytes(&binding, &mut rand::rng()) else {
+            return Err(ConnectError::other(anyhow!("Failed to sign the handshake binding")));
         };
-        // Send the challenge response.
-        let our_response =
-            ChallengeResponse { restrictions_id, signature: Data::Object(our_signature), nonce: response_nonce };
-        send_event(&mut framed, peer_addr, Event::ChallengeResponse(our_response)).await?;
+        let our_message = InitiatorInfo { info: our_info, signature: Data::Object(our_signature) };
+        noise.send(&encode_payload(&our_message)?).await?;
 
-        Ok(peer_request)
+        // Capture the binding for the responder's proof before the hash becomes unavailable; it
+        // additionally commits to our static key and to the message we have just sent.
+        let peer_binding = binding_message(HANDSHAKE_DOMAIN, Role::Responder, &noise.handshake_hash()?);
+
+        /* Message 4: receive the responder's verdict. */
+
+        let mut noise = noise.into_transport_mode()?;
+        let verdict = decode_payload::<ResponderProof<N>>(peer_addr, &noise.recv().await?)?;
+
+        // The pattern is over, so the stream goes back to the connection. The responder considers the
+        // handshake done the moment it sent this message and is free to start sending events while we
+        // are still verifying below; those bytes wait on the socket for the event codec.
+        finish_noise_handshake(noise);
+
+        let peer_signature = match verdict {
+            ResponderProof::Accepted { signature } => signature,
+            ResponderProof::Rejected { reason } => {
+                warn!("{CONTEXT} '{peer_addr}' rejected the handshake with reason \"{reason}\"");
+                return Err(reason.into_connect_error(peer_addr));
+            }
+        };
+
+        if let Some(reason) =
+            verify_binding_signature(peer_addr, peer_signature, peer_info.address, &peer_binding).await
+        {
+            return Err(reason.into_connect_error(peer_addr));
+        }
+
+        Ok(peer_info)
     }
 
-    /// The connection responder side of the handshake.
-    async fn handshake_inner_responder<'a>(
+    /// The connection responder side of the Noise handshake.
+    ///
+    /// Every expensive operation is deferred for as long as the protocol allows: the responder
+    /// verifies a signature only once the initiator's authenticated metadata has passed all of the
+    /// cheap checks, and produces one only once that verification has succeeded.
+    ///
+    /// Committee membership is public, so anyone can claim a validator's identity. That claim buys
+    /// a handful of Diffie-Hellman operations and a signature verification. Extracting a signature
+    /// requires holding the committee key, and reaching the verification requires completing the
+    /// pattern, which a peer that cannot receive our reply - a spoofed source address - cannot do.
+    async fn handshake_inner_responder_noise<'a>(
         &'a self,
         peer_addr: SocketAddr,
         peer_ip: &mut Option<SocketAddr>,
         restrictions_id: Field<N>,
         stream: &'a mut TcpStream,
-    ) -> Result<ChallengeRequest<N>, ConnectError> {
-        // Construct the stream.
-        let mut framed = Framed::new(stream, EventCodec::<N>::handshake());
+    ) -> Result<PeerInfo<N>, ConnectError> {
+        /* Message 1: the peer's cleartext hint. Everything it claims is re-checked in message 3. */
 
-        /* Step 1: Receive the challenge request. */
+        // The first message is read without deriving any keys, so that everything below costs the
+        // responder no more than parsing and lookups until it has decided the peer is worth talking
+        // to.
+        let pending = PendingSession::accept(stream).await?;
+        let hint: HandshakeHint<N> = decode_payload(peer_addr, pending.first_payload()?)?;
+        let listener_addr = SocketAddr::new(peer_addr.ip(), hint.listener_port);
 
-        // Listen for the challenge request message.
-        let peer_request = expect_event!(Event::ChallengeRequest, framed, peer_addr);
-
-        // Ensure the address is not the same as this node.
-        if self.account.address() == peer_request.address {
-            return Err(ConnectError::SelfConnect { address: peer_addr });
+        // Turn the peer away before performing any Diffie-Hellman if we already know we do not want
+        // it. Nothing here is trustworthy yet - message 3 runs all of it again against the
+        // authenticated copy - but every one of these is a peer that would be refused either way,
+        // and the committee check in particular is one an attacker cannot talk its way past.
+        if let Err(reason) = self.ensure_peer_is_allowed(listener_addr) {
+            return Err(reason.into_connect_error(peer_addr));
         }
-
-        // Obtain the peer's listening address.
-        *peer_ip = Some(SocketAddr::new(peer_addr.ip(), peer_request.listener_port));
-        let peer_ip = peer_ip.unwrap();
-
-        // Knowing the peer's listening address, ensure it is allowed to connect.
-        if let Err(reason) = self.ensure_peer_is_allowed(peer_ip) {
-            send_event(&mut framed, peer_addr, reason.into()).await?;
+        if let Some(reason) = self.verify_peer_identity(peer_addr, hint.version, hint.listener_port, hint.address) {
             return Err(reason.into_connect_error(peer_addr));
         }
 
-        // Introduce the peer into the peer pool.
-        self.add_connecting_peer(peer_ip)?;
+        // The peer pool is the only thing mutated here, so it goes last: there is no point admitting
+        // a peer that one of the checks above was about to turn away. Recording the listening address
+        // only once that has succeeded also stops a peer claiming somebody else's port from getting
+        // their entry downgraded by failing this handshake.
+        self.add_connecting_peer(listener_addr)?;
+        *peer_ip = Some(listener_addr);
 
-        // Verify the challenge request. If a disconnect reason was returned, send the disconnect message and abort.
-        if let Some(reason) = self.verify_challenge_request(peer_addr, &peer_request) {
-            send_event(&mut framed, peer_addr, reason.into()).await?;
-            return Err(reason.into_connect_error(peer_addr));
-        }
+        /* Message 2: disclose ourselves, but do not sign anything yet. */
 
-        /* Step 2: Send the challenge response followed by own challenge request. */
+        // The peer has passed every free check, so it is now worth deriving keys for.
+        let mut noise = pending.into_session()?;
 
-        // Sign the counterparty nonce.
-        let response_nonce: u64 = rand::random();
-        let data = [peer_request.nonce.to_le_bytes(), response_nonce.to_le_bytes()].concat();
-        let Ok(our_signature) = self.account.sign_bytes(&data, &mut rand::rng()) else {
-            return Err(ConnectError::other(anyhow!("Failed to sign the challenge request nonce")));
-        };
-        // Send the challenge response.
-        let our_response =
-            ChallengeResponse { restrictions_id, signature: Data::Object(our_signature), nonce: response_nonce };
-        send_event(&mut framed, peer_addr, Event::ChallengeResponse(our_response)).await?;
+        let our_info =
+            PeerInfo::new(self.local_ip().port(), self.account.address(), restrictions_id, self.snarkos_sha());
+        noise.send(&encode_payload(&our_info)?).await?;
 
-        // Sample a random nonce.
-        let our_nonce: u64 = rand::random();
-        // Determine the snarkOS SHA to send to the peer.
-        let current_block_height = self.ledger.latest_block_height();
-        let consensus_version = N::CONSENSUS_VERSION(current_block_height).unwrap();
-        let snarkos_sha = match (self.is_dev(), consensus_version >= ConsensusVersion::V12, get_repo_commit_hash()) {
-            (true, _, Some(sha)) => Some(sha),
-            (_, true, Some(sha)) => Some(sha),
-            _ => None,
-        };
-        // Send the challenge request.
-        let our_request = ChallengeRequest::new(self.local_ip().port(), self.account.address(), our_nonce, snarkos_sha);
-        send_event(&mut framed, peer_addr, Event::ChallengeRequest(our_request)).await?;
+        // The binding the initiator is expected to have signed.
+        let peer_binding = binding_message(HANDSHAKE_DOMAIN, Role::Initiator, &noise.handshake_hash()?);
 
-        /* Step 3: Receive the challenge response. */
+        /* Message 3: the peer's authenticated metadata and its proof of identity. */
 
-        // Listen for the challenge response message.
-        let peer_response = expect_event!(Event::ChallengeResponse, framed, peer_addr);
-        // Verify the challenge response. If a disconnect reason was returned, send the disconnect message and abort.
-        if let Some(reason) = self
-            .verify_challenge_response(peer_addr, peer_request.address, peer_response, restrictions_id, our_nonce)
-            .await
+        let InitiatorInfo { info: peer_info, signature: peer_signature } =
+            decode_payload::<InitiatorInfo<N>>(peer_addr, &noise.recv().await?)?;
+
+        // Our own binding additionally commits to the peer's static key and to the message it has
+        // just sent, so it can only be captured after that message has been processed.
+        let binding = binding_message(HANDSHAKE_DOMAIN, Role::Responder, &noise.handshake_hash()?);
+        let mut noise = noise.into_transport_mode()?;
+
+        // The cleartext hint is a claim, not a fact: reject the peer if it does not match what it
+        // has now authenticated, as otherwise the hint would be a way to bypass the checks above.
+        if (hint.version, hint.listener_port, hint.address)
+            != (peer_info.version, peer_info.listener_port, peer_info.address)
         {
-            send_event(&mut framed, peer_addr, reason.into()).await?;
-            Err(reason.into_connect_error(peer_addr))
-        } else {
-            Ok(peer_request)
+            warn!("{CONTEXT} Handshake with '{peer_addr}' failed (the handshake hint was contradicted)");
+            return self.reject_noise_handshake(peer_addr, noise, DisconnectReason::ProtocolViolation).await;
         }
+
+        // Everything below is a lookup or a comparison; only once all of it passes is the peer
+        // worth the cost of a signature verification.
+        if let Some(reason) = self.verify_peer_info(peer_addr, &peer_info, restrictions_id) {
+            return self.reject_noise_handshake(peer_addr, noise, reason).await;
+        }
+
+        /* Message 4: having checked the peer over, verify its proof and produce our own. */
+
+        if let Some(reason) =
+            verify_binding_signature(peer_addr, peer_signature, peer_info.address, &peer_binding).await
+        {
+            return self.reject_noise_handshake(peer_addr, noise, reason).await;
+        }
+
+        let Ok(our_signature) = self.account.sign_bytes(&binding, &mut rand::rng()) else {
+            return Err(ConnectError::other(anyhow!("Failed to sign the handshake binding")));
+        };
+        noise.send(&encode_payload(&ResponderProof::Accepted { signature: Data::Object(our_signature) })?).await?;
+
+        finish_noise_handshake(noise);
+
+        Ok(peer_info)
     }
 
-    /// Verifies the given challenge request. Returns a disconnect reason if the request is invalid.
-    #[must_use]
-    fn verify_challenge_request(&self, peer_addr: SocketAddr, event: &ChallengeRequest<N>) -> Option<DisconnectReason> {
-        // Retrieve the components of the challenge request.
-        let &ChallengeRequest { version, listener_port, address, nonce: _, ref snarkos_sha } = event;
-        log_repo_sha_comparison(peer_addr, snarkos_sha, CONTEXT);
+    /// Tells the initiator why it was turned away, and fails the handshake with that reason.
+    async fn reject_noise_handshake(
+        &self,
+        peer_addr: SocketAddr,
+        mut noise: NoiseSession<&mut TcpStream>,
+        reason: DisconnectReason,
+    ) -> Result<PeerInfo<N>, ConnectError> {
+        noise.send(&encode_payload(&ResponderProof::<N>::Rejected { reason })?).await?;
 
+        Err(reason.into_connect_error(peer_addr))
+    }
+
+    /// Verifies the metadata a peer disclosed during the Noise handshake. Returns a disconnect
+    /// reason if the peer is not acceptable.
+    ///
+    /// Every check reachable from here is a lookup or a comparison, which is precisely what makes
+    /// it safe to run before verifying the peer's signature.
+    #[must_use]
+    fn verify_peer_info(
+        &self,
+        peer_addr: SocketAddr,
+        info: &PeerInfo<N>,
+        expected_restrictions_id: Field<N>,
+    ) -> Option<DisconnectReason> {
+        log_repo_sha_comparison(peer_addr, &info.snarkos_sha, CONTEXT);
+
+        // Verify the restrictions ID. This is the only check here that the cleartext hint cannot
+        // carry, as the peer would simply state the expected value; it is left to this point.
+        if info.restrictions_id != expected_restrictions_id {
+            warn!("{CONTEXT} Handshake with '{peer_addr}' failed (incorrect restrictions ID)");
+            return Some(DisconnectReason::InvalidChallengeResponse);
+        }
+
+        self.verify_peer_identity(peer_addr, info.version, info.listener_port, info.address)
+    }
+
+    /// Everything a peer's claimed identity can be held to without any cryptography.
+    ///
+    /// These are all lookups and comparisons, which is what makes them safe to run against the
+    /// unauthenticated hint in the Noise handshake's first message, and worth running there: a peer
+    /// that fails one of them would fail it again against the authenticated copy, so there is no
+    /// reason to spend a Diffie-Hellman on it first.
+    #[must_use]
+    fn verify_peer_identity(
+        &self,
+        peer_addr: SocketAddr,
+        version: u32,
+        listener_port: u16,
+        address: Address<N>,
+    ) -> Option<DisconnectReason> {
+        // Ensure the address is not the same as this node's.
+        if self.account.address() == address {
+            return Some(DisconnectReason::SelfConnect);
+        }
+
+        self.verify_peer_claims(peer_addr, version, listener_port, address)
+    }
+
+    /// The checks a peer's claimed identity can be held to without any cryptography.
+    #[must_use]
+    fn verify_peer_claims(
+        &self,
+        peer_addr: SocketAddr,
+        version: u32,
+        listener_port: u16,
+        address: Address<N>,
+    ) -> Option<DisconnectReason> {
         let listener_addr = SocketAddr::new(peer_addr.ip(), listener_port);
 
         // Ensure the event protocol version is not outdated.
@@ -1776,37 +2037,6 @@ impl<N: Network> Gateway<N> {
             return Some(DisconnectReason::AlreadyConnectedToAleoAddress);
         }
 
-        None
-    }
-
-    /// Verifies the given challenge response. Returns a disconnect reason if the response is invalid.
-    #[must_use]
-    async fn verify_challenge_response(
-        &self,
-        peer_addr: SocketAddr,
-        peer_address: Address<N>,
-        response: ChallengeResponse<N>,
-        expected_restrictions_id: Field<N>,
-        expected_nonce: u64,
-    ) -> Option<DisconnectReason> {
-        // Retrieve the components of the challenge response.
-        let ChallengeResponse { restrictions_id, signature, nonce } = response;
-
-        // Verify the restrictions ID.
-        if restrictions_id != expected_restrictions_id {
-            warn!("{CONTEXT} Handshake with '{peer_addr}' failed (incorrect restrictions ID)");
-            return Some(DisconnectReason::InvalidChallengeResponse);
-        }
-        // Perform the deferred non-blocking deserialization of the signature.
-        let Ok(signature) = spawn_blocking!(signature.deserialize_blocking()) else {
-            warn!("{CONTEXT} Handshake with '{peer_addr}' failed (cannot deserialize the signature)");
-            return Some(DisconnectReason::InvalidChallengeResponse);
-        };
-        // Verify the signature.
-        if !signature.verify_bytes(&peer_address, &[expected_nonce.to_le_bytes(), nonce.to_le_bytes()].concat()) {
-            warn!("{CONTEXT} Handshake with '{peer_addr}' failed (invalid signature)");
-            return Some(DisconnectReason::InvalidChallengeResponse);
-        }
         None
     }
 }
@@ -1851,6 +2081,31 @@ mod prop_tests {
     use test_strategy::proptest;
 
     type CurrentNetwork = MainnetV0;
+
+    /// The per-connection queues are sized from the fetch-timeout window, not the GC window.
+    ///
+    /// Each slot can hold a full `Transmission`, so the depth is a direct multiplier on the heap a
+    /// single peer can pin by not reading its socket. Pin the derivation so a regression is loud.
+    #[test]
+    fn test_per_connection_queue_depth() {
+        use crate::gateway::{QUEUE_WINDOW_ROUNDS, per_connection_queue_depth};
+        use snarkvm::console::network::Network;
+
+        // The window is `MAX_FETCH_TIMEOUT` expressed in rounds.
+        assert_eq!(QUEUE_WINDOW_ROUNDS, 3);
+
+        let certificates = CurrentNetwork::LATEST_MAX_CERTIFICATES() as usize;
+        let transmissions = BatchHeader::<CurrentNetwork>::MAX_TRANSMISSIONS_PER_BATCH;
+        let depth = per_connection_queue_depth::<CurrentNetwork>();
+
+        assert_eq!(depth, 2 * QUEUE_WINDOW_ROUNDS * certificates * (transmissions + 1));
+
+        // It must cover a peer fetching every transmission of every certificate for the window...
+        assert!(depth >= QUEUE_WINDOW_ROUNDS * certificates * transmissions);
+        // ...but stay far below the old `MAX_GC_ROUNDS`-derived depth, which let one peer pin
+        // 400,000 transmissions.
+        assert!(depth < 2 * BatchHeader::<CurrentNetwork>::MAX_GC_ROUNDS * certificates * transmissions / 8);
+    }
 
     impl Debug for Gateway<CurrentNetwork> {
         fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {

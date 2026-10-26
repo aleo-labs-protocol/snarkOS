@@ -19,6 +19,8 @@ use snarkvm::{
     prelude::Network,
 };
 
+use crate::helpers::fmt_id;
+
 use anyhow::{Result, bail, ensure};
 use indexmap::IndexSet;
 use std::collections::{BTreeMap, HashMap};
@@ -105,17 +107,26 @@ impl<N: Network> DAG<N> {
     pub fn insert(&mut self, certificate: BatchCertificate<N>) {
         let round = certificate.round();
         let author = certificate.author();
+        let certificate_id = certificate.id();
 
         // If the certificate was not recently committed, insert it into the DAG.
-        if !self.is_recently_committed(round, certificate.id()) {
+        if !self.is_recently_committed(round, certificate_id) {
             // Insert the certificate into the DAG.
             let previous = self.graph.entry(round).or_default().insert(author, certificate);
             // If a previous certificate existed for the author, log it.
-            if previous.is_none() {
-                trace!("Added new certificate for round {round} by author {author} to the DAG");
-            } else {
-                #[cfg(debug_assertions)]
-                error!("A certificate for round {round} by author {author} already existed in the DAG");
+            match previous {
+                None => trace!("Added new certificate for round {round} by author {author} to the DAG"),
+                // Re-inserting the same certificate is a no-op from a consensus perspective.
+                Some(previous) if previous.id() == certificate_id => {
+                    trace!("Certificate for round {round} by author {author} already existed in the DAG");
+                }
+                // A second certificate for one author in a round means the author equivocated. The
+                // DAG keeps whichever arrived last, so validators that saw both may now disagree.
+                Some(previous) => error!(
+                    "A certificate for round {round} by author {author} already existed in the DAG - replaced {} with {}",
+                    fmt_id(previous.id()),
+                    fmt_id(certificate_id),
+                ),
             }
         }
     }

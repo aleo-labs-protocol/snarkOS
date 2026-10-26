@@ -15,8 +15,8 @@
 
 use crate::StorageService;
 use snarkvm::{
-    ledger::narwhal::{BatchHeader, Transmission, TransmissionID},
-    prelude::{Field, Network, Result, bail},
+    ledger::narwhal::{Transmission, TransmissionID},
+    prelude::{Field, Network},
 };
 
 use indexmap::{IndexMap, IndexSet, indexset, map::Entry};
@@ -51,11 +51,14 @@ impl<N: Network> BFTMemoryService<N> {
 }
 
 impl<N: Network> StorageService<N> for BFTMemoryService<N> {
-    /// Returns `true` if the storage contains the specified `transmission ID`.
-    fn contains_transmission(&self, transmission_id: TransmissionID<N>) -> bool {
-        // Check if the transmission ID exists in storage.
+    /// Returns `true` if the storage holds the transmission for the specified `transmission ID`.
+    fn contains_retrievable_transmission(&self, transmission_id: TransmissionID<N>) -> bool {
         self.transmissions.read().contains_key(&transmission_id)
-            || self.aborted_transmission_ids.read().contains_key(&transmission_id)
+    }
+
+    /// Returns `true` if the specified `transmission ID` is recorded as aborted.
+    fn contains_aborted_transmission(&self, transmission_id: TransmissionID<N>) -> bool {
+        self.aborted_transmission_ids.read().contains_key(&transmission_id)
     }
 
     /// Returns the transmission for the given `transmission ID`.
@@ -65,45 +68,12 @@ impl<N: Network> StorageService<N> for BFTMemoryService<N> {
         self.transmissions.read().get(&transmission_id).map(|(transmission, _)| transmission).cloned()
     }
 
-    /// Returns the missing transmissions in storage from the given transmissions.
-    fn find_missing_transmissions(
-        &self,
-        batch_header: &BatchHeader<N>,
-        mut transmissions: HashMap<TransmissionID<N>, Transmission<N>>,
-        aborted_transmissions: HashSet<TransmissionID<N>>,
-    ) -> Result<HashMap<TransmissionID<N>, Transmission<N>>> {
-        // Initialize a list for the missing transmissions from storage.
-        let mut missing_transmissions = HashMap::new();
-        // Lock the existing transmissions.
-        let known_transmissions = self.transmissions.read();
-        // Ensure the declared transmission IDs are all present in storage or the given transmissions map.
-        for transmission_id in batch_header.transmission_ids() {
-            // If the transmission ID does not exist, ensure it was provided by the caller or aborted.
-            if !known_transmissions.contains_key(transmission_id) {
-                // Retrieve the transmission.
-                match transmissions.remove(transmission_id) {
-                    // Append the transmission if it exists.
-                    Some(transmission) => {
-                        missing_transmissions.insert(*transmission_id, transmission);
-                    }
-                    // If the transmission does not exist, check if it was aborted.
-                    None => {
-                        if !aborted_transmissions.contains(transmission_id) {
-                            bail!("Failed to provide a transmission");
-                        }
-                    }
-                }
-            }
-        }
-        Ok(missing_transmissions)
-    }
-
     /// Inserts the given certificate ID for each of the transmission IDs, using the missing transmissions map, into storage.
     fn insert_transmissions(
         &self,
         certificate_id: Field<N>,
         transmission_ids: IndexSet<TransmissionID<N>>,
-        aborted_transmission_ids: HashSet<TransmissionID<N>>,
+        mut aborted_transmission_ids: HashSet<TransmissionID<N>>,
         mut missing_transmissions: HashMap<TransmissionID<N>, Transmission<N>>,
     ) {
         // Acquire the transmissions write lock.
@@ -124,10 +94,17 @@ impl<N: Network> StorageService<N> for BFTMemoryService<N> {
                 Entry::Vacant(vacant_entry) => {
                     // Retrieve the missing transmission.
                     let Some(transmission) = missing_transmissions.remove(&transmission_id) else {
-                        if !aborted_transmission_ids.contains(&transmission_id)
-                            && !self.contains_transmission(transmission_id)
-                        {
-                            error!("Failed to provide a missing transmission {transmission_id}");
+                        // note: `self.contains_retrievable_transmission` would deadlock here; it
+                        // read-locks `self.transmissions`, which is write-locked above.
+                        if !aborted_transmission_ids.contains(&transmission_id) {
+                            // An ID that storage already knows as aborted needs no bytes to be
+                            // inserted, but this certificate still has to be counted against the
+                            // aborted entry: `remove_transmissions` decrements it either way.
+                            if aborted_transmission_ids_lock.contains_key(&transmission_id) {
+                                aborted_transmission_ids.insert(transmission_id);
+                            } else {
+                                error!("Failed to provide a missing transmission {transmission_id}");
+                            }
                         }
                         continue 'outer;
                     };
@@ -202,5 +179,65 @@ impl<N: Network> StorageService<N> for BFTMemoryService<N> {
     #[cfg(any(test, feature = "test"))]
     fn as_hashmap(&self) -> HashMap<TransmissionID<N>, (Transmission<N>, IndexSet<Field<N>>)> {
         self.transmissions.read().clone().into_iter().collect()
+    }
+}
+
+/// The expectations shared with every other service are asserted in `crate::tests`; what remains
+/// here is specific to this one's locking.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use snarkvm::{
+        console::network::MainnetV0,
+        prelude::{Rng, TestRng, Uniform},
+    };
+
+    use std::{sync::mpsc, time::Duration};
+
+    type CurrentNetwork = MainnetV0;
+
+    fn sample_transmission_id(rng: &mut TestRng) -> TransmissionID<CurrentNetwork> {
+        TransmissionID::Transaction(
+            <CurrentNetwork as Network>::TransactionID::from(Field::rand(rng)),
+            <CurrentNetwork as Network>::TransmissionChecksum::from(rng.random::<u128>()),
+        )
+    }
+
+    /// `insert_transmissions` must return when a declared transmission is neither provided nor
+    /// aborted, rather than deadlock on a re-entrant lock acquisition.
+    ///
+    /// That branch is reached through the gap between `find_missing_transmissions` and
+    /// `insert_transmissions`, which take separate locks: a concurrent `remove_transmissions` can
+    /// evict an entry the first call saw and therefore left out of `missing_transmissions`.
+    ///
+    /// The call runs on its own thread so a regression fails on the timeout rather than hanging
+    /// the test binary.
+    #[test]
+    fn insert_transmissions_returns_when_a_transmission_is_neither_provided_nor_aborted() {
+        let (sender, receiver) = mpsc::channel();
+
+        std::thread::spawn(move || {
+            let rng = &mut TestRng::default();
+            let service = BFTMemoryService::<CurrentNetwork>::new();
+            let transmission_id = sample_transmission_id(rng);
+
+            // Declare a transmission that is neither provided nor aborted.
+            service.insert_transmissions(
+                Field::rand(rng),
+                indexset![transmission_id],
+                Default::default(),
+                Default::default(),
+            );
+
+            let _ = sender.send(service.contains_retrievable_transmission(transmission_id));
+        });
+
+        let contains = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("insert_transmissions did not return: it re-entered its own lock");
+
+        // The undeliverable transmission is skipped, not recorded as a phantom entry.
+        assert!(!contains);
     }
 }

@@ -235,35 +235,28 @@ pub trait PeerPoolHandling<N: Network>: P2P {
         if peer_pool.len() + listener_addrs.len() - num_updates >= Self::MAXIMUM_POOL_SIZE
             && Self::PEER_SLASHING_COUNT != 0
         {
-            // Collect the addresses of prospect peers.
+            // Collect the prospect peers, along with the key they are ranked by.
+            let now = Instant::now();
             let mut peers_to_slash = peer_pool
                 .iter()
-                .filter_map(|(addr, peer)| {
-                    (matches!(peer, Peer::Candidate(_)) && !trusted_peers.contains(addr)).then_some(*addr)
+                .filter_map(|(addr, peer)| match peer {
+                    Peer::Candidate(candidate) if !trusted_peers.contains(addr) => {
+                        Some((*addr, candidate.total_connection_attempts, candidate.last_connection_attempt))
+                    }
+                    _ => None,
                 })
                 .collect::<Vec<_>>();
 
-            // Get the low-level peer stats.
-            let known_peers = self.tcp().known_peers().snapshot();
-
-            // Sort the list of candidate peers by failure count (descending) and timestamp (ascending).
-            let default_value = (0, Instant::now());
-            peers_to_slash.sort_unstable_by_key(|addr| {
-                let (num_failures, last_seen) = known_peers
-                    .get(&addr.ip())
-                    .map(|stats| (stats.failures(), stats.timestamp()))
-                    .unwrap_or(default_value);
-                (cmp::Reverse(num_failures), last_seen)
+            // Sort by failed attempts (descending), then by the attempt's age (oldest first).
+            peers_to_slash.sort_unstable_by_key(|(_, attempts, last_attempt)| {
+                (cmp::Reverse(*attempts), last_attempt.unwrap_or(now))
             });
 
-            // Retain the candidate peers with the most failures and oldest timestamps.
+            // Retain the candidate peers with the most failed attempts and oldest timestamps.
             peers_to_slash.truncate(Self::PEER_SLASHING_COUNT);
 
             // Remove the peers to slash from the pool.
-            peer_pool.retain(|addr, _| !peers_to_slash.contains(addr));
-
-            // Remove the peers to slash from the low-level list of known peers.
-            self.tcp().known_peers().batch_remove(peers_to_slash.iter().map(|addr| addr.ip()));
+            peer_pool.retain(|addr, _| !peers_to_slash.iter().any(|(slashed, _, _)| slashed == addr));
         }
 
         // Make sure that we won't breach the pool size limit in case the slashing didn't suffice.
@@ -410,23 +403,13 @@ pub trait PeerPoolHandling<N: Network>: P2P {
     }
 
     /// Returns an optionally bounded list of all connected peers sorted by their
-    /// block height (highest first) and failure count (lowest first).
+    /// block height (highest first).
     fn get_best_connected_peers(&self, max_entries: Option<usize>) -> Vec<ConnectedPeer<N>> {
         // Get a snapshot of the currently connected peers.
         let mut peers = self.get_connected_peers();
-        // Get the low-level peer stats.
-        let known_peers = self.tcp().known_peers().snapshot();
 
-        // Sort the prospect peers.
-        peers.sort_unstable_by_key(|peer| {
-            if let Some(peer_stats) = known_peers.get(&peer.listener_addr.ip()) {
-                // Prioritize greatest height, then lowest failure count.
-                (cmp::Reverse(peer.last_height_seen), peer_stats.failures())
-            } else {
-                // Unreachable; use an else-compatible dummy.
-                (cmp::Reverse(peer.last_height_seen), 0)
-            }
-        });
+        // Sort the prospect peers by greatest height.
+        peers.sort_unstable_by_key(|peer| cmp::Reverse(peer.last_height_seen));
         if let Some(max) = max_entries {
             peers.truncate(max);
         }
@@ -515,8 +498,8 @@ pub trait PeerPoolHandling<N: Network>: P2P {
         Ok(peers)
     }
 
-    /// Preserve the peers who have the greatest known block heights, and the lowest
-    /// number of registered network failures.
+    /// Preserve the peers who have the greatest known block heights, and the fewest
+    /// outstanding failed connection attempts.
     ///
     /// # Arguments
     /// * `path` - The path to the file to save the peers to.
@@ -526,19 +509,8 @@ pub trait PeerPoolHandling<N: Network>: P2P {
         // Collect all prospect peers.
         let mut peers = self.get_peers();
 
-        // Get the low-level peer stats.
-        let known_peers = self.tcp().known_peers().snapshot();
-
-        // Sort the list of peers.
-        peers.sort_unstable_by_key(|peer| {
-            if let Some(peer_stats) = known_peers.get(&peer.listener_addr().ip()) {
-                // Prioritize greatest height, then lowest failure count.
-                (cmp::Reverse(peer.last_height_seen()), peer_stats.failures())
-            } else {
-                // Unreachable; use an else-compatible dummy.
-                (cmp::Reverse(peer.last_height_seen()), 0)
-            }
-        });
+        // Sort the list of peers: greatest height first, then fewest failed connection attempts.
+        peers.sort_unstable_by_key(|peer| (cmp::Reverse(peer.last_height_seen()), peer.failed_connection_attempts()));
         if let Some(max) = max_entries {
             peers.truncate(max);
         }
@@ -572,8 +544,10 @@ pub trait PeerPoolHandling<N: Network>: P2P {
                 Ok(())
             }
             Entry::Occupied(mut entry) => match entry.get() {
-                peer @ Peer::Candidate(_) => {
-                    entry.insert(Peer::new_connecting(listener_addr, peer.is_trusted()));
+                // Promote in place rather than replacing the entry, so the candidate's
+                // connection-attempt metadata survives the transition.
+                Peer::Candidate(_) => {
+                    entry.get_mut().promote_to_connecting();
                     Ok(())
                 }
                 Peer::Connecting(_) => Err(ConnectError::AlreadyConnecting { address: listener_addr }),

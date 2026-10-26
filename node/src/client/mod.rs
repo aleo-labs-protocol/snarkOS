@@ -23,7 +23,7 @@ use crate::{
 
 use snarkos_account::Account;
 use snarkos_node_network::{ConnectionMode, NodeType};
-use snarkos_node_rest::Rest;
+use snarkos_node_rest::{Rest, RestVerificationLimits};
 use snarkos_node_router::{
     Heartbeat,
     Inbound,
@@ -136,6 +136,9 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
         node_ip: SocketAddr,
         rest_ip: Option<SocketAddr>,
         rest_rps: u32,
+        rest_verification_limits: RestVerificationLimits,
+        history_api_url: Option<String>,
+        history_json: bool,
         account: Account<N>,
         trusted_peers: &[SocketAddr],
         genesis: Block<N>,
@@ -144,7 +147,6 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
         node_data_dir: NodeDataDir,
         trusted_peers_only: bool,
         dev: Option<u16>,
-        _slipstream_configs: &[std::path::PathBuf],
         signal_handler: Arc<SignalHandler>,
     ) -> Result<Self> {
         // Initialize the ledger.
@@ -156,15 +158,9 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
         }
         .with_context(|| "Failed to initialize the ledger")?;
 
-        // Initialize the Slipstream plugin manager (if any config files were provided).
-        #[cfg(feature = "slipstream-plugins")]
-        if !_slipstream_configs.is_empty() {
-            let manager =
-                snarkvm::slipstream_plugin_manager::SlipstreamPluginManager::from_config_files(_slipstream_configs)
-                    .context("Failed to initialize Slipstream plugin manager")?;
-            ledger.vm().finalize_store().set_slipstream_plugin_manager(manager);
-            let num_plugins = _slipstream_configs.len();
-            tracing::info!(target: "slipstream", "Slipstream plugin manager registered ({num_plugins} plugin(s))");
+        // Later blocks finalized by this node are written as JSON beside the ledger.
+        if history_json {
+            ledger.vm().finalize_store().set_record_history_json(true);
         }
 
         // Initialize the ledger service.
@@ -218,18 +214,28 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
         // Initialize the REST server.
         if let Some(rest_ip) = rest_ip {
             node.rest = Some(
-                Rest::start(rest_ip, rest_rps, None, ledger.clone(), Arc::new(node.clone()), cdn_sync.clone(), sync)
-                    .await?,
+                Rest::start(
+                    rest_ip,
+                    rest_rps,
+                    history_api_url,
+                    None,
+                    ledger.clone(),
+                    Arc::new(node.clone()),
+                    cdn_sync.clone(),
+                    sync,
+                    rest_verification_limits,
+                )
+                .await?,
             );
         }
 
         // Set up everything else after CDN sync is done.
-        if let Some(cdn_sync) = cdn_sync {
-            if let Err(error) = cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN") {
-                crate::log_clean_error(&storage_mode);
-                node.shut_down().await;
-                return Err(error);
-            }
+        if let Some(cdn_sync) = cdn_sync
+            && let Err(error) = cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN")
+        {
+            crate::log_clean_error(&storage_mode);
+            node.shut_down().await;
+            return Err(error);
         }
 
         // Initialize the routing.
@@ -564,12 +570,6 @@ impl<N: Network, C: ConsensusStorage<N>> NodeInterface<N> for Client<N, C> {
 
         // Shut down the node.
         trace!("Shutting down the node...");
-
-        // Shut down the Slipstream plugin service.
-        #[cfg(feature = "slipstream-plugins")]
-        if let Some(manager) = self.ledger.vm().finalize_store().slipstream_plugin_manager().write().as_mut() {
-            manager.unload();
-        }
 
         // Shut down the REST instance.
         if let Some(rest) = &self.rest {

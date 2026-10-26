@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-    <a href="https://circleci.com/gh/ProvableHQ/snarkOS"><img src="https://circleci.com/gh/ProvableHQ/snarkOS.svg?style=svg"></a>
+    <a href="https://github.com/aleo-labs-protocol/snarkOS/actions/workflows/ci.yml?query=branch%3Amainnet"><img src="https://github.com/aleo-labs-protocol/snarkOS/actions/workflows/ci.yml/badge.svg?branch=mainnet"></a>
     <a href="https://codecov.io/gh/ProvableHQ/snarkOS"><img src="https://codecov.io/gh/ProvableHQ/snarkOS/branch/master/graph/badge.svg?token=cck8tS9HpO"/></a>
     <a href="https://discord.gg/aleo"><img src="https://img.shields.io/discord/700454073459015690?logo=discord"/></a>
     <a href="https://twitter.com/AleoHQ"><img src="https://img.shields.io/twitter/follow/AleoHQ?style=social"/></a>
@@ -202,7 +202,8 @@ Once enabled, telemetry metrics are available through:
     // GET /{network}/validators/participation?metadata={true}
     ```
 
-Telemetry is enabled by default, and you can still explicitly specify the `telemetry` feature flag:
+Telemetry is part of the `metrics` feature, which is enabled by default. The `telemetry` feature flag
+is kept as an alias for `metrics`, so commands that name it explicitly still work:
 
 #### 1. [Installation](#2.3-installation)
 
@@ -364,6 +365,9 @@ The following are the options for the `snarkos start` command:
           Specify the requests per second (RPS) rate limit per IP for the REST server
           
           [default: 10]
+
+      --history-compat-mode [<URL>]
+          Serve the routes of the removed `history` feature (`/program/{id}/mapping/{name}/{key}/history/{height}`, `/staking/rewards/{address}/{height}`, ...) from the Provable historical staking API instead of local tables. Takes an optional base URL of that API; by default, the network's own instance is used
 
       --jwt-secret <JWT_SECRET>
           Specify the JWT secret for the REST server (16B, base64-encoded)
@@ -586,12 +590,14 @@ cargo run --release -- clean --dev <NODE_ID>
 
 ## 6.4 Feature Flags
 
-By default, the metrics and telemetry features are turned on for some internal crates.
+By default, the metrics feature is turned on for some internal crates. It carries the validator
+telemetry described in [Validator Telemetry Metrics](#321-validator-telemetry-metrics).
 
 * **history** -
   Enables a /history REST endpoint.
 * **telemetry** -
-  Allows the node to upload telemetry data.
+  Deprecated alias for **metrics**, kept so that existing build commands keep working.
+  Validator telemetry is part of **metrics**.
 * **cuda** -
   Allows some operations to run on the (NVidia) GPU, instead of on the CPU. See [CUDA acceleration for provers](#optional-cuda-acceleration-for-provers) for install tips and current puzzle status.
 * **locktick** -

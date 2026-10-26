@@ -1,6 +1,6 @@
 [package]
 name = "snarkos-node-network"
-version = "4.9.0"
+version = "4.12.0"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "Network-related objects and traits for nodes"
 homepage = "https://aleo.org"
@@ -24,12 +24,18 @@ test = [ ]
 [dependencies.anyhow]
 workspace = true
 
+[dependencies.bytes]
+workspace = true
+
 [dependencies.locktick]
 workspace = true
 features = [ "parking_lot" ]
 optional = true
 
 [dependencies.parking_lot]
+workspace = true
+
+[dependencies.rand]
 workspace = true
 
 [dependencies.tracing]
@@ -48,15 +54,27 @@ workspace = true
 workspace = true
 features = [ "console", "utilities" ]
 
+[dependencies.snow]
+workspace = true
+
 [dependencies.socket2]
 version = "0.6.2"
 
 [dependencies.tokio]
 workspace = true
+features = [ "io-util", "net" ]
+
+[dependencies.tokio-util]
+workspace = true
+features = [ "codec" ]
 
 [dev-dependencies.snarkos-node-network]
 path = "."
 features = [ "test" ]
+
+[dev-dependencies.tokio]
+workspace = true
+features = [ "io-util", "macros", "rt-multi-thread" ]
 
 [build-dependencies.built]
 workspace = true

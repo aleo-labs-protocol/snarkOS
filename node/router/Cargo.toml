@@ -1,6 +1,6 @@
 [package]
 name = "snarkos-node-router"
-version = "4.9.0"
+version = "4.12.0"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "A node router for a decentralized operating system"
 homepage = "https://aleo.org"
@@ -18,6 +18,10 @@ edition = "2024"
 
 [features]
 test = [ ]
+test-helpers = [
+  "snarkos-node-bft-ledger-service/mock",
+  "snarkvm/test-helpers"
+]
 locktick = [
   "dep:locktick",
   "snarkos-node-tcp/locktick",
@@ -32,9 +36,6 @@ serial = [ "snarkos-node-bft-ledger-service/serial" ]
 workspace = true
 
 [dependencies.async-trait]
-workspace = true
-
-[dependencies.colored]
 workspace = true
 
 [dependencies.futures]
@@ -113,7 +114,7 @@ workspace = true
 features = [ "codec" ]
 
 [dependencies.tokio-stream]
-version = "=0.1"
+version = "0.1"
 
 [dependencies.tracing]
 workspace = true
@@ -126,7 +127,7 @@ workspace = true
 features = [ "sink" ]
 
 [dev-dependencies.peak_alloc]
-version = "0.2"
+version = "0.3"
 
 [dev-dependencies.snarkos-node-bft-ledger-service]
 workspace = true
@@ -138,7 +139,7 @@ features = [ "test" ]
 
 [dev-dependencies.snarkos-node-router]
 path = "."
-features = [ "test" ]
+features = [ "test", "test-helpers" ]
 
 [dev-dependencies.snarkos-node-router-messages]
 workspace = true

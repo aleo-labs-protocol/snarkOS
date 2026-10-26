@@ -25,7 +25,6 @@ use snarkvm::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use colored::Colorize;
 #[cfg(feature = "locktick")]
 use locktick::{parking_lot::Mutex, tokio::Mutex as TMutex};
 #[cfg(not(feature = "locktick"))]
@@ -62,9 +61,14 @@ const fn cdn_user_agent() -> &'static str {
 
 /// Updates the metrics during CDN sync.
 #[cfg(feature = "metrics")]
-fn update_block_metrics(height: u32) {
+fn update_block_metrics<N: Network>(height: u32) {
     // Update the BFT height metric.
     crate::metrics::gauge(crate::metrics::bft::HEIGHT, height as f64);
+    // Update the active consensus version metric.
+    crate::metrics::gauge(
+        crate::metrics::consensus::VERSION,
+        N::CONSENSUS_VERSION(height).map_or(0.0, |version| version as u16 as f64),
+    );
 }
 
 pub type SyncResult = Result<u32, (u32, anyhow::Error)>;
@@ -303,7 +307,7 @@ pub async fn load_blocks<N: Network>(
 
                     // Update metrics.
                     #[cfg(feature = "metrics")]
-                    update_block_metrics(current_height);
+                    update_block_metrics::<N>(current_height);
 
                     // Log the progress.
                     log_progress::<BLOCKS_PER_FILE>(timer, current_height, cdn_start, cdn_end, "block");
@@ -395,7 +399,7 @@ async fn download_block_bundles<N: Network>(
                                     Err(idx) => pending_blocks.insert(idx, block),
                                 }
                             }
-                            debug!("Received {ctx} {}", format!("(in {:.2?})", request_time.elapsed()).dimmed());
+                            debug!(dim = true, "Received {ctx} (in {:.2?})", request_time.elapsed());
                             break;
                         }
                         Err(error) => {
@@ -565,10 +569,7 @@ fn log_progress<const OBJECTS_PER_FILE: u32>(
     // Prepare the estimate message (in secs).
     let estimate = format!("(started at height {cdn_start}, est. {time_remaining} remaining)");
     // Log the progress.
-    info!(
-        "Reached {object_name} {current_index} of {cdn_end} - Sync is {sync_percentage}% complete {}",
-        estimate.dimmed()
-    );
+    info!("Reached {object_name} {current_index} of {cdn_end} - Sync is {sync_percentage}% complete {estimate}");
 }
 
 #[cfg(test)]

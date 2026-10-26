@@ -23,3 +23,29 @@ scrape_configs:
   static_configs:
   - targets:
     - host.docker.internal:9000
+    labels:
+      instance_name: validator-0
+      public_ip: 127.0.0.1:9000
+      snarkos_role: validator
+      snarkos_network: testnet
+  - targets:
+    - host.docker.internal:9001
+    labels:
+      instance_name: validator-1
+      public_ip: 127.0.0.1:9001
+      snarkos_role: validator
+      snarkos_network: testnet
+  - targets:
+    - host.docker.internal:9002
+    labels:
+      instance_name: validator-2
+      public_ip: 127.0.0.1:9002
+      snarkos_role: validator
+      snarkos_network: testnet
+  - targets:
+    - host.docker.internal:9003
+    labels:
+      instance_name: validator-3
+      public_ip: 127.0.0.1:9003
+      snarkos_role: validator
+      snarkos_network: testnet

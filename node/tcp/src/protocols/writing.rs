@@ -57,9 +57,12 @@ where
         1024
     }
 
-    /// The maximum time (in milliseconds) allowed for a single message write to flush
-    /// to the underlying stream before the connection is considered dead.
-    const TIMEOUT: Duration = Duration::from_secs(5);
+    /// The maximum time allowed for a single message write, both encoding it and flushing it to
+    /// the underlying stream, before the connection is considered dead.
+    ///
+    /// This has to leave room for encoding the largest message we can produce, as blocks can
+    /// currently be quite large.
+    const TIMEOUT: Duration = Duration::from_secs(10);
 
     /// The type of the outbound messages; unless their serialization is expensive and the message
     /// is broadcasted (in which case it would get serialized multiple times), serialization should
@@ -125,7 +128,6 @@ where
                     .map_err(|e| {
                         let conn_span = create_connection_span(addr, self.tcp().span());
                         error!(parent: conn_span, "can't send a message: {e}");
-                        self.tcp().stats().register_failure();
                         io::ErrorKind::Other.into()
                     })
                     .map(|_| delivery)
@@ -157,7 +159,6 @@ where
                 let _ = message_sender.try_send(msg).map_err(|e| {
                     let conn_span = create_connection_span(addr, self.tcp().span());
                     error!(parent: conn_span, "can't send a message: {e}");
-                    self.tcp().stats().register_failure();
                 });
             }
 
@@ -189,12 +190,17 @@ impl<W: Writing> WritingInternal for W {
         message: Self::Message,
         writer: &mut FramedWrite<A, Self::Codec>,
     ) -> Result<usize, <Self::Codec as Encoder<Self::Message>>::Error> {
-        writer.feed(message).await?;
-        let len = writer.write_buffer().len();
-        // Guard against write starvation
-        match timeout(W::TIMEOUT, writer.flush()).await {
-            Ok(Ok(())) => Ok(len),
-            Ok(Err(e)) => Err(e),
+        // Guard against write starvation. `feed` is covered as well as `flush`, as `FramedWrite`
+        // flushes from within `feed` once its buffer is over the backpressure boundary, so a peer
+        // that has stopped reading blocks `feed` too.
+        let write = async {
+            writer.feed(message).await?;
+            let len = writer.write_buffer().len();
+            writer.flush().await?;
+            Ok(len)
+        };
+        match timeout(W::TIMEOUT, write).await {
+            Ok(result) => result,
             Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "write timed out")),
         }
     }
@@ -222,6 +228,7 @@ impl<W: Writing> WritingInternal for W {
 
         // the task for writing outbound messages
         let self_clone = self.clone();
+        let conn_stats = Arc::clone(conn.stats());
         let conn_span = conn.span().clone();
         let writer_task = tokio::spawn(Box::pin(async move {
             let node = self_clone.tcp();
@@ -240,18 +247,14 @@ impl<W: Writing> WritingInternal for W {
                 match self_clone.write_to_stream(*msg, &mut framed).await {
                     Ok(len) => {
                         let _ = wrapped_msg.delivery_notification.send(Ok(()));
-                        // node.known_peers().register_sent_message(addr.ip(), len);
+                        conn_stats.register_sent_message(len);
                         node.stats().register_sent_message(len);
                         trace!(parent: &conn_span, "sent {len}B");
                     }
                     Err(e) => {
-                        node.known_peers().register_failure(addr.ip());
                         error!(parent: &conn_span, "couldn't send a message: {e}");
-                        let is_fatal = node.config().fatal_io_errors.contains(&e.kind());
                         let _ = wrapped_msg.delivery_notification.send(Err(e));
-                        if is_fatal {
-                            break;
-                        }
+                        break;
                     }
                 }
             }
@@ -301,5 +304,97 @@ struct SenderCleanup {
 impl Drop for SenderCleanup {
     fn drop(&mut self) {
         self.senders.write().remove(&self.addr);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Config, ConnectionSide, Tcp, protocols::Reading};
+    use bytes::Bytes;
+    use std::net::{IpAddr, Ipv4Addr};
+    use tokio::time::Instant;
+    use tokio_util::codec::BytesCodec;
+
+    fn test_config() -> Config {
+        Config { listener_ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)), ..Default::default() }
+    }
+
+    #[derive(Clone)]
+    struct TestNode(Tcp);
+    impl P2P for TestNode {
+        fn tcp(&self) -> &Tcp {
+            &self.0
+        }
+    }
+    #[async_trait]
+    impl Writing for TestNode {
+        type Codec = BytesCodec;
+        type Message = Bytes;
+
+        const TIMEOUT: Duration = Duration::from_millis(200);
+
+        fn codec(&self, _a: SocketAddr, _s: ConnectionSide) -> Self::Codec {
+            Default::default()
+        }
+    }
+    #[async_trait]
+    impl Reading for TestNode {
+        type Codec = BytesCodec;
+        type Message = bytes::BytesMut;
+
+        fn codec(&self, _a: SocketAddr, _s: ConnectionSide) -> Self::Codec {
+            Default::default()
+        }
+
+        async fn process_message(&self, _s: SocketAddr, _m: Self::Message) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn flood(sender: &TestNode, peer: SocketAddr) {
+        let msg = Bytes::from(vec![0u8; 1024 * 1024]);
+        for _ in 0..64 {
+            if sender.unicast(peer, msg.clone()).is_err() {
+                break;
+            }
+        }
+    }
+    async fn disconnected(sender: &TestNode, peer: SocketAddr, within: Duration) -> bool {
+        let deadline = Instant::now() + within;
+        while Instant::now() < deadline {
+            if !sender.tcp().is_connected(peer) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn stalled_peer_is_disconnected() {
+        let sender = TestNode(Tcp::new(test_config()));
+        sender.tcp().enable_listener().await.unwrap();
+        sender.enable_writing().await;
+        let receiver = Tcp::new(test_config());
+        let ip = receiver.enable_listener().await.unwrap();
+        sender.tcp().connect(ip).await.unwrap();
+        let peer = *sender.tcp().connected_addrs().first().unwrap();
+        flood(&sender, peer);
+        assert!(disconnected(&sender, peer, Duration::from_secs(10)).await, "stalled peer not disconnected");
+    }
+
+    #[tokio::test]
+    async fn reading_peer_is_kept() {
+        let sender = TestNode(Tcp::new(test_config()));
+        sender.tcp().enable_listener().await.unwrap();
+        sender.enable_writing().await;
+        let receiver = TestNode(Tcp::new(test_config()));
+        let ip = receiver.tcp().enable_listener().await.unwrap();
+        receiver.enable_reading().await;
+        sender.tcp().connect(ip).await.unwrap();
+        let peer = *sender.tcp().connected_addrs().first().unwrap();
+        flood(&sender, peer);
+        assert!(!disconnected(&sender, peer, Duration::from_secs(3)).await, "reading peer was disconnected");
     }
 }

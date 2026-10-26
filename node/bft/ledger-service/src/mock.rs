@@ -31,20 +31,26 @@ use snarkvm::{
 use locktick::parking_lot::Mutex;
 #[cfg(not(feature = "locktick"))]
 use parking_lot::Mutex;
-use std::{collections::BTreeMap, ops::Range};
+use std::{
+    collections::{BTreeMap, HashSet},
+    ops::Range,
+};
 use tracing::*;
 
-/// A mock ledger service that always returns `false`.
+/// A mock ledger service that always returns `false`, unless configured otherwise.
 #[derive(Debug)]
 pub struct MockLedgerService<N: Network> {
     committee: Committee<N>,
     height_to_round_and_hash: Mutex<BTreeMap<u32, (u64, N::BlockHash)>>,
+    /// The transmission IDs the ledger knows without being able to produce a transmission for them,
+    /// as is the case for the ones it recorded as aborted.
+    known_transmission_ids: HashSet<TransmissionID<N>>,
 }
 
 impl<N: Network> MockLedgerService<N> {
     /// Initializes a new mock ledger service.
     pub fn new(committee: Committee<N>) -> Self {
-        Self { committee, height_to_round_and_hash: Default::default() }
+        Self { committee, height_to_round_and_hash: Default::default(), known_transmission_ids: Default::default() }
     }
 
     /// Initializes a new mock ledger service at the specified height.
@@ -53,7 +59,22 @@ impl<N: Network> MockLedgerService<N> {
         for i in 0..=height {
             height_to_hash.insert(i, (i as u64 * 2, Field::<N>::from_u32(i).into()));
         }
-        Self { committee, height_to_round_and_hash: Mutex::new(height_to_hash) }
+        Self {
+            committee,
+            height_to_round_and_hash: Mutex::new(height_to_hash),
+            known_transmission_ids: Default::default(),
+        }
+    }
+
+    /// Initializes a new mock ledger service that knows the given transmission IDs.
+    ///
+    /// The real ledger reports an aborted transmission ID as contained while holding no transmission
+    /// for it; this models that, which the default mock cannot do.
+    pub fn new_with_known_transmission_ids(
+        committee: Committee<N>,
+        known_transmission_ids: HashSet<TransmissionID<N>>,
+    ) -> Self {
+        Self { committee, height_to_round_and_hash: Default::default(), known_transmission_ids }
     }
 }
 
@@ -144,7 +165,10 @@ impl<N: Network> LedgerService<N> for MockLedgerService<N> {
 
     /// Returns the unconfirmed transaction for the given transaction ID.
     fn get_unconfirmed_transaction(&self, _transaction_id: N::TransactionID) -> Result<Option<Transaction<N>>> {
-        unreachable!("MockLedgerService does not support get_unconfirmed_transaction")
+        // Note: this deliberately does not panic, unlike the other getters. A caller that finds a
+        // transmission ID contained but unretrievable reaches this on its way to establishing that
+        // the ID was aborted, and the mock holds no transactions to hand back.
+        Ok(None)
     }
 
     /// Returns the batch certificate for the given batch certificate ID.
@@ -173,14 +197,15 @@ impl<N: Network> LedgerService<N> for MockLedgerService<N> {
         Ok(false)
     }
 
-    /// Returns `false` for all queries.
+    /// Returns `false`, unless the mock was configured to know the transmission ID.
     fn contains_transmission(&self, transmission_id: &TransmissionID<N>) -> Result<bool> {
+        let contains = self.known_transmission_ids.contains(transmission_id);
         trace!(
-            "[MockLedgerService] Contains transmission ID {}.{} - false",
+            "[MockLedgerService] Contains transmission ID {}.{} - {contains}",
             fmt_id(transmission_id),
             fmt_id(transmission_id.checksum().unwrap_or_default())
         );
-        Ok(false)
+        Ok(contains)
     }
 
     /// Ensures that the given transmission is not a fee and matches the given transmission ID.

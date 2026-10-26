@@ -214,9 +214,31 @@ impl<N: Network> Cache<N> {
         Self::decrement_counter(&self.seen_outbound_peer_requests, peer_ip)
     }
 
-    /// Removes all cache entries applicable to the given key.
+    /// Removes the given peer's outbound block-request entries.
+    ///
+    /// Other per-peer caches are not pruned here; their stale entries are reclaimed
+    /// periodically by [`Cache::clear_stale_entries`].
     pub fn clear_peer_entries(&self, peer_ip: SocketAddr) {
         self.seen_outbound_block_requests.write().remove(&peer_ip);
+    }
+
+    /// Removes fully-expired entries from the inbound rate-limit caches, bounding their memory growth.
+    ///
+    /// An entry whose timestamps are *all* older than its interval carries no rate-limit weight, so
+    /// dropping it is observationally a no-op — a peer's live limit is never reset, and fresh data is
+    /// never evicted. Intended to be called periodically (e.g. from the heartbeat).
+    ///
+    /// `connection_interval_in_secs` and `message_interval_in_secs` are the windows for the connection
+    /// and message caches, which the caller owns rather than this cache.
+    pub fn clear_stale_entries(&self, connection_interval_in_secs: i64, message_interval_in_secs: i64) {
+        Self::clear_expired_entries(&self.seen_inbound_connections, connection_interval_in_secs);
+        Self::clear_expired_entries(&self.seen_inbound_messages, message_interval_in_secs);
+        Self::clear_expired_entries(&self.seen_inbound_puzzle_requests, Self::INBOUND_PUZZLE_REQUEST_INTERVAL);
+        Self::clear_expired_entries(&self.seen_inbound_block_requests, Self::INBOUND_BLOCK_REQUEST_INTERVAL);
+        Self::clear_expired_entries(
+            &self.seen_inbound_unconfirmed_solutions,
+            Self::INBOUND_UNCONFIRMED_SOLUTION_INTERVAL,
+        );
     }
 }
 
@@ -309,6 +331,20 @@ impl<N: Network> Cache<N> {
         Self::refresh(map);
         // Return the previous timestamp.
         previous_timestamp
+    }
+
+    /// Clears expired entries from the map; pops the expired entries from the front of the deque and if the deque is empty, removes the key.
+    fn clear_expired_entries<K: Eq + Hash>(map: &RwLock<HashMap<K, VecDeque<OffsetDateTime>>>, interval_in_secs: i64) {
+        let mut map_write = map.write();
+        let now = OffsetDateTime::now_utc();
+        map_write.retain(|_, timestamps| {
+            while timestamps.front().is_some_and(|t| now - *t > Duration::seconds(interval_in_secs)) {
+                timestamps.pop_front();
+            }
+
+            // If the deque is empty, remove the key (returning false to remove the key)
+            !timestamps.is_empty()
+        })
     }
 }
 
@@ -468,5 +504,106 @@ mod tests {
 
         // Check the cache is empty.
         assert!(!cache.contains_outbound_peer_request(peer_ip));
+    }
+
+    #[test]
+    fn test_clear_stale_entries_removes_expired_keys() {
+        let cache = Cache::<CurrentNetwork>::default();
+        // A timestamp well outside any rate-limit window.
+        let old = OffsetDateTime::now_utc() - Duration::seconds(120);
+
+        // seed the cache with 1000 distinct peers, each with a single entry.
+        {
+            let mut map = cache.seen_inbound_messages.write();
+            for port in 1..=1000u16 {
+                let peer_ip = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
+                map.insert(peer_ip, VecDeque::from([old]));
+            }
+        }
+
+        // realistic connection/message windows; 120s ≫ 5s so they're all expired
+        cache.clear_stale_entries(10, 5);
+
+        // all entries should have been removed, not just emptied
+        assert!(cache.seen_inbound_messages.read().is_empty());
+    }
+
+    #[test]
+    fn test_clear_stale_entries_preserves_fresh_entries() {
+        let cache = Cache::<CurrentNetwork>::default();
+        let peer_ip = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1234);
+
+        // Record three recent messages (count climbs to 3).
+        assert_eq!(cache.insert_inbound_message(peer_ip, 5), 1);
+        assert_eq!(cache.insert_inbound_message(peer_ip, 5), 2);
+        assert_eq!(cache.insert_inbound_message(peer_ip, 5), 3);
+
+        // Sweep with realistic windows; these entries are sub-second old — well
+        // inside the 5s message window — so they must be retained.
+        cache.clear_stale_entries(10, 5);
+        // All three timestamps survive: nothing evicted, count not reset.
+        assert!(cache.seen_inbound_messages.read().get(&peer_ip).is_some_and(|v| v.len() == 3));
+        // One more message, count climbs to 4.
+        assert_eq!(cache.insert_inbound_message(peer_ip, 5), 4);
+    }
+
+    #[test]
+    fn test_clear_stale_entries_trims_expired_but_keeps_active_keys() {
+        let cache = Cache::<CurrentNetwork>::default();
+        let peer_ip = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1234);
+
+        // two named timestamps, one expired one not
+        let old = OffsetDateTime::now_utc() - Duration::seconds(120);
+        let fresh = OffsetDateTime::now_utc();
+        {
+            let mut map = cache.seen_inbound_messages.write();
+            map.insert(peer_ip, VecDeque::from([old, fresh]));
+        }
+
+        // with 5s message window, old (120s) is expired -> popped; the loop then hits fresh (not expired) -> stops,
+        // the key is non-empty and thus not removed
+        cache.clear_stale_entries(10, 5);
+
+        // key kept, trimmed to one entry
+        assert!(cache.seen_inbound_messages.read().get(&peer_ip).is_some_and(|v| v.len() == 1));
+        // and the only entry is the fresh one
+        assert!(
+            cache.seen_inbound_messages.read().get(&peer_ip).is_some_and(|v| v.front().is_some_and(|t| *t == fresh))
+        );
+    }
+
+    #[test]
+    fn test_clear_stale_entries_sweeps_all_inbound_maps() {
+        let cache = Cache::<CurrentNetwork>::default();
+        let peer_ip = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1234);
+        let old = OffsetDateTime::now_utc() - Duration::seconds(120);
+        {
+            let mut map = cache.seen_inbound_messages.write();
+            map.insert(peer_ip, VecDeque::from([old]));
+            let mut map = cache.seen_inbound_block_requests.write();
+            map.insert(peer_ip, VecDeque::from([old]));
+            let mut map = cache.seen_inbound_puzzle_requests.write();
+            map.insert(peer_ip, VecDeque::from([old]));
+            let mut map = cache.seen_inbound_unconfirmed_solutions.write();
+            map.insert(peer_ip, VecDeque::from([old]));
+            let mut map = cache.seen_inbound_connections.write();
+            map.insert(peer_ip.ip(), VecDeque::from([old]));
+        }
+
+        assert_eq!(cache.seen_inbound_messages.read().len(), 1);
+        assert_eq!(cache.seen_inbound_block_requests.read().len(), 1);
+        assert_eq!(cache.seen_inbound_puzzle_requests.read().len(), 1);
+        assert_eq!(cache.seen_inbound_unconfirmed_solutions.read().len(), 1);
+        assert_eq!(cache.seen_inbound_connections.read().len(), 1);
+
+        // 120s is older than every window of (10, 5) and the internal Self::INBOUND_*_INTERVAL constants (60). So all 5 must reap.
+        cache.clear_stale_entries(10, 5);
+
+        // assert that all maps are empty
+        assert!(cache.seen_inbound_messages.read().is_empty());
+        assert!(cache.seen_inbound_block_requests.read().is_empty());
+        assert!(cache.seen_inbound_puzzle_requests.read().is_empty());
+        assert!(cache.seen_inbound_unconfirmed_solutions.read().is_empty());
+        assert!(cache.seen_inbound_connections.read().is_empty());
     }
 }

@@ -3,8 +3,8 @@ name: Run snarkOS Benchmarks
 on:
   push:
     branches:
-      - 'staging'
-      - 'main_net_v48'
+      - 'testnet'
+      - 'mainnet'
   workflow_dispatch:
 
 jobs:
@@ -17,10 +17,10 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.88 # Update this when the MSRV changes.
+        uses: dtolnay/rust-toolchain@1.96 # Attention - The MSRV is pinned in Cargo.toml, rust-toolchain.toml and .github/workflows/benchmarks.yml; change all of them together.
 
       - name: Install required Debian packages
         run: |
@@ -61,7 +61,7 @@ jobs:
 
       # Download previous benchmark result from cache (if exists)
       - name: Download previous benchmark data
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ./cache
           key: ${{ runner.os }}-benchmark
@@ -110,6 +110,8 @@ jobs:
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: snarkOS Benchmarks
+          # testnet and mainnet keep separate gh-pages histories.
+          benchmark-data-dir-path: dev/bench/${{ github.ref_name }}
           alert-threshold: '150%'
           comment-on-alert: true
           # TODO: Set to `true` once the benchmarks have less noise.
@@ -120,16 +122,15 @@ jobs:
           # but for all, except the sync variance, bigger is indeed better.
           tool: 'customBiggerIsBetter'
           output-file-path: results.json
-          alert-comment-cc-users: '@kaimast'
-          # Only push the results on staging (see below)
+          alert-comment-cc-users: '@vicsn,@snarkworld,@cbeck88'
+          # The next step pushes stored results for testnet and mainnet.
           auto-push: false
           # Enable Job Summary for PRs
           summary-always: true
 
       - name: Push benchmark result
-        # Avoid pushing results on pull requests or experimental branches, to reduce noise in the data.
-        # The results for all other runs are still accessible through the workflow summary.
-        if: github.ref_name == 'staging'
+        # Manual runs on other branches keep the job summary and do not update gh-pages.
+        if: github.ref_name == 'testnet' || github.ref_name == 'mainnet'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: git push origin gh-pages

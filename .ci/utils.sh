@@ -348,15 +348,17 @@ function check_heights() {
 
   for node_index in $(seq "$start_index" $((end_index-1))); do
     port=$((3030 + node_index))
-    height=$(curl -s "http://127.0.0.1:$port/v2/$network_name/block/height/latest" || echo "0")
-    
+    # Note: this yields an empty string when the node is unreachable, so that an
+    # unreachable node is not indistinguishable from one that is at height 0.
+    height=$(get_block_height_by_port "$port" "$network_name")
+
     # Track highest height for reporting
     if (is_integer "$height") && (( height > highest_height )); then
       highest_height=$height
     fi
-    
+
     if ! (is_integer "$height"); then
-      log "Node #${node_index} (port=$port) did not respont to height request"
+      log "Node #${node_index} (port=$port) did not respond to height request"
       all_reached=false
     elif (( height < min_height )); then
       log "Node #${node_index} (port=$port) only reached height $height, expected at least $min_height"
@@ -383,14 +385,11 @@ function check_logs() {
   local log_dir=$1
   local total_validators=$2
   local total_clients=$3
-  # The maximum number of warnings allow in each node's log file.
-  # Nodes may create some warnings at startup because they cannot connect to each other yet.
-  local max_warnings=$4
   # Optional max logfile size in bytes.
-  local max_validator_log_size_bytes=${5:-}
-  local max_client_log_size_bytes=${6:-}
+  local max_validator_log_size_bytes=${4:-}
+  local max_client_log_size_bytes=${5:-}
   # Optional Unix epoch timestamp; only log lines at or after this time are checked.
-  local since_epoch=${7:-}
+  local since_epoch=${6:-}
 
   if [ -n "$since_epoch" ]; then
     log "Only checking log lines at or after $(epoch_to_iso "$since_epoch")"
@@ -417,17 +416,10 @@ function check_logs() {
 
     validator_log_content=$(log_lines_since "$validator_log" "$since_epoch")
 
-    #TODO(kaimast): remove the grep -v "already exists in the ledger" once spurious sync errors are gone.
-    if echo "$validator_log_content" | grep "ERROR" | grep -qv "already exists in the ledger"; then
+    if echo "$validator_log_content" | grep -q "ERROR"; then
       log "❌ Test failed! Validator #${validator_index} logs contain errors."
       # Print the errors to the console.
-      echo "$validator_log_content" | grep "ERROR" | grep -v "already exists in the ledger"
-      return 1
-    fi
-
-    num_warnings=$(echo "$validator_log_content" | grep -c "WARN" || true)
-    if (( num_warnings > max_warnings )); then
-      echo "❌ Test failed! Validator #${validator_index} logs contain more than ${max_warnings} warnings."
+      echo "$validator_log_content" | grep "ERROR"
       return 1
     fi
   done
@@ -450,16 +442,10 @@ function check_logs() {
 
     client_log_content=$(log_lines_since "$client_log" "$since_epoch")
 
-    if echo "$client_log_content" | grep "ERROR" | grep -qv "already exists in the ledger"; then
+    if echo "$client_log_content" | grep -q "ERROR"; then
       log "❌ Test failed! Client #${client_index} logs contain errors."
       # Print the errors to the console.
-      echo "$client_log_content" | grep "ERROR" | grep -v "already exists in the ledger"
-      return 1
-    fi
-
-    num_warnings=$(echo "$client_log_content" | grep -c "WARN" || true)
-    if (( num_warnings > max_warnings )); then
-      echo "❌ Test failed! Client #${client_index} logs contain more than ${max_warnings} warnings."
+      echo "$client_log_content" | grep "ERROR"
       return 1
     fi
   done
@@ -1029,4 +1015,45 @@ function get_block_height {
   fi
   echo "$result"
   return 0
+}
+
+# Get the greatest block height reported by any of the given nodes, i.e. the height that
+# the network has reached. Prints an empty string if no node responded.
+#
+# Unlike `get_block_height`, this tolerates individual nodes being unreachable, which makes
+# it suitable for checking that the network is advancing while a node is being restarted.
+function get_network_block_height() {
+  local total_nodes=$1
+  local network_name=$2
+
+  local greatest=""
+  local height
+
+  for ((node_index = 0; node_index < total_nodes; node_index++)); do
+    height=$(get_block_height_by_port $((3030 + node_index)) "$network_name" 5)
+    if (is_integer "$height") && { [[ -z "$greatest" ]] || (( height > greatest )); }; then
+      greatest=$height
+    fi
+  done
+
+  echo "$greatest"
+}
+
+# Get the consensus version that the given comma-separated list of consensus version
+# heights implies for the given block height, i.e. how many of them have been reached.
+function consensus_version_at_height() {
+  local heights=$1
+  local height=$2
+
+  local count=0
+  local entries
+  IFS=',' read -ra entries <<< "$heights"
+
+  for entry in "${entries[@]}"; do
+    if (is_integer "$entry") && (( entry <= height )); then
+      count=$((count + 1))
+    fi
+  done
+
+  echo "$count"
 }

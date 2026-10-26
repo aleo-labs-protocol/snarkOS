@@ -16,7 +16,7 @@
 use snarkvm::prelude::{FromBytes, IoResult, Network, Read, ToBytes, Write, error, has_duplicates};
 
 use anyhow::{Result, bail, ensure};
-use indexmap::{IndexMap, indexmap};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, btree_map::IntoIter};
 
@@ -27,7 +27,11 @@ const RECENT_INTERVAL: u32 = 1; // 1 block intervals
 /// The interval between block checkpoints.
 pub const CHECKPOINT_INTERVAL: u32 = 10_000; // 10,000 block intervals
 // The maximum number of checkpoints that there can be
-const MAX_CHECKPOINTS: usize = (u32::MAX / CHECKPOINT_INTERVAL) as usize;
+/// The maximum number of checkpoints a valid `BlockLocators` can ever contain: one checkpoint
+/// every `CHECKPOINT_INTERVAL` blocks, up to the largest height the wire format can express.
+/// `pub` so callers outside this crate - e.g. a message-size cap on whatever carries block
+/// locators - can size themselves against this bound instead of restating it.
+pub const MAX_CHECKPOINTS: usize = (u32::MAX / CHECKPOINT_INTERVAL) as usize;
 
 /// Block locator maps.
 ///
@@ -95,11 +99,6 @@ impl<N: Network> BlockLocators<N> {
     fn new_unchecked(recents: IndexMap<u32, N::BlockHash>, checkpoints: IndexMap<u32, N::BlockHash>) -> Self {
         Self { recents, checkpoints }
     }
-
-    /// Initializes a new genesis instance of the block locators.
-    pub fn new_genesis(genesis_hash: N::BlockHash) -> Self {
-        Self { recents: indexmap![0 => genesis_hash], checkpoints: indexmap![0 => genesis_hash] }
-    }
 }
 
 impl<N: Network> IntoIterator for BlockLocators<N> {
@@ -123,16 +122,6 @@ impl<N: Network> BlockLocators<N> {
     /// Returns the block hash for the given block height, if it exists.
     pub fn get_hash(&self, height: u32) -> Option<N::BlockHash> {
         self.recents.get(&height).copied().or_else(|| self.checkpoints.get(&height).copied())
-    }
-
-    /// Returns `true` if the block locators are well-formed.
-    pub fn is_valid(&self) -> bool {
-        // Ensure the block locators are well-formed.
-        if let Err(error) = self.ensure_is_valid() {
-            warn!("Block locators are invalid: {error}");
-            return false;
-        }
-        true
     }
 
     /// Returns `true` if the given block locators are consistent with this one.
@@ -453,9 +442,18 @@ pub mod test_helpers {
     /// A test to ensure that the sample block locators are valid.
     #[test]
     fn test_sample_block_locators() {
-        for expected_height in 0..=100_001u32 {
-            println!("Testing height - {expected_height}");
+        // Every 1009th height up to `10 * CHECKPOINT_INTERVAL + 1`, plus the heights next to each multiple `c`
+        // of `CHECKPOINT_INTERVAL` and next to `c + NUM_RECENT_BLOCKS`. The number of recents, the number of
+        // checkpoints and the overlap between them only change at these boundaries.
+        let max_height = 10 * CHECKPOINT_INTERVAL + 1;
+        let mut heights: std::collections::BTreeSet<u32> = (0..=max_height).step_by(1009).collect();
+        for checkpoint in (0..max_height).step_by(CHECKPOINT_INTERVAL as usize) {
+            for boundary in [checkpoint, checkpoint + NUM_RECENT_BLOCKS as u32] {
+                heights.extend(boundary.saturating_sub(1)..=boundary + 1);
+            }
+        }
 
+        for expected_height in heights {
             let expected_num_checkpoints = (expected_height / CHECKPOINT_INTERVAL) + 1;
             let expected_num_recents = match expected_height < NUM_RECENT_BLOCKS as u32 {
                 true => expected_height + 1,
@@ -467,7 +465,7 @@ pub mod test_helpers {
             assert_eq!(block_locators.recents.len(), expected_num_recents as usize);
             assert_eq!(block_locators.latest_locator_height(), expected_height);
             // Note that `sample_block_locators` always returns well-formed block locators,
-            // so we don't need to check `is_valid()` here.
+            // so we don't need to check `ensure_is_valid()` here.
         }
     }
 }

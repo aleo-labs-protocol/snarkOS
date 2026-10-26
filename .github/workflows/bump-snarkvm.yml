@@ -1,0 +1,87 @@
+name: Bump snarkVM
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: bump-snarkvm
+  cancel-in-progress: false
+
+env:
+  SNARKVM_REPO: aleo-labs-protocol/snarkVM
+  SNARKVM_BRANCH: staging
+  BASE_BRANCH: staging
+  PR_BRANCH: ci/bump-snarkvm
+
+jobs:
+  bump:
+    name: Bump snarkVM to latest staging
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.BASE_BRANCH }}
+
+      - name: Find current and latest snarkVM revisions
+        id: revs
+        run: |
+          current=$(sed -n '/^\[workspace\.dependencies\.snarkvm\]/,/^\[/ s/^rev = "\([0-9a-f]*\)".*/\1/p' Cargo.toml)
+          latest=$(git ls-remote "https://github.com/$SNARKVM_REPO.git" "refs/heads/$SNARKVM_BRANCH" | cut -f1)
+          if [ -z "$current" ] || [ -z "$latest" ]; then
+            echo "Could not determine snarkVM revisions (current='$current', latest='$latest')" >&2
+            exit 1
+          fi
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        if: steps.revs.outputs.current != steps.revs.outputs.latest
+        run: rustup toolchain install
+
+      - name: Update snarkVM revision
+        if: steps.revs.outputs.current != steps.revs.outputs.latest
+        env:
+          LATEST: ${{ steps.revs.outputs.latest }}
+        run: |
+          sed -i "/^\[workspace\.dependencies\.snarkvm\]/,/^\[/ s|^rev = .*|rev = \"$LATEST\" #$SNARKVM_BRANCH|" Cargo.toml
+          cargo update -p snarkvm
+
+      - name: Open or update pull request
+        if: steps.revs.outputs.current != steps.revs.outputs.latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT: ${{ steps.revs.outputs.current }}
+          LATEST: ${{ steps.revs.outputs.latest }}
+        run: |
+          # Commits in the current pin that are missing from snarkVM's branch
+          # (e.g. a pin on a merge of staging and a release branch) are dropped
+          # by this bump.
+          dropped=$(gh api "repos/$SNARKVM_REPO/compare/$LATEST...$CURRENT" --jq .ahead_by)
+
+          title="Bump snarkVM to $SNARKVM_REPO@${LATEST:0:9}"
+          body="Bumps snarkVM to the latest commit on \`$SNARKVM_BRANCH\`.
+
+          Changes: https://github.com/$SNARKVM_REPO/compare/$CURRENT...$LATEST"
+          if [ "$dropped" != "0" ]; then
+            body="$body
+
+          > [!WARNING]
+          > The current pin \`${CURRENT:0:9}\` contains $dropped commit(s) that are not on snarkVM \`$SNARKVM_BRANCH\`. Merging this drops them."
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$PR_BRANCH"
+          git commit -am "$title"
+          git push --force origin "$PR_BRANCH"
+
+          if [ -n "$(gh pr list --head "$PR_BRANCH" --base "$BASE_BRANCH" --state open --json number --jq '.[0].number')" ]; then
+            gh pr edit "$PR_BRANCH" --title "$title" --body "$body"
+          else
+            gh pr create --head "$PR_BRANCH" --base "$BASE_BRANCH" --title "$title" --body "$body"
+          fi

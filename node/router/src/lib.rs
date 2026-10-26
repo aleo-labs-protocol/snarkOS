@@ -43,6 +43,9 @@ pub use outbound::*;
 mod routing;
 pub use routing::*;
 
+#[cfg(feature = "test-helpers")]
+pub mod test_helpers;
+
 mod writing;
 
 use crate::messages::{BlockRequest, Message, MessageCodec};
@@ -142,11 +145,12 @@ pub struct InnerRouter<N: Network> {
 
 impl<N: Network> Router<N> {
     /// The minimum permitted interval between connection attempts for an IP; anything shorter is considered malicious.
-    #[cfg(not(feature = "test"))]
     const CONNECTION_ATTEMPTS_SINCE_SECS: i64 = 10;
     /// The maximum amount of connection attempts within a 10 second threshold.
     #[cfg(not(feature = "test"))]
     const MAX_CONNECTION_ATTEMPTS: usize = 10;
+    /// The time frame to enforce the `MESSAGE_LIMIT`.
+    const MESSAGE_LIMIT_TIME_FRAME_IN_SECS: i64 = 5;
 }
 
 impl<N: Network> Router<N> {

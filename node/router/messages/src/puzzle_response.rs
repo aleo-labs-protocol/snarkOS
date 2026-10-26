@@ -51,15 +51,15 @@ impl<N: Network> FromBytes for PuzzleResponse<N> {
 
 #[cfg(test)]
 pub mod prop_tests {
-    use crate::{PuzzleResponse, challenge_response::prop_tests::any_genesis_header};
+    use crate::{MAX_SMALL_MESSAGE_SIZE, PuzzleResponse, challenge_response::prop_tests::any_genesis_header};
     use snarkvm::{
         console::prelude::{FromBytes, ToBytes},
         ledger::narwhal::Data,
         prelude::{Network, Rng, TestRng},
     };
 
-    use bytes::{Buf, BufMut, BytesMut};
-    use proptest::prelude::{BoxedStrategy, Strategy, any};
+    use bytes::{Buf, BufMut, Bytes, BytesMut};
+    use proptest::prelude::{BoxedStrategy, ProptestConfig, Strategy, any};
     use test_strategy::proptest;
 
     type CurrentNetwork = snarkvm::prelude::MainnetV0;
@@ -79,7 +79,21 @@ pub mod prop_tests {
             .boxed()
     }
 
-    #[proptest]
+    /// A `PuzzleResponse` whose `block_header` is a raw, undeserializable buffer of junk bytes
+    /// exactly `MAX_SMALL_MESSAGE_SIZE` long - already over the cap once the surrounding envelope
+    /// (message ID, `epoch_hash`, `Data`'s own tag and length prefix) is added. `Data::Buffer`
+    /// means this never has to construct a real, absurdly large `Header`.
+    pub fn any_large_puzzle_response() -> BoxedStrategy<PuzzleResponse<CurrentNetwork>> {
+        (any_epoch_hash(), any::<u64>())
+            .prop_map(|(epoch_hash, seed)| {
+                let mut rng = TestRng::fixed(seed);
+                let junk: Vec<u8> = (0..MAX_SMALL_MESSAGE_SIZE).map(|_| rng.random()).collect();
+                PuzzleResponse { epoch_hash, block_header: Data::Buffer(Bytes::from(junk)) }
+            })
+            .boxed()
+    }
+
+    #[proptest(ProptestConfig { cases: 10, ..ProptestConfig::default() })]
     fn puzzle_response_roundtrip(#[strategy(any_puzzle_response())] original: PuzzleResponse<CurrentNetwork>) {
         let mut buf = BytesMut::default().writer();
         PuzzleResponse::write_le(&original, &mut buf).unwrap();

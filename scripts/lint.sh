@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Runs the same lints as CI: clippy, rustfmt, and shellcheck.
+# Runs the same lints as CI: clippy, rustfmt, cargo-deny, and shellcheck.
 # Invoked by the rusty-hook pre-commit hook (see .rusty-hook.toml).
 
 set -e
@@ -10,6 +10,13 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 echo "Checking rustfmt..."
 cargo +nightly fmt --all -- --check
+
+if command -v cargo-deny >/dev/null; then
+  echo "Running cargo deny..."
+  cargo deny check bans licenses sources
+else
+  echo "warning: cargo-deny not installed, skipping license/bans/sources check (CI will still run it)"
+fi
 
 if command -v shellcheck >/dev/null; then
   echo "Running shellcheck..."

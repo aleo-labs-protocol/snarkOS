@@ -24,10 +24,10 @@ use crate::common::{
 };
 use snarkos_account::Account;
 use snarkos_node_bft::{Gateway, helpers::init_primary_channels};
-use snarkos_node_bft_events::{ChallengeRequest, ChallengeResponse, Event, ValidatorsRequest};
+use snarkos_node_bft_events::{Event, ValidatorsRequest};
 use snarkos_node_network::PeerPoolHandling;
 use snarkos_node_tcp::{P2P, protocols::Handshake};
-use snarkvm::{ledger::narwhal::Data, prelude::TestRng};
+use snarkvm::prelude::TestRng;
 
 use std::time::Duration;
 
@@ -89,52 +89,8 @@ async fn handshake_responder_side_timeout() {
     assert_eq!(gateway.tcp().num_connected(), 0);
 }
 
-// TODO(nkls): other event types, can be done as a follow up.
-
-/* Invalid challenge request */
-
-#[tokio::test(flavor = "multi_thread")]
-async fn handshake_responder_side_invalid_challenge_request() {
-    const NUM_NODES: u16 = 4;
-
-    let mut rng = TestRng::default();
-    let (accounts, gateway) = new_test_gateway(NUM_NODES, &mut rng).await;
-    let test_peer = TestPeer::new().await;
-
-    // Initiate a connection with the gateway, this will only return once the handshake protocol has
-    // completed on the test peer's side, which is a no-op.
-    assert!(test_peer.connect(gateway.local_ip()).await.is_ok());
-
-    // Check the connection has been registered.
-    let gateway_clone = gateway.clone();
-    deadline!(Duration::from_secs(1), move || gateway_clone.tcp().num_connecting() == 1);
-
-    // Use the address from the second peer in the list, the test peer will use the first.
-    let listener_port = test_peer.listening_addr().await.port();
-    let address = accounts.get(1).unwrap().address();
-    let nonce = rng.random();
-    let snarkos_sha = None;
-    // Set the wrong version so the challenge request is invalid.
-    let challenge_request = ChallengeRequest { version: 0, listener_port, address, nonce, snarkos_sha };
-
-    // Send the message
-    let _ = test_peer.unicast(gateway.local_ip(), Event::ChallengeRequest(challenge_request));
-
-    // FIXME(nkls): currently we can't assert on the disconnect type, the message isn't always sent
-    // before the disconnect.
-
-    // Check the test peer has been removed from the gateway's connecting peers.
-    let gateway_clone = gateway.clone();
-    deadline!(Duration::from_secs(1), move || gateway_clone.tcp().num_connecting() == 0);
-    // Check the test peer hasn't been added to the gateway's connected peers.
-    assert!(gateway.connected_peers().is_empty());
-    assert_eq!(gateway.tcp().num_connected(), 0);
-}
-
-/* An unexpected first event */
-
-// A peer whose first event is not a challenge request fails the handshake before the gateway learns
-// its listening address, so it never reaches the peer pool. The failure must still abort the
+// A peer that does not open with the Noise handshake fails before the gateway learns its
+// listening address, so it never reaches the peer pool. The failure must still abort the
 // connection rather than leaving the peer connected with a reader attached.
 #[tokio::test(flavor = "multi_thread")]
 async fn handshake_responder_side_unexpected_first_event() {
@@ -153,87 +109,6 @@ async fn handshake_responder_side_unexpected_first_event() {
 
     let gateway_clone = gateway.clone();
     deadline!(Duration::from_secs(5), move || gateway_clone.tcp().num_connecting() == 0);
-    assert!(gateway.connected_peers().is_empty());
-    assert_eq!(gateway.tcp().num_connected(), 0);
-}
-
-/* Invalid challenge response */
-
-#[tokio::test(flavor = "multi_thread")]
-async fn handshake_responder_side_invalid_challenge_response() {
-    const NUM_NODES: u16 = 4;
-
-    let mut rng = TestRng::default();
-    let (accounts, gateway) = new_test_gateway(NUM_NODES, &mut rng).await;
-    let mut test_peer = TestPeer::new().await;
-
-    // Initiate a connection with the gateway, this will only return once the handshake protocol has
-    // completed on the test peer's side, which is a no-op for the moment.
-    assert!(test_peer.connect(gateway.local_ip()).await.is_ok());
-
-    // Check the connection has been registered.
-    let gateway_clone = gateway.clone();
-    deadline!(Duration::from_secs(1), move || gateway_clone.tcp().num_connecting() == 1);
-
-    // Use the address from the second peer in the list, the test peer will use the first.
-    let listener_port = test_peer.listening_addr().await.port();
-    let address = accounts.get(1).unwrap().address();
-    let our_nonce = rng.random();
-    let snarkos_sha = None;
-    let version = Event::<CurrentNetwork>::VERSION;
-    let challenge_request = ChallengeRequest { version, listener_port, address, nonce: our_nonce, snarkos_sha };
-
-    // Send the challenge request.
-    let _ = test_peer.unicast(gateway.local_ip(), Event::ChallengeRequest(challenge_request));
-
-    // Receive the gateway's challenge response.
-    let (peer_addr, Event::ChallengeResponse(ChallengeResponse { restrictions_id, signature, nonce })) =
-        test_peer.recv_timeout(Duration::from_secs(1)).await
-    else {
-        panic!("Expected challenge response")
-    };
-
-    // Check the sender is the gateway.
-    assert_eq!(peer_addr, gateway.local_ip());
-    // Check the nonce we sent is in the signature.
-    assert!(
-        signature.deserialize_blocking().unwrap().verify_bytes(
-            &accounts.first().unwrap().address(),
-            &[our_nonce.to_le_bytes(), nonce.to_le_bytes()].concat()
-        )
-    );
-
-    // Receive the gateway's challenge request.
-    let (peer_addr, Event::ChallengeRequest(challenge_request)) = test_peer.recv_timeout(Duration::from_secs(1)).await
-    else {
-        panic!("Expected challenge request")
-    };
-    // Check the version, listener port and address are correct.
-    assert_eq!(peer_addr, gateway.local_ip());
-    assert_eq!(challenge_request.version, version);
-    assert_eq!(challenge_request.listener_port, gateway.local_ip().port());
-    assert_eq!(challenge_request.address, accounts.first().unwrap().address());
-
-    // Send the challenge response with an invalid signature.
-    let response_nonce = rng.random();
-    let _ = test_peer.unicast(
-        gateway.local_ip(),
-        Event::ChallengeResponse(ChallengeResponse {
-            restrictions_id,
-            signature: Data::Object(
-                accounts.get(2).unwrap().sign_bytes(&challenge_request.nonce.to_le_bytes(), &mut rng).unwrap(),
-            ),
-            nonce: response_nonce,
-        }),
-    );
-
-    // FIXME(nkls): currently we can't assert on the disconnect type, the message isn't always sent
-    // before the disconnect.
-
-    // Check the test peer has been removed from the gateway's connecting peers.
-    let gateway_clone = gateway.clone();
-    deadline!(Duration::from_secs(1), move || gateway_clone.tcp().num_connecting() == 0);
-    // Check the test peer hasn't been added to the gateway's connected peers.
     assert!(gateway.connected_peers().is_empty());
     assert_eq!(gateway.tcp().num_connected(), 0);
 }

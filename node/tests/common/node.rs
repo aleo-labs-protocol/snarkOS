@@ -16,7 +16,7 @@
 use crate::common::test_peer::sample_genesis_block;
 
 use snarkos_account::Account;
-use snarkos_node::{Client, Prover, Validator};
+use snarkos_node::{Client, Prover, Validator, rest::RestVerificationLimits};
 use snarkos_utilities::{NodeDataDir, SignalHandler};
 
 use snarkvm::prelude::{MainnetV0 as CurrentNetwork, store::helpers::memory::ConsensusMemory};
@@ -29,6 +29,9 @@ pub async fn client() -> Client<CurrentNetwork, ConsensusMemory<CurrentNetwork>>
         "127.0.0.1:0".parse().unwrap(),
         None,
         10,
+        RestVerificationLimits::max::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>(),
+        None,  // No history compatibility mode.
+        false, // Do not write JSON history.
         Account::<CurrentNetwork>::from_str("APrivateKey1zkp2oVPTci9kKcUprnbzMwq95Di1MQERpYBhEeqvkrDirK1").unwrap(),
         &[],
         sample_genesis_block(),
@@ -37,7 +40,6 @@ pub async fn client() -> Client<CurrentNetwork, ConsensusMemory<CurrentNetwork>>
         NodeDataDir::new_test(None),
         false, // Connect to untrusted peers.
         None,
-        &[], // No Slipstream plugins.
         SignalHandler::new(None),
     )
     .await
@@ -65,6 +67,9 @@ pub async fn validator() -> Validator<CurrentNetwork, ConsensusMemory<CurrentNet
         None,
         None,
         10,
+        RestVerificationLimits::max::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>(),
+        None,  // No history compatibility mode.
+        false, // Do not write JSON history.
         Account::<CurrentNetwork>::from_str("APrivateKey1zkp2oVPTci9kKcUprnbzMwq95Di1MQERpYBhEeqvkrDirK1").unwrap(),
         &[],
         &[],
@@ -75,8 +80,8 @@ pub async fn validator() -> Validator<CurrentNetwork, ConsensusMemory<CurrentNet
         false, // This test requires validators to connect to peers.
         false, // No dev traffic in production mode.
         None,
-        &[],  // No Slipstream plugins.
         None, // No dev committee hotswap in production mode.
+        1,    // Leave the batch spend limit unchanged.
         SignalHandler::new(None),
     )
     .await

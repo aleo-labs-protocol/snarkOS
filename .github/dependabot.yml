@@ -1,0 +1,52 @@
+version: 2
+updates:
+  # Security updates are a separate mechanism: they ignore the schedule, the
+  # open-pull-requests-limit, the groups and the update-types ignore rules
+  # below, and open one pull request per advisory as soon as it is published.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    target-branch: "staging"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    # Minor version updates arrive as one pull request per week. Major
+    # releases are not grouped and get a pull request each. Patch releases
+    # are ignored; they still reach Cargo.lock whenever a minor or major bump
+    # re-resolves it, and through security updates.
+    groups:
+      cargo-minor:
+        applies-to: version-updates
+        update-types: [ "minor" ]
+    ignore:
+      - dependency-name: "*"
+        update-types: [ "version-update:semver-patch" ]
+      # snarkVM is a git dependency pinned by `rev = "<commit sha>"`. Dependabot
+      # never proposes updates for git dependencies pinned to a commit SHA, so
+      # snarkVM is bumped by .github/workflows/bump-snarkvm.yml instead.
+      - dependency-name: "snarkvm*"
+      # `metrics` must match the version snarkVM's metrics crate uses, and a
+      # bump past 0.22 also requires moving node/metrics to a matching
+      # metrics-exporter-prometheus. Bump it by hand together with snarkVM.
+      - dependency-name: "metrics"
+        update-types: [ "version-update:semver-minor" ]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    target-branch: "staging"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 2
+    groups:
+      github-actions:
+        applies-to: version-updates
+        patterns: [ "*" ]
+    ignore:
+      # The benchmarks workflow pins this action to the MSRV. Bump it together
+      # with `rust-version` in Cargo.toml, not to the latest Rust release.
+      - dependency-name: "dtolnay/rust-toolchain"

@@ -18,6 +18,8 @@
 pub mod node_type;
 pub use node_type::*;
 
+pub mod noise;
+
 pub mod peer;
 pub use peer::*;
 

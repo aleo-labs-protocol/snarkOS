@@ -38,7 +38,6 @@ use snarkvm::{
 };
 
 use anyhow::Context;
-use colored::Colorize;
 use indexmap::{IndexMap, IndexSet};
 #[cfg(feature = "locktick")]
 use locktick::parking_lot::RwLock;
@@ -91,6 +90,7 @@ impl<N: Network> BFT<N> {
         trusted_peers_only: bool,
         node_data_dir: NodeDataDir,
         dev: Option<u16>,
+        proposal_spent_limit_multiplier: u64,
     ) -> Result<Self> {
         Ok(Self {
             primary: Primary::new(
@@ -103,6 +103,7 @@ impl<N: Network> BFT<N> {
                 trusted_peers_only,
                 node_data_dir,
                 dev,
+                proposal_spent_limit_multiplier,
             )?,
             dag: Default::default(),
             leader_certificate: Default::default(),
@@ -240,17 +241,6 @@ impl<N: Network> PrimaryCallback<N> for BFT<N> {
             false => self.is_leader_quorum_or_nonleaders_available(current_round),
         };
 
-        #[cfg(feature = "metrics")]
-        {
-            let start = self.leader_certificate_timer.load(Ordering::SeqCst);
-            // Only log if the timer was set, otherwise we get a time difference since the EPOCH.
-            if start > 0 {
-                let end = now();
-                let elapsed = std::time::Duration::from_secs((end - start) as u64);
-                metrics::histogram(metrics::bft::COMMIT_ROUNDS_LATENCY, elapsed.as_secs_f64());
-            }
-        }
-
         // Log whether the round is going to update.
         if current_round.is_multiple_of(2) {
             // Determine if there is a leader certificate.
@@ -272,7 +262,7 @@ impl<N: Network> PrimaryCallback<N> for BFT<N> {
             } else {
                 match is_ready {
                     true => info!("Round {current_round} reached quorum without a leader"),
-                    false => info!("{}", format!("Round {current_round} did not elect a leader (yet)").dimmed()),
+                    false => info!(dim = true, "Round {current_round} did not elect a leader (yet)"),
                 }
             }
         }
@@ -288,6 +278,18 @@ impl<N: Network> PrimaryCallback<N> for BFT<N> {
                 warn!("{}", &flatten_error(err));
                 return false;
             }
+
+            #[cfg(feature = "metrics")]
+            {
+                let start = self.leader_certificate_timer.load(Ordering::SeqCst);
+                // Only log if the timer was set, otherwise we get a time difference since the EPOCH.
+                if start > 0 {
+                    let end = now();
+                    let elapsed = std::time::Duration::from_secs((end - start) as u64);
+                    metrics::histogram(metrics::bft::COMMIT_ROUNDS_LATENCY, elapsed.as_secs_f64());
+                }
+            }
+
             // Update the timer for the leader certificate.
             self.leader_certificate_timer.store(now(), Ordering::SeqCst);
         }
@@ -723,7 +725,7 @@ impl<N: Network> BFT<N> {
                         format!(
                             "BFT failed to retrieve transmission '{}.{}' from round {}",
                             fmt_id(transmission_id),
-                            fmt_id(transmission_id.checksum().unwrap_or_default()).dimmed(),
+                            fmt_id(transmission_id.checksum().unwrap_or_default()),
                             certificate.round()
                         )
                     })?;
@@ -757,37 +759,64 @@ impl<N: Network> BFT<N> {
                 "BFT failed to commit - the subdag anchor round {anchor_round} does not match the leader round {leader_round}",
             );
 
+            let mut ledger_already_advanced = false;
+
             // Trigger consensus (skipped if the round was already committed by a prior call).
-            if !skip_consensus {
-                if let Some(consensus_sender) = self.consensus_sender.get() {
-                    // Initialize a callback sender and receiver.
-                    let (callback_sender, callback_receiver) = oneshot::channel();
-                    // Send the subdag and transmissions to consensus.
-                    consensus_sender.tx_consensus_subdag.send((subdag, transmissions, callback_sender)).await?;
-                    // Await the callback to continue.
-                    match callback_receiver.await {
-                        Ok(Ok(_)) => (),
-                        Ok(Err(err)) => {
-                            let err = err.context(format!("BFT failed to advance the subdag for round {anchor_round}"));
-                            error!("{}", &flatten_error(err));
-                            return Ok(());
-                        }
-                        Err(err) => {
-                            let err: anyhow::Error = err.into();
-                            let err =
-                                err.context(format!("BFT failed to receive the callback for round {anchor_round}"));
-                            error!("{}", flatten_error(err));
-                            return Ok(());
-                        }
+            if !skip_consensus && let Some(consensus_sender) = self.consensus_sender.get() {
+                // Initialize a callback sender and receiver.
+                let (callback_sender, callback_receiver) = oneshot::channel();
+
+                // Send the subdag and transmissions to consensus.
+                consensus_sender.tx_consensus_subdag.send((subdag, transmissions, callback_sender)).await?;
+
+                // Await the callback to continue.
+                match callback_receiver.await {
+                    Ok(Ok(true)) => (),
+                    Ok(Ok(false)) => ledger_already_advanced = true,
+                    Ok(Err(err)) => {
+                        let err = err.context(format!("BFT failed to advance the subdag for round {anchor_round}"));
+                        error!("{}", &flatten_error(err));
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        let err: anyhow::Error = err.into();
+                        let err = err.context(format!("BFT failed to receive the callback for round {anchor_round}"));
+                        warn!("{}", flatten_error(err));
+                        return Ok(());
+                    }
+                }
+
+                // Update subdag/DAG-density metrics.
+                #[cfg(feature = "metrics")]
+                {
+                    metrics::histogram(metrics::bft::SUBDAG_ROUNDS_PER_BLOCK, subdag_metadata.len() as f64);
+                    for (_, certs_in_round) in &subdag_metadata {
+                        metrics::histogram(metrics::bft::SUBDAG_CERTIFICATES_PER_ROUND, *certs_in_round as f64);
+                    }
+                    for certificate in commit_subdag.values().flatten() {
+                        metrics::histogram(
+                            metrics::bft::SUBDAG_CERTIFICATE_SIGNATURES,
+                            certificate.signatures().len() as f64,
+                        );
+                        metrics::histogram(
+                            metrics::bft::SUBDAG_CERTIFICATE_PREVIOUS_REFS,
+                            certificate.previous_certificate_ids().len() as f64,
+                        );
                     }
                 }
             }
 
-            info!(
-                "Committing a subDAG with anchor round {anchor_round} and {num_transmissions} transmissions: {subdag_metadata:?}",
-            );
+            if ledger_already_advanced {
+                debug!(
+                    "Committing a subDAG with anchor round {anchor_round} to the DAG only, as the ledger already contains it",
+                );
+            } else {
+                info!(
+                    "Committing a subDAG with anchor round {anchor_round} and {num_transmissions} transmissions: {subdag_metadata:?}",
+                );
+            }
 
-            // Update the DAG, as the subdag was successfully included into a block.
+            // Update the DAG, as the ledger contains a block for this subdag.
             {
                 let mut dag_write = self.dag.write();
                 let mut count = 0;
@@ -800,7 +829,7 @@ impl<N: Network> BFT<N> {
             }
 
             // Update the validator telemetry.
-            #[cfg(feature = "telemetry")]
+            #[cfg(feature = "metrics")]
             self.primary().gateway().validator_telemetry().insert_subdag(&Subdag::from(commit_subdag)?);
         }
 
@@ -1000,6 +1029,7 @@ mod tests {
             false,
             NodeDataDir::new_test(None),
             None,
+            1,
         )
     }
 

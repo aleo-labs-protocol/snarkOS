@@ -45,7 +45,7 @@ function exit_handler() {
 }
 trap exit_handler EXIT
 
-# Define a trap handler that prints a message when an error occurs 
+# Define a trap handler that prints a message when an error occurs
 trap 'echo "⛔️ Error in $BASH_SOURCE at line $LINENO: \"$BASH_COMMAND\" failed (exit $?)"' ERR
 
 # Flags used by all ndoes
@@ -72,7 +72,7 @@ for ((validator_index = 0; validator_index < total_validators; validator_index++
 done
 
 # Ensure all nodes are up and running.
-wait_for_nodes "$total_validators" 0
+wait_for_nodes "$total_validators" 0 "$network_name"
 
 # Wait until the first node reaches the given height.
 total_wait=0

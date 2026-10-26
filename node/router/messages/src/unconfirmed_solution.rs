@@ -51,13 +51,13 @@ impl<N: Network> FromBytes for UnconfirmedSolution<N> {
 
 #[cfg(test)]
 pub mod prop_tests {
-    use crate::{Solution, SolutionID, UnconfirmedSolution};
+    use crate::{MAX_SMALL_MESSAGE_SIZE, Solution, SolutionID, UnconfirmedSolution};
     use snarkvm::{
         ledger::{narwhal::Data, puzzle::PartialSolution},
         prelude::{Address, FromBytes, PrivateKey, Rng, TestRng, ToBytes},
     };
 
-    use bytes::{Buf, BufMut, BytesMut};
+    use bytes::{Buf, BufMut, Bytes, BytesMut};
     use proptest::prelude::{BoxedStrategy, Strategy, any};
     use test_strategy::proptest;
 
@@ -82,6 +82,20 @@ pub mod prop_tests {
     pub fn any_unconfirmed_solution() -> BoxedStrategy<UnconfirmedSolution<CurrentNetwork>> {
         (any_solution_id(), any_solution())
             .prop_map(|(solution_id, ps)| UnconfirmedSolution { solution_id, solution: Data::Object(ps) })
+            .boxed()
+    }
+
+    /// An `UnconfirmedSolution` whose `solution` is a raw, undeserializable buffer of junk bytes
+    /// exactly `MAX_SMALL_MESSAGE_SIZE` long - already over the cap once the surrounding envelope
+    /// (message ID, `solution_id`, `Data`'s own tag and length prefix) is added. `Data::Buffer`
+    /// means this never has to construct a real, absurdly large `Solution`.
+    pub fn any_large_unconfirmed_solution() -> BoxedStrategy<UnconfirmedSolution<CurrentNetwork>> {
+        (any_solution_id(), any::<u64>())
+            .prop_map(|(solution_id, seed)| {
+                let mut rng = TestRng::fixed(seed);
+                let junk: Vec<u8> = (0..MAX_SMALL_MESSAGE_SIZE).map(|_| rng.random()).collect();
+                UnconfirmedSolution { solution_id, solution: Data::Buffer(Bytes::from(junk)) }
+            })
             .boxed()
     }
 

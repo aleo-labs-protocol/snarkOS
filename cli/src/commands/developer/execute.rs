@@ -13,11 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{DEFAULT_ENDPOINT, Developer};
-use crate::{
-    commands::StoreFormat,
-    helpers::args::{parse_private_key, prepare_endpoint},
-};
+use super::{DEFAULT_ENDPOINT, Developer, ParsedQuery};
+use crate::{commands::StoreFormat, helpers::args::parse_private_key};
 
 use snarkvm::{
     console::network::Network,
@@ -77,7 +74,7 @@ pub struct Execute {
     ///
     /// The given value may also be a JSON serialized `StaticQuery` struct.
     #[clap(short, long, alias="query", default_value=DEFAULT_ENDPOINT, verbatim_doc_comment)]
-    endpoint: Uri,
+    endpoint: String,
     /// The priority fee in microcredits.
     #[clap(long, default_value_t = 0)]
     priority_fee: u64,
@@ -122,10 +119,7 @@ impl Drop for Execute {
 impl Execute {
     /// Executes an Aleo program function with the provided inputs.
     pub fn parse<N: Network>(self) -> Result<String> {
-        let endpoint = prepare_endpoint(self.endpoint.clone())?;
-
-        // Specify the query
-        let query = Query::<N, BlockMemory<N>>::from(endpoint.clone());
+        let ParsedQuery { query, endpoint } = Developer::parse_query::<N>(&self.endpoint)?;
 
         // Check if the query is a static query.
         let is_static_query = matches!(query, Query::STATIC(_));
@@ -157,12 +151,13 @@ impl Execute {
             let vm = VM::from(store)?;
 
             if !is_static_query && program_id != ProgramID::from_str("credits.aleo")? {
+                let endpoint = endpoint.as_ref().context("REST query has no endpoint")?;
                 let height = query.current_block_height().with_context(|| "Failed to retrieve current block height")?;
                 let version = N::CONSENSUS_VERSION(height)?;
                 debug!("At block height {height} and consensus {version:?}");
 
                 // Load the program and it's imports into the process.
-                load_program(&query, &vm.process().lock(), &program_id, &endpoint)?;
+                load_program(&query, &vm.process().lock(), &program_id, endpoint)?;
             }
 
             // Prepare the fee.
@@ -188,9 +183,10 @@ impl Execute {
 
         // Check if the public balance is sufficient.
         if self.record.is_none() && !is_static_query && !self.skip_funds_check {
+            let endpoint = endpoint.as_ref().context("REST query has no endpoint")?;
             // Fetch the public balance.
             let address = Address::try_from(&private_key)?;
-            let public_balance = Developer::get_public_balance::<N>(&endpoint, &address)
+            let public_balance = Developer::get_public_balance::<N>(endpoint, &address)
                 .with_context(|| "Failed to check for sufficient funds to send transaction")?
                 .ok_or_else(|| {
                     anyhow!(
@@ -224,7 +220,7 @@ impl Execute {
 
         // Determine if the transaction should be broadcast, stored, or displayed to the user.
         Developer::handle_transaction(
-            &endpoint,
+            endpoint.as_ref(),
             &self.broadcast,
             self.dry_run,
             &self.store,
@@ -405,5 +401,36 @@ mod tests {
 
         let err = CLI::try_parse_from(arg_vec).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn clap_snarkos_execute_static_query() -> Result<()> {
+        let query = r#"{"state_root": "sr1dz06ur5spdgzkguh4pr42mvft6u3nwsg5drh9rdja9v8jpcz3czsls9geg", "height": 14}"#;
+        let arg_vec = &[
+            "snarkos",
+            "developer",
+            "execute",
+            "--private-key",
+            "PRIVATE_KEY",
+            "--query",
+            query,
+            "--dry-run",
+            "hello.aleo",
+            "hello",
+            "1u32",
+            "2u32",
+        ];
+        let cli = CLI::try_parse_from(arg_vec)?;
+
+        let Command::Developer(developer) = cli.command else {
+            bail!("Unexpected result of clap parsing!");
+        };
+        let DeveloperCommand::Execute(execute) = developer.command else {
+            bail!("Unexpected result of clap parsing!");
+        };
+
+        assert_eq!(execute.endpoint, query);
+
+        Ok(())
     }
 }

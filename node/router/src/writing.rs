@@ -65,6 +65,8 @@ impl<N: Network> Router<N> {
         }
         // Retrieve the message name.
         let name = message.name();
+        #[cfg(feature = "metrics")]
+        metrics::increment_counter_2(metrics::router::EVENTS, "direction", "outbound", "type", message.variant_name());
         // Send the message to the peer.
         trace!("Sending '{name}' to '{peer_ip}'");
         let result = self.unicast(peer_addr, message);

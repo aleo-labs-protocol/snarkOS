@@ -25,7 +25,7 @@ use crate::{
     helpers::{Pending, Ready, Storage, WorkerReceiver, fmt_id, max_redundant_requests},
     spawn_blocking,
 };
-use snarkos_node_bft_ledger_service::LedgerService;
+use snarkos_node_bft_ledger_service::{LedgerService, deserialize_transaction_strict};
 use snarkvm::{
     console::prelude::*,
     ledger::{
@@ -36,7 +36,6 @@ use snarkvm::{
 };
 
 use anyhow::Context;
-use colored::{ColoredString, Colorize};
 use indexmap::{IndexMap, IndexSet};
 #[cfg(feature = "locktick")]
 use locktick::parking_lot::{Mutex, RwLock};
@@ -174,23 +173,27 @@ impl<N: Network> Worker<N> {
 
 impl<N: Network> Worker<N> {
     // Helper to print the transmission ID and checksum (if any).
-    fn format_transmission_id(&self, transmission_id: TransmissionID<N>) -> ColoredString {
+    fn format_transmission_id(&self, transmission_id: TransmissionID<N>) -> String {
         if let Some(checksum) = transmission_id.checksum() {
             // fmt_id will suffix with `..`, so we should not use `.`  as a separator.
             format!("{}:{}", fmt_id(transmission_id), fmt_id(checksum))
         } else {
             fmt_id(transmission_id)
         }
-        .dimmed()
     }
 
     /// Returns `true` if the transmission ID exists in the ready queue, proposed batch, storage, or ledger.
+    ///
+    /// Note that the storage check is the retrievable one: an ID that BFT storage knows only as
+    /// aborted holds no payload, so the worker still wants the bytes - to retain what a fetch just
+    /// produced, and to serve them to peers. The ledger check is deliberately the wider one, since
+    /// an ID the ledger knows - confirmed, rejected, or aborted - must not re-enter the queue.
     pub fn contains_transmission(&self, transmission_id: impl Into<TransmissionID<N>>) -> bool {
         let transmission_id = transmission_id.into();
         // Check if the transmission ID exists in the ready queue, proposed batch, storage, or ledger.
         self.ready.read().contains(transmission_id)
             || matches!(&*self.proposed_batch.read(), ProposedBatchState::Certifying(p) if p.contains_transmission(transmission_id))
-            || self.storage.contains_transmission(transmission_id)
+            || self.storage.contains_retrievable_transmission(transmission_id)
             || self.ledger.contains_transmission(&transmission_id).unwrap_or(false)
     }
 
@@ -298,7 +301,7 @@ impl<N: Network> Worker<N> {
                         // Insert the transmission into the ready queue.
                         // Note: This method checks `contains_transmission` again, because by the time the transmission is fetched,
                         // it could have already been inserted into the ready queue.
-                        self_.process_transmission_from_peer(peer_ip, transmission_id, transmission);
+                        self_.process_transmission_from_ping(peer_ip, transmission_id, transmission);
                     }
                 }
                 // If the transmission was not fetched, then attempt to fetch it again.
@@ -313,12 +316,56 @@ impl<N: Network> Worker<N> {
         });
     }
 
+    /// Handles a transmission fetched in response to a worker ping event.
+    ///
+    /// Unlike [`Worker::process_transmission_from_peer`], this enforces the ready-queue capacity
+    /// limit (atomically with the insertion), dropping the transmission if the queue is full.
+    ///
+    /// This is required to close a time-of-check-to-time-of-use race: the capacity check in
+    /// `process_transmission_id_from_ping` runs before the transmission is fetched asynchronously,
+    /// so without a re-check at insertion time, many concurrent fetches could each observe a
+    /// non-full ready queue and then collectively exceed `MAX_TRANSMISSIONS_PER_WORKER`.
+    ///
+    /// Note: We must prioritize the unconfirmed solutions and unconfirmed transactions, not
+    /// transmissions fetched from peer pings, which is why the limit is enforced on this path.
+    fn process_transmission_from_ping(
+        &self,
+        peer_ip: SocketAddr,
+        transmission_id: TransmissionID<N>,
+        transmission: Transmission<N>,
+    ) {
+        self.insert_transmission_from_peer(peer_ip, transmission_id, transmission, true);
+    }
+
     /// Handles the incoming transmission from a peer.
+    ///
+    /// Note: This does *not* enforce the ready-queue capacity limit, because this path also
+    /// materializes the transmissions of a peer's batch proposal prior to signing it (see
+    /// `Primary::insert_missing_transmissions_into_workers`); dropping a transmission there would
+    /// cause the node to sign a batch whose transmissions it does not hold. The capacity limit is
+    /// enforced only on the worker-ping path, via [`Worker::process_transmission_from_ping`].
     pub(crate) fn process_transmission_from_peer(
         &self,
         peer_ip: SocketAddr,
         transmission_id: TransmissionID<N>,
         transmission: Transmission<N>,
+    ) {
+        self.insert_transmission_from_peer(peer_ip, transmission_id, transmission, false);
+    }
+
+    /// Inserts a peer-provided transmission into the ready queue.
+    ///
+    /// If `enforce_capacity_limit` is `true`, the transmission is dropped when the ready queue is
+    /// already full. This must only be set for the worker-ping fetch path; callers that must retain
+    /// the transmission (e.g. materializing a peer's batch proposal before signing it) must leave it
+    /// `false`. See [`Worker::process_transmission_from_ping`] and
+    /// [`Worker::process_transmission_from_peer`].
+    fn insert_transmission_from_peer(
+        &self,
+        peer_ip: SocketAddr,
+        transmission_id: TransmissionID<N>,
+        transmission: Transmission<N>,
+        enforce_capacity_limit: bool,
     ) {
         // If the transmission ID already exists, then do not store it.
         if self.contains_transmission(transmission_id) {
@@ -334,20 +381,39 @@ impl<N: Network> Worker<N> {
             // All other combinations are clearly invalid.
             _ => false,
         };
-        // If the transmission is a deserialized execution, verify it immediately.
-        // This takes heavy transaction verification out of the hot path during block generation.
-        if let (TransmissionID::Transaction(tx_id, _), Transmission::Transaction(Data::Object(tx))) =
-            (transmission_id, &transmission)
-            && tx.is_execute()
-        {
-            let self_ = self.clone();
-            let tx_ = tx.clone();
-            tokio::spawn(async move {
-                let _ = self_.ledger.check_transaction_basic(tx_id, tx_).await;
-            });
+        // If the transmission type does not match the transmission ID, then do not store it.
+        if !is_well_formed {
+            return;
         }
-        // If the transmission ID and transmission type matches, then insert the transmission into the ready queue.
-        if is_well_formed && self.ready.write().insert(transmission_id, transmission) {
+        // If the transmission is a deserialized execution, capture it so it can be verified
+        // immediately below (only if it is actually inserted). This takes heavy transaction
+        // verification out of the hot path during block generation.
+        let execution_to_verify = match (transmission_id, &transmission) {
+            (TransmissionID::Transaction(tx_id, _), Transmission::Transaction(Data::Object(tx))) if tx.is_execute() => {
+                Some((tx_id, tx.clone()))
+            }
+            _ => None,
+        };
+        // Insert the transmission into the ready queue. When the capacity limit is enforced, the
+        // check is performed atomically with the insertion (i.e. under a single write lock), so that
+        // concurrent inserts cannot collectively exceed `MAX_TRANSMISSIONS_PER_WORKER`.
+        let inserted = {
+            let mut ready = self.ready.write();
+            // If the ready queue is full, then skip this transmission.
+            if enforce_capacity_limit && ready.num_transmissions() > Self::MAX_TRANSMISSIONS_PER_WORKER {
+                return;
+            }
+            ready.insert(transmission_id, transmission)
+        };
+        // If the transmission was newly inserted, then process it further.
+        if inserted {
+            // Eagerly verify a newly-inserted execution to warm the verification cache.
+            if let Some((tx_id, tx)) = execution_to_verify {
+                let self_ = self.clone();
+                tokio::spawn(async move {
+                    let _ = self_.ledger.check_transaction_basic(tx_id, tx).await;
+                });
+            }
             trace!(
                 "Worker {} - Added transmission '{}' from '{peer_ip}'",
                 self.id,
@@ -417,14 +483,7 @@ impl<N: Network> Worker<N> {
             return Ok(false);
         }
         // Deserialize the transaction. If the transaction exceeds the maximum size, then return an error.
-        let transaction = spawn_blocking!({
-            match transaction {
-                Data::Object(transaction) => Ok(transaction),
-                Data::Buffer(bytes) => {
-                    Ok(Transaction::<N>::read_le(&mut bytes.take(N::LATEST_MAX_TRANSACTION_SIZE() as u64))?)
-                }
-            }
-        })?;
+        let transaction = spawn_blocking!(deserialize_transaction_strict(transaction))?;
 
         // Check that the transaction is well-formed and unique.
         self.ledger.check_transaction_basic(transaction_id, transaction).await?;
@@ -631,6 +690,7 @@ mod tests {
         #[async_trait]
         impl<N:Network> Transport<N> for Gateway<N> {
             fn broadcast(&self, event: Event<N>);
+            fn broadcast_until(&self, event: Event<N>, token: tokio_util::sync::CancellationToken);
             async fn send(&self, peer_ip: SocketAddr, event: Event<N>) -> Option<oneshot::Receiver<io::Result<()>>>;
         }
     }
@@ -739,6 +799,92 @@ mod tests {
         // Take the transmission from the ready set.
         assert!(worker.ready.write().remove_front().is_some());
         assert!(!worker.ready.read().contains(transmission_id));
+    }
+
+    #[tokio::test]
+    async fn test_process_transmission_from_ping_respects_capacity() {
+        let rng = &mut TestRng::default();
+        // Sample a committee.
+        let committee = snarkvm::ledger::committee::test_helpers::sample_committee(rng);
+        let committee_clone = committee.clone();
+        // Setup the mock gateway and ledger.
+        let gateway = MockGateway::default();
+        let mut mock_ledger = MockLedger::default();
+        mock_ledger.expect_current_committee().returning(move || Ok(committee.clone()));
+        mock_ledger.expect_get_committee_lookback_for_round().returning(move |_| Ok(committee_clone.clone()));
+        mock_ledger.expect_contains_transmission().returning(|_| Ok(false));
+        let ledger: Arc<dyn LedgerService<CurrentNetwork>> = Arc::new(mock_ledger);
+        // Initialize the storage.
+        let storage = Storage::<CurrentNetwork>::new(ledger.clone(), Arc::new(BFTMemoryService::new()), 1).unwrap();
+
+        // Create the Worker.
+        let worker = Worker::new(0, Arc::new(gateway), storage, ledger, Default::default()).unwrap();
+        let data =
+            |rng: &mut TestRng| Data::Buffer(Bytes::from((0..512).map(|_| rng.random::<u8>()).collect::<Vec<_>>()));
+        let peer_ip = SocketAddr::from(([127, 0, 0, 1], 1234));
+
+        // Emulate the asynchronous worker-ping fetch path inserting far more transmissions than the
+        // per-worker limit. Each fetched transmission is inserted via `process_transmission_from_ping`,
+        // exactly as it would be when a `send_transmission_request` future resolves. Without an insertion
+        // time capacity check, the TOCTOU in `process_transmission_id_from_ping` lets these accumulate
+        // without bound.
+        let num_to_insert = Worker::<CurrentNetwork>::MAX_TRANSMISSIONS_PER_WORKER * 4;
+        for _ in 0..num_to_insert {
+            let transmission_id = TransmissionID::Solution(
+                rng.random::<u64>().into(),
+                rng.random::<<CurrentNetwork as Network>::TransmissionChecksum>(),
+            );
+            let transmission = Transmission::Solution(data(rng));
+            worker.process_transmission_from_ping(peer_ip, transmission_id, transmission);
+        }
+
+        // The worker-ping path must not grow the ready queue beyond the per-worker limit.
+        // At most one extra transmission is tolerated (the insertion that crosses the boundary).
+        assert!(
+            worker.num_transmissions() <= Worker::<CurrentNetwork>::MAX_TRANSMISSIONS_PER_WORKER + 1,
+            "ready queue exceeded the per-worker limit: {} > {}",
+            worker.num_transmissions(),
+            Worker::<CurrentNetwork>::MAX_TRANSMISSIONS_PER_WORKER + 1,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_transmission_from_peer_ignores_capacity() {
+        let rng = &mut TestRng::default();
+        // Sample a committee.
+        let committee = snarkvm::ledger::committee::test_helpers::sample_committee(rng);
+        let committee_clone = committee.clone();
+        // Setup the mock gateway and ledger.
+        let gateway = MockGateway::default();
+        let mut mock_ledger = MockLedger::default();
+        mock_ledger.expect_current_committee().returning(move || Ok(committee.clone()));
+        mock_ledger.expect_get_committee_lookback_for_round().returning(move |_| Ok(committee_clone.clone()));
+        mock_ledger.expect_contains_transmission().returning(|_| Ok(false));
+        let ledger: Arc<dyn LedgerService<CurrentNetwork>> = Arc::new(mock_ledger);
+        // Initialize the storage.
+        let storage = Storage::<CurrentNetwork>::new(ledger.clone(), Arc::new(BFTMemoryService::new()), 1).unwrap();
+
+        // Create the Worker.
+        let worker = Worker::new(0, Arc::new(gateway), storage, ledger, Default::default()).unwrap();
+        let data =
+            |rng: &mut TestRng| Data::Buffer(Bytes::from((0..512).map(|_| rng.random::<u8>()).collect::<Vec<_>>()));
+        let peer_ip = SocketAddr::from(([127, 0, 0, 1], 1234));
+
+        // The batch-materialization path (`process_transmission_from_peer`) must retain every
+        // transmission, even beyond the per-worker limit, so the node never signs a peer's batch
+        // whose transmissions it does not hold.
+        let num_to_insert = Worker::<CurrentNetwork>::MAX_TRANSMISSIONS_PER_WORKER * 4;
+        for _ in 0..num_to_insert {
+            let transmission_id = TransmissionID::Solution(
+                rng.random::<u64>().into(),
+                rng.random::<<CurrentNetwork as Network>::TransmissionChecksum>(),
+            );
+            let transmission = Transmission::Solution(data(rng));
+            worker.process_transmission_from_peer(peer_ip, transmission_id, transmission);
+        }
+
+        // Every transmission was retained.
+        assert_eq!(worker.num_transmissions(), num_to_insert);
     }
 
     #[tokio::test]

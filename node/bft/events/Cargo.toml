@@ -1,6 +1,6 @@
 [package]
 name = "snarkos-node-bft-events"
-version = "4.9.0"
+version = "4.12.0"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "Events for the gateway in a decentralized operating system"
 homepage = "https://aleo.org"
@@ -42,6 +42,9 @@ features = [ "serde", "rayon" ]
 [dependencies.serde]
 workspace = true
 
+[dependencies.snarkos-node-network]
+workspace = true
+
 [dependencies.snarkos-node-sync-locators]
 workspace = true
 
@@ -62,6 +65,13 @@ workspace = true
 [dependencies.proptest]
 workspace = true
 optional = true
+
+[[bench]]
+name = "serialization"
+harness = false
+
+[dev-dependencies.criterion]
+workspace = true
 
 [dev-dependencies.snarkvm]
 workspace = true

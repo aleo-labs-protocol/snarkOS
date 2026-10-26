@@ -16,6 +16,7 @@
 use crate::{
     Outbound,
     PeerPoolHandling,
+    Router,
     messages::{
         BlockRequest,
         BlockResponse,
@@ -53,8 +54,6 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
     const MAXIMUM_UNCONFIRMED_SOLUTIONS_PER_INTERVAL: usize = 64;
     /// The duration in seconds to sleep in between ping requests with a connected peer.
     const PING_SLEEP_IN_SECS: u64 = 20; // 20 seconds
-    /// The time frame to enforce the `MESSAGE_LIMIT`.
-    const MESSAGE_LIMIT_TIME_FRAME_IN_SECS: i64 = 5;
     /// The maximum number of messages accepted within `MESSAGE_LIMIT_TIME_FRAME_IN_SECS`.
     const MESSAGE_LIMIT: usize = 500;
 
@@ -91,12 +90,16 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
 
         // Drop the peer, if they have sent more than `MESSAGE_LIMIT` messages
         // in the last `MESSAGE_LIMIT_TIME_FRAME_IN_SECS` seconds.
-        let num_messages = self.router().cache.insert_inbound_message(peer_ip, Self::MESSAGE_LIMIT_TIME_FRAME_IN_SECS);
+        let num_messages =
+            self.router().cache.insert_inbound_message(peer_ip, Router::<N>::MESSAGE_LIMIT_TIME_FRAME_IN_SECS);
         if num_messages > Self::MESSAGE_LIMIT {
             bail!("Dropping '{peer_ip}' for spamming messages (num_messages = {num_messages})")
         }
 
         trace!("Received '{}' from '{peer_ip}'", message.name());
+
+        #[cfg(feature = "metrics")]
+        metrics::increment_counter_2(metrics::router::EVENTS, "direction", "inbound", "type", message.variant_name());
 
         // Update the last seen timestamp of the peer.
         self.router().update_last_seen_for_connected_peer(peer_ip);
@@ -191,13 +194,8 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
                     bail!("Dropping '{peer_ip}' on message version {} (outdated)", message.version);
                 }
 
-                // If the peer is a client or validator, ensure there are block locators.
-                let is_client_or_validator = message.node_type.is_client() || message.node_type.is_validator();
-                if is_client_or_validator && message.block_locators.is_none() {
-                    bail!("Peer '{peer_ip}' is a {}, but no block locators were provided", message.node_type);
-                }
                 // If the peer is a prover, ensure there are no block locators.
-                else if message.node_type.is_prover() && message.block_locators.is_some() {
+                if message.node_type.is_prover() && message.block_locators.is_some() {
                     bail!("Peer '{peer_ip}' is a prover, but block locators were provided");
                 }
 

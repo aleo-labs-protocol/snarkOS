@@ -13,7 +13,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{BeginLedgerUpdateError, LedgerService, LedgerUpdateService, fmt_id, spawn_blocking};
+use crate::{
+    BeginLedgerUpdateError,
+    LedgerService,
+    LedgerUpdateService,
+    deserialize_solution_strict,
+    deserialize_transaction_strict,
+    fmt_id,
+    spawn_blocking,
+};
 
 use snarkos_utilities::Stoppable;
 #[cfg(feature = "test_network")]
@@ -37,16 +45,12 @@ use snarkvm::{
         Address,
         ConsensusVersion,
         Field,
-        FromBytes,
         Network,
         Result,
         bail,
         cfg_into_iter,
         consensus_config_value_by_version,
-        deploy_compute_cost_in_microcredits,
-        deployment_cost,
-        execute_compute_cost_in_microcredits,
-        execution_cost,
+        transaction_compute_spend_in_microcredits,
     },
 };
 
@@ -63,7 +67,7 @@ use parking_lot::{Mutex, RwLock};
 #[cfg(not(feature = "serial"))]
 use rayon::prelude::*;
 
-use std::{fmt, io::Read, ops::Range, sync::Arc};
+use std::{fmt, ops::Range, sync::Arc};
 
 /// A core ledger service.
 #[allow(clippy::type_complexity)]
@@ -138,9 +142,16 @@ impl<'a, N: Network, C: ConsensusStorage<N>> LedgerUpdateService<N> for LedgerUp
 impl<N: Network, C: ConsensusStorage<N>> CoreLedgerService<N, C> {
     /// Initializes a new core ledger service.
     pub fn new(ledger: Ledger<N, C>, stoppable: Arc<dyn Stoppable>) -> Self {
-        // Initialize the block height metric.
+        // Initialize the block height and consensus version metrics.
         #[cfg(feature = "metrics")]
-        metrics::gauge(metrics::bft::HEIGHT, ledger.latest_block().height() as f64);
+        {
+            let height = ledger.latest_block().height();
+            metrics::gauge(metrics::bft::HEIGHT, height as f64);
+            metrics::gauge(
+                metrics::consensus::VERSION,
+                N::CONSENSUS_VERSION(height).map_or(0.0, |version| version as u16 as f64),
+            );
+        }
 
         Self { ledger, latest_leader: Default::default(), stoppable, update_lock: Default::default() }
     }
@@ -388,12 +399,7 @@ impl<N: Network, C: ConsensusStorage<N>> LedgerService<N> for CoreLedgerService<
                 Transmission::Transaction(transaction_data),
             ) => {
                 // Deserialize the transaction. If the transaction exceeds the maximum size, then return an error.
-                let transaction = match transaction_data.clone() {
-                    Data::Object(transaction) => transaction,
-                    Data::Buffer(bytes) => {
-                        Transaction::<N>::read_le(&mut bytes.take(N::LATEST_MAX_TRANSACTION_SIZE() as u64))?
-                    }
-                };
+                let transaction = deserialize_transaction_strict(transaction_data.clone())?;
                 // Ensure the transaction ID matches the expected transaction ID.
                 if transaction.id() != expected_transaction_id {
                     bail!(
@@ -424,7 +430,7 @@ impl<N: Network, C: ConsensusStorage<N>> LedgerService<N> for CoreLedgerService<
                 TransmissionID::Solution(expected_solution_id, expected_checksum),
                 Transmission::Solution(solution_data),
             ) => {
-                match solution_data.clone().deserialize_blocking() {
+                match deserialize_solution_strict(solution_data.clone()) {
                     Ok(solution) => {
                         if solution.id() != expected_solution_id {
                             bail!(
@@ -462,7 +468,7 @@ impl<N: Network, C: ConsensusStorage<N>> LedgerService<N> for CoreLedgerService<
     /// Checks the given solution is well-formed.
     async fn check_solution_basic(&self, solution_id: SolutionID<N>, solution: Data<Solution<N>>) -> Result<()> {
         // Deserialize the solution.
-        let solution = spawn_blocking!(solution.deserialize_blocking())?;
+        let solution = spawn_blocking!(deserialize_solution_strict(solution))?;
         // Ensure the solution ID matches in the solution.
         if solution_id != solution.id() {
             bail!("Invalid solution - expected {solution_id}, found {}", solution.id());
@@ -543,32 +549,15 @@ impl<N: Network, C: ConsensusStorage<N>> LedgerService<N> for CoreLedgerService<
         let transaction_spend_limit =
             consensus_config_value_by_version!(N, TRANSACTION_SPEND_LIMIT, consensus_version).unwrap();
         let id = transaction.id();
-        match transaction {
-            Transaction::Deploy(_, _, _, deployment, _) => {
-                let (_, cost_details) = deployment_cost(self.ledger.vm().process(), deployment, consensus_version)?;
-                let compute_spend = deploy_compute_cost_in_microcredits(cost_details, consensus_version);
-                ensure!(
-                    compute_spend <= transaction_spend_limit,
-                    "Transaction '{id}' exceeds the transaction spend limit with compute_spend: '{compute_spend}'"
-                );
-                Ok(compute_spend)
-            }
-            Transaction::Execute(_, _, execution, _) => {
-                let (_, cost_details) = execution_cost(self.ledger.vm().process(), execution, consensus_version)?;
-                let compute_spend = execute_compute_cost_in_microcredits(cost_details, consensus_version);
-                if consensus_version >= ConsensusVersion::V11 {
-                    // From V11, add this check for consistency with our deployment checks.
-                    ensure!(
-                        compute_spend <= transaction_spend_limit,
-                        "Transaction '{id}' exceeds the transaction spend limit with compute_spend: '{compute_spend}'"
-                    );
-                }
-                Ok(compute_spend)
-            }
-            Transaction::Fee(..) => {
-                bail!("Fee transactions are internal to the VM, transaction {id} is invalid.")
-            }
-        }
+
+        let compute_spend =
+            transaction_compute_spend_in_microcredits(self.ledger.vm().process(), transaction, consensus_version)?;
+        ensure!(
+            compute_spend <= transaction_spend_limit,
+            "Transaction '{id}' exceeds the transaction spend limit with compute_spend: '{compute_spend}'"
+        );
+
+        Ok(compute_spend)
     }
 
     fn is_stopped(&self) -> bool {

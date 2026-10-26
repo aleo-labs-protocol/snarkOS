@@ -119,9 +119,118 @@ impl<N: Network> From<DisconnectReason> for Event<N> {
     }
 }
 
+/// Replaces the payload with its serialized form, if it is not already serialized.
+fn serialize_payload<T: FromBytes + ToBytes + Send + 'static>(payload: &mut Data<T>) -> Result<()> {
+    if let Data::Object(object) = payload {
+        *payload = Data::Buffer(object.to_bytes_le()?.into());
+    }
+    Ok(())
+}
+
+/// Returns `true` if the payload still holds an object that would have to be serialized.
+fn is_payload_unserialized<T: FromBytes + ToBytes + Send + 'static>(payload: &mut Data<T>) -> bool {
+    matches!(payload, Data::Object(_))
+}
+
+/// Applies `$f` to the event's [`Data`] payload, evaluating to `$default` if it carries none.
+///
+/// Both [`Event::serialize_payload`] and [`Event::has_unserialized_payload`] need to know which
+/// variants carry a payload. Routing both through this macro keeps that list in exactly one place,
+/// so a newly added variant cannot be handled by one and silently forgotten by the other.
+macro_rules! with_data_payload {
+    ($event:expr, $f:ident, $default:expr) => {
+        match $event {
+            Self::BatchPropose(event) => $f(&mut event.batch_header),
+            Self::BatchCertified(event) => $f(&mut event.certificate),
+            Self::PrimaryPing(event) => $f(&mut event.primary_certificate),
+            Self::BlockResponse(event) => $f(&mut event.blocks),
+            Self::ChallengeResponse(event) => $f(&mut event.signature),
+            Self::TransmissionResponse(event) => match &mut event.transmission {
+                Transmission::Solution(solution) => $f(solution),
+                Transmission::Transaction(transaction) => $f(transaction),
+                Transmission::Ratification => $default,
+            },
+            // The remaining events carry no `Data` payload.
+            //
+            // Note that `CertificateResponse` is in this list only because its certificate is held
+            // directly rather than behind a `Data`, unlike every other certificate-bearing event.
+            // It is consequently serialized on the writer task and deserialized on the reading
+            // task, and cannot benefit from either of the methods below until that is changed.
+            Self::BatchSignature(_)
+            | Self::BlockRequest(_)
+            | Self::CertificateRequest(_)
+            | Self::CertificateResponse(_)
+            | Self::ChallengeRequest(_)
+            | Self::Disconnect(_)
+            | Self::TransmissionRequest(_)
+            | Self::ValidatorsRequest(_)
+            | Self::ValidatorsResponse(_)
+            | Self::WorkerPing(_) => $default,
+        }
+    };
+}
+
 impl<N: Network> Event<N> {
     /// The version of the event protocol; it can be incremented in order to force users to update.
     pub const VERSION: u32 = 10;
+
+    /// Serializes the event's [`Data`] payload, if it holds one that is not already serialized.
+    ///
+    /// [`Data`] defers serialization until the event is written to a stream, so an event that is
+    /// cloned for several peers is serialized once per peer, separately, inside each connection's
+    /// writer task. Calling this beforehand performs the serialization once; every clone then
+    /// shares the resulting buffer, and each writer only has to copy it to the wire.
+    ///
+    /// Before a broadcast, this avoids serializing the same payload once per recipient. Before a
+    /// single send it saves no total work, but it still matters: it moves the serialization off
+    /// the connection's writer task, which is a Tokio worker and should not be running compute.
+    /// A large payload serialized there stalls the reactor, and it does so inside the write
+    /// timeout, which then has to be sized to accommodate it.
+    ///
+    /// Accordingly, `Transport::send` performs this on a blocking thread for every outbound event,
+    /// and `Transport::broadcast` performs it once up front so that the fan-out only clones the
+    /// resulting buffer.
+    ///
+    /// It is a no-op for events that carry no payload, or whose payload is already serialized, so
+    /// applying it twice is harmless.
+    pub fn serialize_payload(&mut self) -> Result<()> {
+        with_data_payload!(self, serialize_payload, Ok(()))
+    }
+
+    /// Returns `true` if this event carries a payload that has not been serialized yet.
+    ///
+    /// Callers use this to decide whether [`Self::serialize_payload`] is worth the cost of moving
+    /// the event to a blocking thread. Most events carry no payload at all, and re-sending an
+    /// already-serialized one is common, so the check keeps that hop off the common path.
+    ///
+    /// Note this takes `&mut self` only because it shares its variant list with
+    /// [`Self::serialize_payload`]; it does not modify the event.
+    pub fn has_unserialized_payload(&mut self) -> bool {
+        with_data_payload!(self, is_payload_unserialized, false)
+    }
+
+    /// Returns the event type. Instance fields, such as a block height range, are omitted.
+    #[inline]
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Self::BatchPropose(..) => "BatchPropose",
+            Self::BatchSignature(..) => "BatchSignature",
+            Self::BatchCertified(..) => "BatchCertified",
+            Self::BlockRequest(..) => "BlockRequest",
+            Self::BlockResponse(..) => "BlockResponse",
+            Self::CertificateRequest(..) => "CertificateRequest",
+            Self::CertificateResponse(..) => "CertificateResponse",
+            Self::ChallengeRequest(..) => "ChallengeRequest",
+            Self::ChallengeResponse(..) => "ChallengeResponse",
+            Self::Disconnect(..) => "Disconnect",
+            Self::PrimaryPing(..) => "PrimaryPing",
+            Self::TransmissionRequest(..) => "TransmissionRequest",
+            Self::TransmissionResponse(..) => "TransmissionResponse",
+            Self::ValidatorsRequest(..) => "ValidatorsRequest",
+            Self::ValidatorsResponse(..) => "ValidatorsResponse",
+            Self::WorkerPing(..) => "WorkerPing",
+        }
+    }
 
     /// Returns the event name.
     #[inline]
@@ -257,15 +366,20 @@ pub mod prop_tests {
         Disconnect,
         DisconnectReason,
         Event,
+        ValidatorsRequest,
         batch_certified::prop_tests::any_batch_certified,
         batch_propose::prop_tests::any_batch_propose,
         batch_signature::prop_tests::any_batch_signature,
+        block_request::prop_tests::any_block_request,
+        block_response::prop_tests::any_block_response,
         certificate_request::prop_tests::any_certificate_request,
         certificate_response::prop_tests::any_certificate_response,
         challenge_request::prop_tests::any_challenge_request,
         challenge_response::prop_tests::any_challenge_response,
+        primary_ping::prop_tests::any_primary_ping,
         transmission_request::prop_tests::any_transmission_request,
         transmission_response::prop_tests::any_transmission_response,
+        validators_response::prop_tests::any_validators_response,
         worker_ping::prop_tests::any_worker_ping,
     };
     use snarkvm::{
@@ -275,7 +389,7 @@ pub mod prop_tests {
     };
 
     use proptest::{
-        prelude::{BoxedStrategy, Just, Strategy, any},
+        prelude::{BoxedStrategy, Just, ProptestConfig, Strategy, any},
         prop_oneof,
         sample::Selector,
     };
@@ -316,11 +430,18 @@ pub mod prop_tests {
         .boxed()
     }
 
+    /// A strategy covering every [`Event`] variant.
+    ///
+    /// Keep this exhaustive. Several properties are asserted over "any event", and a variant that
+    /// is missing here is silently untested rather than failing -- which is how `BlockResponse` and
+    /// `PrimaryPing`, the two largest `Data`-carrying events, went uncovered.
     pub fn any_event() -> BoxedStrategy<Event<CurrentNetwork>> {
         prop_oneof![
             any_batch_certified().prop_map(Event::BatchCertified),
             any_batch_propose().prop_map(Event::BatchPropose),
             any_batch_signature().prop_map(Event::BatchSignature),
+            any_block_request().prop_map(Event::BlockRequest),
+            any_block_response().prop_map(Event::BlockResponse),
             any_certificate_request().prop_map(Event::CertificateRequest),
             any_certificate_response().prop_map(Event::CertificateResponse),
             any_challenge_request().prop_map(Event::ChallengeRequest),
@@ -342,14 +463,17 @@ pub mod prop_tests {
                 any::<Selector>()
             )
                 .prop_map(|(reasons, selector)| Event::Disconnect(Disconnect::from(selector.select(reasons)))),
+            any_primary_ping().prop_map(Event::PrimaryPing),
             any_transmission_request().prop_map(Event::TransmissionRequest),
             any_transmission_response().prop_map(Event::TransmissionResponse),
+            Just(ValidatorsRequest).prop_map(Event::ValidatorsRequest),
+            any_validators_response().prop_map(Event::ValidatorsResponse),
             any_worker_ping().prop_map(Event::WorkerPing)
         ]
         .boxed()
     }
 
-    #[proptest]
+    #[proptest(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
     fn serialize_deserialize(#[strategy(any_event())] original: Event<CurrentNetwork>) {
         let mut buf = Vec::new();
         Event::write_le(&original, &mut buf).unwrap();
@@ -357,5 +481,56 @@ pub mod prop_tests {
         let deserialized: Event<CurrentNetwork> = Event::read_le(&*buf).unwrap();
         assert_eq!(original.id(), deserialized.id());
         assert_eq!(original.name(), deserialized.name());
+    }
+
+    /// Serializing the payload ahead of time must be invisible on the wire, otherwise doing it
+    /// before a broadcast would change what peers receive.
+    #[proptest(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+    fn serialize_payload_preserves_the_encoding(#[strategy(any_event())] original: Event<CurrentNetwork>) {
+        let mut expected = Vec::new();
+        Event::write_le(&original, &mut expected).unwrap();
+
+        let mut event = original.clone();
+        event.serialize_payload().unwrap();
+
+        let mut actual = Vec::new();
+        Event::write_le(&event, &mut actual).unwrap();
+
+        assert_eq!(expected, actual, "{} encoded differently once its payload was serialized", original.name());
+    }
+
+    /// Serializing the payload must be idempotent, so that broadcasting an event that has already
+    /// been serialized does not deserialize and re-serialize it.
+    #[proptest(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+    fn serialize_payload_is_idempotent(#[strategy(any_event())] original: Event<CurrentNetwork>) {
+        let mut once = original.clone();
+        once.serialize_payload().unwrap();
+
+        let mut twice = once.clone();
+        twice.serialize_payload().unwrap();
+
+        assert_eq!(once, twice);
+    }
+
+    /// `has_unserialized_payload` is what decides whether an event is worth handing to a blocking
+    /// thread, so it must agree with `serialize_payload` about which events have work to do. If the
+    /// two ever disagreed, a payload-carrying event could be serialized on a writer task after all.
+    #[proptest(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+    fn has_unserialized_payload_agrees_with_serialize_payload(
+        #[strategy(any_event())] original: Event<CurrentNetwork>,
+    ) {
+        let mut event = original.clone();
+
+        // Serializing must clear the flag, whether or not it was set to begin with.
+        event.serialize_payload().unwrap();
+        assert!(!event.has_unserialized_payload(), "{} still reports an unserialized payload", original.name());
+
+        // And an event that reports no work to do must be unchanged by doing the work.
+        let mut reported_no_work = original.clone();
+        if !reported_no_work.has_unserialized_payload() {
+            let before = reported_no_work.clone();
+            reported_no_work.serialize_payload().unwrap();
+            assert_eq!(before, reported_no_work, "{} changed despite reporting no work", original.name());
+        }
     }
 }

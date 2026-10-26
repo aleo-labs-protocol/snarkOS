@@ -73,3 +73,70 @@ impl<C: Send + Sync + Clone> CallbackHandle<C> {
         let _ = self.callback.write().take();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fresh_handle_holds_no_callback() {
+        let handle = CallbackHandle::<u8>::default();
+
+        assert!(handle.get().is_none());
+        assert!(handle.get_ref().is_none());
+    }
+
+    #[test]
+    fn a_callback_can_be_set_once_and_read_back() {
+        let handle = CallbackHandle::default();
+
+        assert!(handle.set("callback".to_string()).is_ok());
+
+        assert_eq!(handle.get(), Some("callback".to_string()));
+        assert_eq!(handle.get_ref().as_deref(), Some("callback"));
+    }
+
+    #[test]
+    fn setting_a_second_callback_is_an_error() {
+        let handle = CallbackHandle::default();
+        handle.set("first".to_string()).unwrap();
+
+        assert!(handle.set("second".to_string()).is_err());
+    }
+
+    #[test]
+    fn a_rejected_set_has_still_replaced_the_callback() {
+        let handle = CallbackHandle::default();
+        handle.set("first".to_string()).unwrap();
+
+        let _ = handle.set("second".to_string());
+
+        // `set` swaps the new callback in before deciding to report an error, so the rejection is
+        // advisory: the handle holds the callback whose installation "failed". A caller that
+        // ignores the error gets a silently swapped callback, not a no-op.
+        assert_eq!(handle.get(), Some("second".to_string()));
+    }
+
+    #[test]
+    fn clearing_makes_the_handle_settable_again() {
+        let handle = CallbackHandle::default();
+        handle.set("first".to_string()).unwrap();
+
+        handle.clear();
+        assert!(handle.get().is_none());
+
+        // This is what lets shutdown break the circular references and then rebuild them.
+        assert!(handle.set("second".to_string()).is_ok());
+        assert_eq!(handle.get(), Some("second".to_string()));
+    }
+
+    #[test]
+    fn clearing_an_empty_handle_is_a_no_op() {
+        let handle = CallbackHandle::<u8>::default();
+
+        handle.clear();
+        handle.clear();
+
+        assert!(handle.get().is_none());
+    }
+}

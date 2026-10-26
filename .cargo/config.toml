@@ -1,9 +1,7 @@
 [target.x86_64-unknown-linux-gnu]
 rustflags = [
-    # LLD is generally faster and might be the default for Rust in the future.
-    # See here: https://github.com/rust-lang/rust/issues/71515
-    "-C", "link-arg=-fuse-ld=lld",
+    # skylake CPU family includes most SSE and AVX2 instructions from about 10 years ago
+    # without this, optimization cannot use almost any vector instructions, unless
+    # you explicitly set target-cpu yourself when building.
+    "-C", "target-cpu=skylake"
 ]
-
-[env]
-CXXFLAGS = "-include cstdint" #TODO: remove once RocksDB 0.24 is released

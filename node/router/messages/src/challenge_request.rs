@@ -115,11 +115,14 @@ pub mod prop_tests {
     }
 
     pub fn any_node_type() -> BoxedStrategy<NodeType> {
-        (0..=2)
+        // Must cover every variant: this strategy is what round-trips `NodeType` through a real
+        // `ChallengeRequest` and `Ping`, and a variant missing here is a variant never encoded.
+        (0..=3)
             .prop_map(|id| match id {
                 0 => NodeType::Client,
                 1 => NodeType::Prover,
                 2 => NodeType::Validator,
+                3 => NodeType::BootstrapClient,
                 _ => unreachable!(),
             })
             .boxed()

@@ -28,10 +28,17 @@ pub use scan::*;
 mod transfer_private;
 pub use transfer_private::*;
 
-use crate::helpers::{args::network_id_parser, logger::initialize_terminal_logger};
+use crate::helpers::{
+    args::{network_id_parser, prepare_endpoint},
+    logger::initialize_terminal_logger,
+};
 
 use snarkos_node_rest::{API_VERSION_V1, API_VERSION_V2};
-use snarkvm::{package::Package, prelude::*};
+use snarkvm::{
+    ledger::store::helpers::memory::BlockMemory,
+    package::Package,
+    prelude::{query::Query, *},
+};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{Parser, ValueEnum};
@@ -58,6 +65,12 @@ pub enum StoreFormat {
 pub enum ApiVersion {
     V1,
     V2,
+}
+
+/// A ledger `Query` parsed from an endpoint argument, with the REST base URL when the input is a URL.
+struct ParsedQuery<N: Network> {
+    query: Query<N, BlockMemory<N>>,
+    endpoint: Option<Uri>,
 }
 
 /// Commands to deploy and execute transactions
@@ -184,6 +197,23 @@ impl Developer {
             }
             false => Record::<N, Plaintext<N>>::from_str(record),
         }
+    }
+
+    /// Parses an endpoint URL or a JSON static query.
+    ///
+    /// Endpoint URLs are normalized before `Query::from_str`.
+    fn parse_query<N: Network>(input: &str) -> Result<ParsedQuery<N>> {
+        let input = input.trim();
+
+        // JSON static queries are not endpoint URLs, so they skip URI normalization.
+        if input.starts_with('{') {
+            let query = Query::<N, BlockMemory<N>>::from_str(input)?;
+            return Ok(ParsedQuery { query, endpoint: None });
+        }
+
+        let endpoint = prepare_endpoint(input.parse().with_context(|| "Invalid endpoint URL")?)?;
+        let query = Query::<N, BlockMemory<N>>::from_str(&endpoint.to_string())?;
+        Ok(ParsedQuery { query, endpoint: Some(endpoint) })
     }
 
     /// Builds the full endpoint Uri from the base and path. Used internally for all REST API calls (copied from `snarkvm_ledger_query::Query`).
@@ -386,12 +416,13 @@ impl Developer {
     /// Determine if the transaction should be broadcast or displayed to user.
     ///
     /// This function expects that exactly one of `dry_run`, `store`, and `broadcast` are `true` (or `Some`).
-    /// `broadcast` can be set to `Some(None)` to broadcast using the default endpoint.
+    /// `endpoint` is the REST base URL used to query node state, or `None` for a static query.
+    /// `broadcast` can be set to `Some(None)` to broadcast using the query endpoint.
     /// Alternatively, it can be set to `Some(Some(url))` to providifferent
     /// endpoint than that used for querying.
     #[allow(clippy::too_many_arguments)]
     fn handle_transaction<N: Network>(
-        endpoint: &Uri,
+        endpoint: Option<&Uri>,
         broadcast: &Option<Option<Uri>>,
         dry_run: bool,
         store: &Option<String>,
@@ -440,6 +471,8 @@ impl Developer {
                 debug!("Using custom endpoint for broadcasting: {url}");
                 Self::parse_custom_endpoint::<N>(url)
             } else {
+                let endpoint = endpoint
+                    .context("Cannot broadcast a transaction built from a static query without a broadcast URL")?;
                 Self::build_endpoint::<N>(endpoint, "transaction/broadcast")?
             };
 
@@ -476,6 +509,8 @@ impl Developer {
 
                     // If wait is enabled, wait for transaction confirmation
                     if wait {
+                        let endpoint = endpoint
+                            .context("Cannot wait for confirmation of a transaction built from a static query")?;
                         println!("⏳ Waiting for transaction confirmation (timeout: {timeout}s)...");
                         Self::wait_for_transaction_confirmation::<N>(endpoint, &transaction_id, timeout, api_version)?;
 
@@ -522,7 +557,38 @@ impl Developer {
 mod tests {
     use super::*;
 
-    use snarkvm::ledger::test_helpers::CurrentNetwork;
+    use snarkvm::{console::network::TestnetV0, ledger::test_helpers::CurrentNetwork, prelude::query::QueryTrait};
+
+    const STATIC_QUERY: &str =
+        r#"{"state_root": "sr1dz06ur5spdgzkguh4pr42mvft6u3nwsg5drh9rdja9v8jpcz3czsls9geg", "height": 14}"#;
+
+    #[test]
+    fn test_parse_query_static() {
+        let ParsedQuery { query, endpoint } = Developer::parse_query::<TestnetV0>(STATIC_QUERY).unwrap();
+        assert!(matches!(query, Query::STATIC(_)));
+        assert!(endpoint.is_none());
+        assert_eq!(query.current_block_height().unwrap(), 14);
+    }
+
+    #[test]
+    fn test_parse_query_static_invalid() {
+        let json = r#"{"invalid_key": "sr1dz06ur5spdgzkguh4pr42mvft6u3nwsg5drh9rdja9v8jpcz3czsls9geg", "height": 14}"#;
+        assert!(Developer::parse_query::<TestnetV0>(json).is_err());
+    }
+
+    #[test]
+    fn test_parse_query_rest_defaults_scheme() {
+        let ParsedQuery { query, endpoint } = Developer::parse_query::<TestnetV0>("localhost:3030").unwrap();
+        assert!(matches!(query, Query::REST(_)));
+        assert_eq!(endpoint.unwrap(), "http://localhost:3030/");
+    }
+
+    #[test]
+    fn test_parse_query_rest_keeps_https_path() {
+        let ParsedQuery { query, endpoint } = Developer::parse_query::<TestnetV0>(DEFAULT_ENDPOINT).unwrap();
+        assert!(matches!(query, Query::REST(_)));
+        assert_eq!(endpoint.unwrap(), DEFAULT_ENDPOINT);
+    }
 
     /// Test that the default endpoints (V1) work as expected.
     ///

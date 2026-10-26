@@ -20,7 +20,6 @@ network_id=$2
 reset_interval=$3
 final_height=$4
 num_resets=$5
-max_warnings=$6
 
 # Default values if not provided
 : "${total_validators:=7}"
@@ -28,7 +27,6 @@ max_warnings=$6
 : "${reset_interval:=50}"
 : "${final_height:=250}"
 : "${num_resets:=3}"
-: "${max_warnings:=4000}" # Allow lots of warnings as we're doing funky stuff in this test.
 
 minority=$(( (total_validators - 1) / 3 ))
 network_name=$(get_network_name "$network_id")
@@ -102,7 +100,7 @@ else
   exit 1
 fi
 
-if check_logs "$log_dir" "$total_validators" 0 "$max_warnings" "$max_validator_log_size_bytes"; then
+if check_logs "$log_dir" "$total_validators" 0 "$max_validator_log_size_bytes"; then
   exit 0
 else
   exit 1

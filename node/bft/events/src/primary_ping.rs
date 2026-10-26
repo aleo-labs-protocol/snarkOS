@@ -88,7 +88,9 @@ pub mod prop_tests {
     type CurrentNetwork = snarkvm::prelude::MainnetV0;
 
     pub fn any_block_locators() -> BoxedStrategy<BlockLocators<CurrentNetwork>> {
-        any::<u32>().prop_map(sample_block_locators).boxed()
+        // `sample_block_locators` inserts a checkpoint every 10_000 heights. An unconstrained
+        // `u32` can therefore allocate hundreds of thousands of checkpoints and blow up codec tests.
+        (0u32..50_000).prop_map(sample_block_locators).boxed()
     }
 
     pub fn any_primary_ping() -> BoxedStrategy<PrimaryPing<CurrentNetwork>> {

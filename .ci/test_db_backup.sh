@@ -12,15 +12,22 @@ total_validators=4
 network_id=0
 network_name="mainnet"
 
+# Ledgers, node data and checkpoints
+tmp_dir="${TMPDIR:-/tmp}"
+
 # Stopping conditions
 checkpoint_height=3
 rollback_height=10
 num_checkpoints=0
 remaining_checkpoints=2
-max_warnings=300
 
 # Create log directory
 init_log_dir
+
+# The ledger checkpoint with the given suffix.
+function checkpoint_dir() {
+  echo "$tmp_dir/checkpoint_$1"
+}
 
 # Use fixed JWT values in order to be able to create checkpoints
 jwt_secret="ZGJjaGVja3BvaW50dGVzdA=="
@@ -38,27 +45,43 @@ trap 'log "⛔️ Error in $BASH_SOURCE at line $LINENO: \"$BASH_COMMAND\" faile
 
 # Start all validator nodes in the background
 for ((validator_index = 0; validator_index < total_validators; validator_index++)); do
-  snarkos clean --dev $validator_index --network=$network_id
+  snarkos clean --dev $validator_index --network=$network_id \
+    "--node-data-storage=$tmp_dir/node_data_$validator_index" "--ledger-storage=$tmp_dir/ledger_$validator_index"
+  # RocksDB refuses to write a checkpoint into an existing directory.
+  for ((checkpoint_index = 0; checkpoint_index <= remaining_checkpoints; checkpoint_index++)); do
+    snarkos clean --dev $validator_index --network=$network_id --keep-node-data \
+      "--ledger-storage=$(checkpoint_dir "${validator_index}_$checkpoint_index")"
+  done
 
   log_file="$log_dir/validator-$validator_index.log"
   run_with_prefix "validator-$validator_index" snarkos start --nodisplay --network $network_id --dev $validator_index --dev-num-validators $total_validators \
     --validator --jwt-secret $jwt_secret --jwt-timestamp $jwt_ts --verbosity $log_verbosity "--logfile=$log_file" \
-    "--node-data-storage=/tmp/node_data_$validator_index" "--ledger-storage=/tmp/ledger_$validator_index"
+    "--node-data-storage=$tmp_dir/node_data_$validator_index" "--ledger-storage=$tmp_dir/ledger_$validator_index"
   PIDS[validator_index]=$!
   log "Started validator $validator_index with PID ${PIDS[$validator_index]}"
   # Add 1-second delay between starting nodes to avoid hitting rate limits
   sleep 1
 done
 
+# The height of each node just before its most recent checkpoint.
+declare -a checkpoint_floor=()
+
 # Create database checkpoints
 function create_checkpoints() {
   for ((node_index = 0; node_index < total_validators; node_index++)); do
     port=$((3030 + node_index))
-    suffix="${node_index}_$1"
-    result=$(curl -s -X "POST" -H "Authorization: Bearer ${jwt[node_index]}" "http://127.0.0.1:$port/v2/$network_name/db_backup?path=/tmp/checkpoint_$suffix" || echo "fail")
-
-    # Track highest height for reporting
-    if [ "$result" = "fail" ]; then
+    path=$(checkpoint_dir "${node_index}_$1")
+    checkpoint_floor[node_index]=$(get_block_height_by_port "$port" "$network_name")
+    if [[ -z "${checkpoint_floor[node_index]}" ]]; then
+      log "❌ Node #${node_index} did not report its height before the checkpoint"
+      return 1
+    fi
+    if ! curl -sf -X "POST" -H "Authorization: Bearer ${jwt[node_index]}" "http://127.0.0.1:$port/v2/$network_name/db_backup?path=$path" > /dev/null; then
+      log "❌ Node #${node_index} failed to create a checkpoint at $path"
+      return 1
+    fi
+    if [[ ! -d "$path" ]]; then
+      log "❌ Node #${node_index} reported a checkpoint, but $path does not exist"
       return 1
     fi
   done
@@ -77,7 +100,10 @@ while (( total_wait < 600 )); do  # 10 minutes max
   if [[ $checkpoint_created = true ]] || check_heights  0 "$total_validators" "$checkpoint_height" "$network_name"; then
     if [[ $checkpoint_created = false ]]; then
       # Create checkpoints at the specified height
-      create_checkpoints $num_checkpoints
+      if ! create_checkpoints $num_checkpoints; then
+        log "❌ Test failed!"
+        exit 1
+      fi
       checkpoint_created=true
       checkpoint_height=$((checkpoint_height+2))
       num_checkpoints=$((num_checkpoints+1))
@@ -102,12 +128,12 @@ while (( total_wait < 600 )); do  # 10 minutes max
         if (( num_checkpoints == 1 )); then 
           # Remove the original ledger
           snarkos clean "--network=$network_id" "--dev=$validator_index" --keep-node-data \
-              "--ledger-storage=/tmp/ledger_$validator_index"
+              "--ledger-storage=$tmp_dir/ledger_$validator_index"
         else
-          # Remove the checkpoint
+          # Remove the checkpoint the node last ran from
           suffix="${validator_index}_$((num_checkpoints-2))"
           snarkos clean "--network=$network_id" "--dev=$validator_index" --keep-node-data \
-              "--ledger-storage=/tmp/ledger_checkpoint_$suffix"
+              "--ledger-storage=$(checkpoint_dir "$suffix")"
         fi
        # Wait until the cleanup concludes
         sleep 1
@@ -117,25 +143,43 @@ while (( total_wait < 600 )); do  # 10 minutes max
         log_file="$log_dir/validator-$validator_index.log"
         run_with_prefix "validator-$validator_index" snarkos start --nodisplay "--network=$network_id" "--dev=$validator_index" "--dev-num-validators=$total_validators" \
           --validator "--jwt-secret=$jwt_secret" "--jwt-timestamp=$jwt_ts" --verbosity $log_verbosity "--logfile=$log_file" \
-          "--node-data-storage=/tmp/node_data_$validator_index" "--ledger-storage=/tmp/ledger_checkpoint_$suffix"
+          "--node-data-storage=$tmp_dir/node_data_$validator_index" "--ledger-storage=$(checkpoint_dir "$suffix")"
         PIDS[validator_index]=$!
         log "Restarted validator $validator_index with PID ${PIDS[$validator_index]}"
         # Add 1-second delay between starting nodes to avoid hitting rate limits
         sleep 1
 
+        # The REST server starts after the ledger loads and before the node connects to peers,
+        # so the first height it reports is the height of the ledger it loaded.
         port=$((3030 + validator_index))
-        height=$(curl -s "http://127.0.0.1:$port/$network_name/block/height/latest" || echo "0")
-        log "Node height after restart: $height"
+        height=""
+        for ((attempt = 0; attempt < 120; attempt++)); do
+          height=$(get_block_height_by_port "$port" "$network_name" 2)
+          if [[ -n "$height" ]]; then
+            break
+          fi
+          if ! kill -0 "${PIDS[validator_index]}" 2>/dev/null; then
+            log "❌ Node #${validator_index} exited after the restart"
+            exit 1
+          fi
+          sleep 1
+        done
+        if [[ -z "$height" ]]; then
+          log "❌ Node #${validator_index} did not report its height after the restart"
+          exit 1
+        fi
+        log "Node #${validator_index} height after restart: $height"
 
-        # Ensure that the height is below the rollback height
-        if [[ "$height" =~ ^[0-9]+$ ]] && (( height >= rollback_height )) && (( height < checkpoint_height )); then
+        # A node that ignored the checkpoint starts either at genesis or at its pre-shutdown height.
+        if (( height < checkpoint_floor[validator_index] || height >= rollback_height )); then
+          log "❌ Node #${validator_index} restarted at height $height, expected at least ${checkpoint_floor[validator_index]} and below $rollback_height"
           log "❌ Test failed!"
           exit 1
         fi
       done
 
       if (( remaining_checkpoints == 0 )); then
-        if check_logs "$log_dir" "$total_validators" 0 "$max_warnings" "$max_validator_log_size_bytes"; then
+        if check_logs "$log_dir" "$total_validators" 0 "$max_validator_log_size_bytes"; then
           exit 0
         else
           exit 1

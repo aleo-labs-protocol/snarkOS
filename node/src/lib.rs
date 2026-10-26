@@ -59,7 +59,7 @@ pub fn log_clean_error(storage_mode: &StorageMode) {
         StorageMode::Development(id) => {
             error!("Storage corruption detected! Run `snarkos clean --dev {id}` to reset storage")
         }
-        StorageMode::Custom(path) => {
+        StorageMode::Custom(path, _) => {
             error!("Storage corruption detected! Run `snarkos clean --path {}` to reset storage", path.display())
         }
         StorageMode::Test(_) => {

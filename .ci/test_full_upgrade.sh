@@ -18,13 +18,11 @@ set -eo pipefail  # error on any command failure
 total_validators=$1
 total_clients=$2
 network_id=$3
-max_warnings=$4
 
 # Default values if not provided
 : "${total_validators:=4}"
 : "${total_clients:=2}"
 : "${network_id:=0}"
-: "${max_warnings:=45}"
 
 # Node verbosity
 NODE_VERBOSITY=4
@@ -35,6 +33,9 @@ MAX_CLIENT_LOG_SIZE_BYTES=$((1 * 1024 * 1024))
 
 # How long to wait between upgrades (seconds); used for block-height window
 WAIT_BETWEEN_UPGRADES="${WAIT_BETWEEN_UPGRADES:-60}"
+
+# How long an upgraded node may take to serve its REST API again (seconds).
+MAX_RESTART_WAIT="${MAX_RESTART_WAIT:-300}"
 
 # Load shared helpers (is_integer, get_network_name, wait_for_nodes, stop_nodes, ...)
 # shellcheck source=SCRIPTDIR/utils.sh
@@ -289,13 +290,19 @@ function wait_for_height_increase_window() {
   log "Waiting ${duration}s window to see height increase above $previous_height..."
 
   while (( elapsed < duration )); do
-    if current_height="$(get_block_height 0 "$network_name")"; then
+    # Note: take the height across all nodes rather than from a single one. The node that
+    # is being upgraded is unreachable while it restarts, so polling just that one would
+    # report a stalled chain even while the rest of the network advances happily.
+    local height
+    height="$(get_network_block_height "$((total_validators + total_clients))" "$network_name")"
+    if (is_integer "$height"); then
+      current_height="$height"
       log "Current height=${current_height}"
       if (( current_height > previous_height )); then
         increased=$(( current_height - previous_height ))
       fi
     else
-      log "WARN: could not fetch latest height"
+      log "WARN: no node responded to a height request"
     fi
     sleep "$interval"
     elapsed=$((elapsed + interval))
@@ -369,10 +376,24 @@ for node_index in $(seq 0 $((total_validators+total_clients-1))); do
   log "Upgrading ${role} ${idx_label} (node index ${node_index})"
   log "=============================="
 
-  baseline_height=$(get_block_height 0 "$network_name" || echo 0)
-
   stop_node "$node_index"
   start_node "$SNARKOS_CURRENT_BIN" "$node_index" "$role" "$log_file"
+
+  # Block until the upgraded node serves its REST API again. Without this, a node that
+  # fails to come back up is not distinguishable from a chain that stopped advancing.
+  if ! wait_for_nodes "$total_validators" "$total_clients" "$network_name" "$MAX_RESTART_WAIT"; then
+    echo "❌ Upgrade failed: ${role} ${idx_label} (node index ${node_index}) did not become ready within ${MAX_RESTART_WAIT}s."
+    echo "Last 50 lines of ${role} ${idx_label} log:"
+    tail -n 50 "$log_file" || true
+    exit 1
+  fi
+
+  # Take the baseline only once the upgraded node is back, so that the window measures the
+  # network advancing *with* it, rather than crediting progress made while it was down.
+  baseline_height=$(get_network_block_height "$((total_validators + total_clients))" "$network_name")
+  if ! (is_integer "$baseline_height"); then
+    baseline_height=0
+  fi
 
   if ! wait_for_height_increase_window "$baseline_height" "$WAIT_BETWEEN_UPGRADES" 5; then
     echo "❌ Upgrade failed: chain did not advance after restarting ${role} ${idx_label} (node index ${node_index})."
@@ -382,9 +403,40 @@ for node_index in $(seq 0 $((total_validators+total_clients-1))); do
   fi
 done
 
-log "Upgrade test passed: network reached highest consensus version with release, all nodes upgraded to PR snarkos, and consensus version remained correct."
 
-if check_logs "$log_dir" "$total_validators" "$total_clients" "$max_warnings" "$MAX_VALIDATOR_LOG_SIZE_BYTES" "$MAX_CLIENT_LOG_SIZE_BYTES"; then
+# Ensure that every upgraded node applies the configured consensus version schedule, i.e.
+# that its consensus version is the one that its block height implies. Note that this is
+# not necessarily `EXPECTED_MAX_CONSENSUS_VERSION`: the test does not run long enough to
+# reach the last configured height, so the version is checked against the height reached.
+log "Checking that the consensus version matches the configured schedule..."
+for node_index in $(seq 0 $((total_validators+total_clients-1))); do
+  # Retry a few times, as the height and the consensus version are read separately and so
+  # may straddle a block that crosses a consensus version boundary.
+  for attempt in 1 2 3; do
+    node_height=$(get_block_height "$node_index" "$network_name" || echo "")
+    node_version=$(get_consensus_version "$node_index" "$network_name" || echo "")
+    if ! (is_integer "$node_height") || ! (is_integer "$node_version"); then
+      log "❌ Test failed! Could not read the height and consensus version of node #${node_index}."
+      exit 1
+    fi
+
+    expected_version=$(consensus_version_at_height "$CONSENSUS_VERSION_HEIGHTS_CURRENT" "$node_height")
+    if (( node_version == expected_version )); then
+      log "✅ Node #${node_index} is at consensus version ${node_version} at height ${node_height}, as expected."
+      break
+    fi
+
+    if (( attempt == 3 )); then
+      log "❌ Test failed! Node #${node_index} is at consensus version ${node_version} at height ${node_height}, expected ${expected_version} for CONSENSUS_VERSION_HEIGHTS=${CONSENSUS_VERSION_HEIGHTS_CURRENT}."
+      exit 1
+    fi
+    sleep 2
+  done
+done
+
+log "Upgrade test passed: all nodes upgraded to PR snarkos, the network kept advancing, and every node's consensus version matches the configured schedule."
+
+if check_logs "$log_dir" "$total_validators" "$total_clients" "$MAX_VALIDATOR_LOG_SIZE_BYTES" "$MAX_CLIENT_LOG_SIZE_BYTES"; then
   exit 0
 else
   exit 1

@@ -173,3 +173,67 @@ impl Stoppable for SignalHandler {
         self.stopped_sender.read().is_none()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_simple_stoppable_starts_running_and_latches_when_stopped() {
+        let stoppable = SimpleStoppable::new();
+        assert!(!stoppable.is_stopped());
+
+        stoppable.stop();
+        assert!(stoppable.is_stopped());
+
+        // Stopping is idempotent; a second fatal error during shutdown must not misbehave.
+        stoppable.stop();
+        assert!(stoppable.is_stopped());
+    }
+
+    #[tokio::test]
+    async fn a_signal_handler_can_be_stopped_without_a_signal() {
+        let handler = SignalHandler::new(None);
+        assert!(!handler.is_stopped());
+
+        // The manual path, used when the node hits a fatal error rather than a Ctrl+C.
+        handler.stop();
+        assert!(handler.is_stopped());
+    }
+
+    #[tokio::test]
+    async fn stopping_a_signal_handler_twice_is_harmless() {
+        let handler = SignalHandler::new(None);
+
+        handler.stop();
+        handler.stop();
+
+        assert!(handler.is_stopped());
+    }
+
+    #[tokio::test]
+    async fn waiting_returns_once_the_handler_is_stopped() {
+        let handler = SignalHandler::new(None);
+
+        let waiter = handler.clone();
+        let task = tokio::spawn(async move { waiter.wait_for_signals().await });
+
+        handler.stop();
+
+        // The wait must resolve off the manual stop, not only off a real signal.
+        tokio::time::timeout(std::time::Duration::from_secs(10), task)
+            .await
+            .expect("wait_for_signals did not return after stop")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn waiting_returns_immediately_if_already_stopped() {
+        let handler = SignalHandler::new(None);
+        handler.stop();
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), handler.wait_for_signals())
+            .await
+            .expect("wait_for_signals did not return for an already-stopped handler");
+    }
+}

@@ -55,6 +55,11 @@ pub trait NodeInterface<N: Network>: Routing<N> {
         // If the node is already initialized, then shut it down.
         self.shut_down().await;
 
+        // Stop the metrics exporter. Note: it is started before the node is, so it is not one
+        // of the node's own tasks, and it would be reported as a straggler below.
+        #[cfg(feature = "metrics")]
+        snarkos_node_metrics::shut_down_metrics();
+
         // Allow a bit of time for the tasks to wind down.
         sleep(Duration::from_secs(1)).await;
 

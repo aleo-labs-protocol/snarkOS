@@ -13,19 +13,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::RwLock;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::RwLock;
 use std::{
     sync::atomic::{AtomicU64, Ordering::Relaxed},
     time::Instant,
 };
 
-/// Contains statistics related to Tcp.
+/// Contains statistics related to Tcp or one of its connections.
 pub struct Stats {
     /// The timestamp of the creation (for the node) or connection (to a peer).
-    pub(crate) timestamp: RwLock<Instant>,
+    created: Instant,
     /// The number of all messages sent.
     msgs_sent: AtomicU64,
     /// The number of all messages received.
@@ -34,26 +30,23 @@ pub struct Stats {
     bytes_sent: AtomicU64,
     /// The number of all bytes received.
     bytes_received: AtomicU64,
-    /// The number of failures.
-    failures: AtomicU64,
 }
 
 impl Stats {
     /// Creates a new instance of the object.
-    pub fn new(timestamp: Instant) -> Self {
+    pub fn new(created: Instant) -> Self {
         Self {
-            timestamp: RwLock::new(timestamp),
+            created,
             msgs_sent: Default::default(),
             msgs_received: Default::default(),
             bytes_sent: Default::default(),
             bytes_received: Default::default(),
-            failures: Default::default(),
         }
     }
 
     /// Returns the creation or connection timestamp.
-    pub fn timestamp(&self) -> Instant {
-        *self.timestamp.read()
+    pub fn created(&self) -> Instant {
+        self.created
     }
 
     /// Returns the number of sent messages and their collective size in bytes.
@@ -72,11 +65,6 @@ impl Stats {
         (msgs, bytes)
     }
 
-    /// Returns the number of failures.
-    pub fn failures(&self) -> u64 {
-        self.failures.load(Relaxed)
-    }
-
     /// Registers a sent message of the provided `size` in bytes.
     pub fn register_sent_message(&self, size: usize) {
         self.msgs_sent.fetch_add(1, Relaxed);
@@ -87,10 +75,5 @@ impl Stats {
     pub fn register_received_message(&self, size: usize) {
         self.msgs_received.fetch_add(1, Relaxed);
         self.bytes_received.fetch_add(size as u64, Relaxed);
-    }
-
-    /// Registers a failure.
-    pub fn register_failure(&self) {
-        self.failures.fetch_add(1, Relaxed);
     }
 }

@@ -14,7 +14,6 @@ total_validators=$1
 total_clients=$2
 network_id=$3
 min_height=$4
-max_warnings=$5
 
 # The verbosity of snarkos nodes.
 NODE_VERBOSITY=4
@@ -27,7 +26,8 @@ MAX_CLIENT_LOG_SIZE_BYTES=$((1 * 1024 * 1024))
 : "${total_clients:=4}" # need at least 4 clients, so each validator has at least one client connected to it.
 : "${network_id:=0}"
 : "${min_height:=60}" # To likely go past the 100 round garbage collection limit.
-: "${max_warnings:=300}"
+
+tx_file="${TMPDIR:-/tmp}/transfer_public_tx.txt"
 
 # shellcheck source=SCRIPTDIR/utils.sh
 . ./.ci/utils.sh
@@ -47,6 +47,7 @@ function exit_handler() {
   # Remove all temporary files and folders
   rm program/program.json program/main.aleo || true
   rm program/txn_data.json program/invalid_txn_data.json || true
+  rm "$tx_file" || true
   rmdir program || true
 }
 trap exit_handler EXIT
@@ -127,6 +128,49 @@ if ! wait_for_stable_consensus_version 0 "$network_name"; then
   echo "❌ Test failed! Consensus version did not stabilize within 5 minutes."
   exit 1
 fi
+
+# Broadcast a transfer_public built from a static query.
+# The state root is the fixed dev genesis root (Field::one()), which a test_network
+# node stores at height 0. The height is the chain height after the consensus
+# version has stabilized, so proving uses that same consensus version.
+# Devnet consensus passes ConsensusVersion::V10 before the version stabilizes.
+# The transaction is generated against the stable consensus version.
+log "● Testing static-query transfer_public against the dev genesis state root..."
+txs_target_state_root="sr1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqquwxeur"
+txs_target_consensus_version_height=$(get_block_height 0 "$network_name")
+txs_target_consensus_version=$(get_consensus_version 0 "$network_name")
+query=$(printf '{"state_root": "%s",\n"height": %s}' \
+  "$txs_target_state_root" "$txs_target_consensus_version_height")
+log "Static query at consensus version ${txs_target_consensus_version}, height ${txs_target_consensus_version_height}"
+
+recipient=$(curl -s "http://$localhost:3030/v2/$network_name/committee/latest" | jq -r '.members | keys[1]')
+if [ -z "$recipient" ] || [ "$recipient" = "null" ]; then
+  log "❌ Test failed! Could not retrieve a recipient address from the committee."
+  exit 1
+fi
+
+snarkos developer execute \
+  --dev-key 0 \
+  --query "$query" \
+  credits.aleo transfer_public "$recipient" 100u64 \
+  --network "$network_id" \
+  --store "$tx_file" \
+  --store-format string
+
+broadcast_body=$(mktemp)
+broadcast_status=$(curl -s -w "%{http_code}" -o "$broadcast_body" -X POST \
+  -H "Content-Type: application/json" \
+  --data-binary @"$tx_file" \
+  "http://$localhost:3030/v2/$network_name/transaction/broadcast?check_transaction=true")
+
+if (( broadcast_status != 200 )); then
+  log "❌ Test failed! Static-query transfer_public failed verification (HTTP ${broadcast_status}): $(<"$broadcast_body")"
+  rm -f "$broadcast_body"
+  exit 1
+fi
+
+log "✅ Static-query transfer_public verified: $(<"$broadcast_body")"
+rm -f "$broadcast_body"
 
 # Creates a test program.
 mkdir -p program
@@ -433,14 +477,14 @@ if wait_for_heights 0 $((total_validators+total_clients)) "$min_height" "$networ
   log "🎉 Test passed! All nodes reached minimum height."
 else
   log "❌ Test failed! Not all nodes reached minimum height within 10 minutes."
-  log_validator_logs "$log_dir" "$total_validators" "$total_clients"
-  log_client_logs "$log_dir" "$total_validators" "$total_clients"
+  print_validator_logs "$log_dir" "$total_validators" "$total_clients"
+  print_client_logs "$log_dir" "$total_validators" "$total_clients"
   exit 1
 fi
 
 # Ensure no errors are generated during the devnet run, as all nodes are
 # expected to operate without failures or interruptions.
-if check_logs "$log_dir" "$total_validators" "$total_clients" "$max_warnings" "$MAX_VALIDATOR_LOG_SIZE_BYTES" "$MAX_CLIENT_LOG_SIZE_BYTES"; then
+if check_logs "$log_dir" "$total_validators" "$total_clients" "$MAX_VALIDATOR_LOG_SIZE_BYTES" "$MAX_CLIENT_LOG_SIZE_BYTES"; then
   exit 0
 else
   exit 1

@@ -13,11 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{DEFAULT_ENDPOINT, Developer};
-use crate::{
-    commands::StoreFormat,
-    helpers::args::{parse_private_key, prepare_endpoint},
-};
+use super::{DEFAULT_ENDPOINT, Developer, ParsedQuery};
+use crate::{commands::StoreFormat, helpers::args::parse_private_key};
 
 use snarkvm::{
     circuit::{Aleo, AleoCanaryV0, AleoTestnetV0, AleoV0},
@@ -25,13 +22,12 @@ use snarkvm::{
         network::{CanaryV0, MainnetV0, Network, TestnetV0},
         program::ProgramOwner,
     },
-    ledger::store::helpers::memory::BlockMemory,
     prelude::{
         ProgramID,
         VM,
         block::Transaction,
         deployment_cost,
-        query::{Query, QueryTrait},
+        query::QueryTrait,
         store::{ConsensusStore, helpers::memory::ConsensusMemory},
     },
 };
@@ -74,8 +70,10 @@ pub struct Deploy {
     /// to fit the network type and query.
     /// For example, the base URL may extend to "http://mynode.com/testnet/transaction/unconfirmed/ID" to retrieve
     /// an unconfirmed transaction on the test network.
+    ///
+    /// The given value may also be a JSON serialized `StaticQuery` struct.
     #[clap(short, long, alias="query", default_value=DEFAULT_ENDPOINT, verbatim_doc_comment)]
-    endpoint: Uri,
+    endpoint: String,
     /// The priority fee in microcredits.
     #[clap(long, default_value_t = 0)]
     priority_fee: u64,
@@ -127,10 +125,7 @@ impl Deploy {
 
     /// Construct and process the deployment transaction.
     fn construct_deployment<N: Network, A: Aleo<Network = N, BaseField = N::Field>>(self) -> Result<String> {
-        let endpoint = prepare_endpoint(self.endpoint.clone())?;
-
-        // Specify the query
-        let query = Query::<N, BlockMemory<N>>::from(endpoint.clone());
+        let ParsedQuery { query, endpoint } = Developer::parse_query::<N>(&self.endpoint)?;
 
         // Retrieve the private key.
         let private_key = parse_private_key(self.private_key.clone(), self.private_key_file.clone(), self.dev_key)?;
@@ -223,7 +218,7 @@ impl Deploy {
 
         // Determine if the transaction should be broadcast, stored, or displayed to the user.
         Developer::handle_transaction(
-            &endpoint,
+            endpoint.as_ref(),
             &self.broadcast,
             self.dry_run,
             &self.store,
@@ -332,6 +327,33 @@ mod tests {
         assert_eq!(deploy.store, None);
         assert_eq!(deploy.priority_fee, 77);
         assert_eq!(deploy.record, Some("RECORD".to_string()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn clap_snarkos_deploy_static_query() -> Result<()> {
+        let query = r#"{"state_root": "sr1dz06ur5spdgzkguh4pr42mvft6u3nwsg5drh9rdja9v8jpcz3czsls9geg", "height": 14}"#;
+        let arg_vec = &[
+            "snarkos",
+            "developer",
+            "deploy",
+            "--private-key=PRIVATE_KEY",
+            "--query",
+            query,
+            "--dry-run",
+            "hello.aleo",
+        ];
+        let cli = CLI::try_parse_from(arg_vec)?;
+
+        let Command::Developer(developer) = cli.command else {
+            bail!("Unexpected result of clap parsing!");
+        };
+        let DeveloperCommand::Deploy(deploy) = developer.command else {
+            bail!("Unexpected result of clap parsing!");
+        };
+
+        assert_eq!(deploy.endpoint, query);
 
         Ok(())
     }

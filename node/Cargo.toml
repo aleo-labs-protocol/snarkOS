@@ -1,6 +1,6 @@
 [package]
 name = "snarkos-node"
-version = "4.9.0"
+version = "4.12.0"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "A node for a decentralized operating system"
 homepage = "https://aleo.org"
@@ -33,15 +33,19 @@ locktick = [
   "snarkvm/locktick"
 ]
 metrics = [
+  "dep:snarkos-node-metrics",
   "snarkos-node-bft/metrics",
   "snarkos-node-consensus/metrics",
+  "snarkos-node-rest/metrics",
   "snarkos-node-router/metrics",
-  "snarkos-node-tcp/metrics"
+  "snarkos-node-tcp/metrics",
+  "snarkvm/metrics",
+  "snarkvm/rocks"
 ]
-history = [ "snarkos-node-rest/history", "snarkvm/history" ]
-history-staking-rewards = [ "snarkos-node-rest/history-staking-rewards", "snarkvm/history-staking-rewards" ]
-slipstream-plugins = [ "snarkos-node-rest/slipstream-plugins", "snarkvm/slipstream-plugins" ]
-telemetry = [ "snarkos-node-bft/telemetry", "snarkos-node-consensus/telemetry", "snarkos-node-rest/telemetry" ]
+# The compile-time history features no longer select snarkVM code.
+# The names stay so existing build commands keep resolving.
+history = []
+history-staking-rewards = []
 cuda = [
   "snarkvm/cuda",
   "snarkos-account/cuda",
@@ -121,6 +125,10 @@ workspace = true
 [dependencies.snarkos-node-consensus]
 workspace = true
 
+[dependencies.snarkos-node-metrics]
+workspace = true
+optional = true
+
 [dependencies.snarkos-node-network]
 workspace = true
 
@@ -150,7 +158,7 @@ workspace = true
 features = [ "rt", "signal" ]
 
 [dependencies.tokio-stream]
-version = "=0.1"
+version = "0.1"
 
 [dependencies.tokio-util]
 workspace = true

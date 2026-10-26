@@ -1,0 +1,47 @@
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+ignore = [
+  # As the rust community considers the paste crate 'done', we can safely ignore this warning.
+  # see https://users.rust-lang.org/t/paste-alternatives/126787/2
+  "RUSTSEC-2024-0436",
+  # TODO find a suitable replacement for fxhash.
+  "RUSTSEC-2025-0057",
+  # TODO remove once we migrate away from bincode, or it becomes maintained again.
+  "RUSTSEC-2025-0141",
+]
+
+[licenses]
+version = 2
+# Licenses compatible with this project's Apache-2.0 license.
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "0BSD",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+  "BSL-1.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "MPL-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+# Setting this to "deny" fails: snarkvm is pinned via git rev with no version
+# (root Cargo.toml), which cargo-deny treats as an unpinned wildcard on every
+# published snarkos-* crate that depends on it.
+wildcards = "warn"
+allow-wildcard-paths = true
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = ["https://github.com/ProvableHQ/snarkVM"]

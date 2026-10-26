@@ -13,10 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{
-    io::{self, ErrorKind::*},
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 #[cfg(doc)]
 use crate::protocols::{self, Handshake, Reading, Writing};
@@ -44,15 +41,17 @@ pub struct Config {
     ///
     /// note: [`Config::listener_ip`] must not be `None` in order for it to have any effect.
     pub allow_random_port: bool,
-    /// The list of IO errors considered fatal and causing the connection to be dropped.
-    ///
-    /// note: Tcp needs to implement the [`Reading`] and/or [`Writing`] protocol in order for it to have any effect.
-    pub fatal_io_errors: Vec<io::ErrorKind>,
     /// The maximum number of active connections Tcp can maintain at any given time.
     ///
     /// note: This number can very briefly be breached by 1 in case of inbound connection attempts. It can never be
     /// breached by outbound connection attempts, though.
     pub max_connections: u16,
+    /// The maximum number of connections Tcp can maintain with a single IP address.
+    ///
+    /// note: Like [`Config::max_connections`], pending connections count towards this limit too.
+    ///
+    /// note: Must not be `0`.
+    pub max_connections_per_ip: u16,
     /// The maximum time (in milliseconds) allowed to establish a raw (before the [`Handshake`] protocol) TCP connection.
     pub connection_timeout_ms: u16,
 }
@@ -82,8 +81,8 @@ impl Default for Config {
             listener_ip: default_ip(),
             desired_listening_port: None,
             allow_random_port: true,
-            fatal_io_errors: vec![ConnectionReset, ConnectionAborted, BrokenPipe, InvalidData, UnexpectedEof],
             max_connections: 100,
+            max_connections_per_ip: 25,
             connection_timeout_ms: 3_000,
         }
     }

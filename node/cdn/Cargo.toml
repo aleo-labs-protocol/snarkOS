@@ -1,6 +1,6 @@
 [package]
 name = "snarkos-node-cdn"
-version = "4.9.0"
+version = "4.12.0"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "A CDN client for a decentralized operating system"
 homepage = "https://aleo.org"
@@ -19,7 +19,7 @@ edition = "2024"
 [features]
 default = [ ]
 serial = [ 
-  "snarkos-node-metrics/locktick",
+  "snarkos-node-metrics/serial",
   "snarkvm/serial",
 ]
 locktick = [
@@ -35,9 +35,6 @@ metrics = [ "dep:snarkos-node-metrics" ]
 workspace = true
 
 [dependencies.bincode]
-workspace = true
-
-[dependencies.colored]
 workspace = true
 
 [dependencies.locktick]

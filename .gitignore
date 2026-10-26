@@ -1,4 +1,3 @@
-**/*.idea/
 **/target
 **.DS_Store
 wasm/Cargo.lock
@@ -9,12 +8,13 @@ validator-*
 **package-lock.json
 **node_modules/
 
-# Devent and CI logs
-**.logs-*/
+# Devnet and CI logs
+*logs-*/
+*dev_logs/
 
 # Data created when running a node
-**.ledger-*
-**.node-data-*
+*ledger-*/
+*node-data-*/
 
 # Legacy files created by a running snarkOS node
 **.current-proposal-cache-*
@@ -23,9 +23,12 @@ validator-*
 **.bft-storage-*/
 **jwt_secret*.txt
 
-# For release upgrde CI
+# For release upgrade CI
 .ci/release-snarkos
 .ci/release-snarkos-src
 
+# Dev tooling
+.helix/
+*.idea/
 .claude/
-**/CLAUDE.md
+CLAUDE.md

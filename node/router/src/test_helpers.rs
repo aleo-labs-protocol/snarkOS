@@ -13,9 +13,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::common::sample_genesis_block;
-use snarkos_node_network::{NodeType, Peer, PeerPoolHandling, Resolver};
-use snarkos_node_router::{
+//! Test helpers for exercising a `Router` and anything generic over [`Routing`].
+//!
+//! This module is gated behind the `test-helpers` feature so that other crates can build a node
+//! component that requires `R: Routing<N>` without standing up a real node. It is the single
+//! definition of `TestRouter`; the router's own integration tests re-export it from here.
+
+use snarkos_account::Account;
+use snarkos_node_bft_ledger_service::MockLedgerService;
+use snarkos_utilities::NodeDataDir;
+use snarkvm::{
+    prelude::{FromBytes, MainnetV0 as CurrentNetwork, PrivateKey},
+    utilities::TestRng,
+};
+use std::net::{IpAddr, Ipv4Addr};
+
+use crate::{
     Heartbeat,
     Inbound,
     Outbound,
@@ -32,6 +45,7 @@ use snarkos_node_router::{
         UnconfirmedTransaction,
     },
 };
+use snarkos_node_network::{NodeType, Peer, PeerPoolHandling, Resolver};
 use snarkos_node_tcp::{
     ConnectError,
     Connection,
@@ -55,7 +69,7 @@ use async_trait::async_trait;
 use locktick::parking_lot::RwLock;
 #[cfg(not(feature = "locktick"))]
 use parking_lot::RwLock;
-use std::{collections::HashMap, io, net::SocketAddr, str::FromStr};
+use std::{collections::HashMap, io, net::SocketAddr, str::FromStr, sync::Arc};
 use tracing::*;
 
 #[derive(Clone)]
@@ -265,4 +279,66 @@ impl<N: Network> Inbound<N> for TestRouter<N> {
     ) -> bool {
         true
     }
+}
+
+/// Returns a fixed account.
+pub fn sample_account(rng: &mut TestRng) -> Account<CurrentNetwork> {
+    let private_key = PrivateKey::<CurrentNetwork>::new(rng).unwrap();
+    Account::<CurrentNetwork>::try_from(&private_key).unwrap()
+}
+
+/// Loads the current network's genesis block.
+pub fn sample_genesis_block<N: Network>() -> Block<N> {
+    Block::<N>::from_bytes_le(N::genesis_bytes()).unwrap()
+}
+
+/// Initializes a router of the given node type.
+///
+/// Setting `listening_port = 0` results in a random port being assigned. No listener is bound
+/// until `initialize_routing` is called, so a router built here does not touch the network.
+pub async fn sample_router(
+    node_type: NodeType,
+    listening_port: u16,
+    max_peers: u16,
+    trusted_peers: &[SocketAddr],
+    trusted_peers_only: bool,
+    rng: &mut TestRng,
+) -> TestRouter<CurrentNetwork> {
+    let committee = snarkvm::ledger::committee::test_helpers::sample_committee(rng);
+    let ledger_service = Arc::new(MockLedgerService::new(committee));
+    Router::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), listening_port),
+        node_type,
+        sample_account(rng),
+        ledger_service,
+        trusted_peers,
+        max_peers,
+        trusted_peers_only,
+        NodeDataDir::new_test(None),
+        true,
+    )
+    .await
+    .expect("couldn't create router")
+    .into()
+}
+
+/// Initializes a client router. Setting the `listening_port = 0` will result in a random port being assigned.
+pub async fn client(listening_port: u16, max_peers: u16, rng: &mut TestRng) -> TestRouter<CurrentNetwork> {
+    sample_router(NodeType::Client, listening_port, max_peers, &[], false, rng).await
+}
+
+/// Initializes a prover router. Setting the `listening_port = 0` will result in a random port being assigned.
+pub async fn prover(listening_port: u16, max_peers: u16, rng: &mut TestRng) -> TestRouter<CurrentNetwork> {
+    sample_router(NodeType::Prover, listening_port, max_peers, &[], false, rng).await
+}
+
+/// Initializes a validator router. Setting the `listening_port = 0` will result in a random port being assigned.
+pub async fn validator(
+    listening_port: u16,
+    max_peers: u16,
+    trusted_peers: &[SocketAddr],
+    trusted_peers_only: bool,
+    rng: &mut TestRng,
+) -> TestRouter<CurrentNetwork> {
+    sample_router(NodeType::Validator, listening_port, max_peers, trusted_peers, trusted_peers_only, rng).await
 }

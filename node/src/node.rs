@@ -19,6 +19,7 @@ use crate::{
     Prover,
     Validator,
     network::{NodeType, Peer, PeerPoolHandling},
+    rest::RestVerificationLimits,
     router::Outbound,
     traits::NodeInterface,
 };
@@ -62,6 +63,10 @@ const CHECKPOINT_BLOCK_FREQUENCY: u32 = 1000;
 /// The maximum number of automatic database checkpoints kept at any time.
 const MAX_AUTO_CHECKPOINTS: usize = 5;
 
+/// How often to publish RocksDB internal metrics to Prometheus.
+#[cfg(feature = "metrics")]
+const ROCKSDB_METRICS_INTERVAL: Duration = Duration::from_secs(15);
+
 fn existing_startup_checkpoint_height(auto_checkpoint_path: &Path, startup_height: u32) -> Option<u32> {
     let mut checkpoint_path = auto_checkpoint_path.to_path_buf();
     checkpoint_path.push(format!("checkpoint_{startup_height}"));
@@ -87,6 +92,9 @@ impl<N: Network> Node<N> {
         bft_ip: Option<SocketAddr>,
         rest_ip: Option<SocketAddr>,
         rest_rps: u32,
+        rest_verification_limits: RestVerificationLimits,
+        history_api_url: Option<String>,
+        history_json: bool,
         account: Account<N>,
         trusted_peers: &[SocketAddr],
         trusted_validators: &[SocketAddr],
@@ -98,8 +106,8 @@ impl<N: Network> Node<N> {
         auto_db_checkpoints: Option<PathBuf>,
         dev_txs: bool,
         dev: Option<u16>,
-        slipstream_configs: &[PathBuf],
         dev_hotswap_config: Option<DevHotswapConfig>,
+        proposal_spent_limit_multiplier: u64,
         signal_handler: Arc<SignalHandler>,
     ) -> Result<Self> {
         let validator = Arc::new(
@@ -108,6 +116,9 @@ impl<N: Network> Node<N> {
                 bft_ip,
                 rest_ip,
                 rest_rps,
+                rest_verification_limits,
+                history_api_url,
+                history_json,
                 account,
                 trusted_peers,
                 trusted_validators,
@@ -118,8 +129,8 @@ impl<N: Network> Node<N> {
                 trusted_peers_only,
                 dev_txs,
                 dev,
-                slipstream_configs,
                 dev_hotswap_config,
+                proposal_spent_limit_multiplier,
                 signal_handler,
             )
             .await?,
@@ -128,10 +139,15 @@ impl<N: Network> Node<N> {
         let node = Self::Validator(validator.clone());
 
         // Perform automatic ledger checkpoints.
-        if let Some(path) = auto_db_checkpoints {
-            if let Some(handle) = node.perform_auto_checkpoints(path)? {
-                validator.handles.lock().push(handle);
-            }
+        if let Some(path) = auto_db_checkpoints
+            && let Some(handle) = node.perform_auto_checkpoints(path)?
+        {
+            validator.handles.lock().push(handle);
+        }
+
+        #[cfg(feature = "metrics")]
+        if let Some(handle) = node.spawn_rocksdb_metrics_polling() {
+            validator.handles.lock().push(handle);
         }
 
         Ok(node)
@@ -168,6 +184,9 @@ impl<N: Network> Node<N> {
         node_ip: SocketAddr,
         rest_ip: Option<SocketAddr>,
         rest_rps: u32,
+        rest_verification_limits: RestVerificationLimits,
+        history_api_url: Option<String>,
+        history_json: bool,
         account: Account<N>,
         trusted_peers: &[SocketAddr],
         genesis: Block<N>,
@@ -177,7 +196,6 @@ impl<N: Network> Node<N> {
         trusted_peers_only: bool,
         auto_db_checkpoints: Option<PathBuf>,
         dev: Option<u16>,
-        slipstream_configs: &[PathBuf],
         signal_handler: Arc<SignalHandler>,
     ) -> Result<Self> {
         let client = Arc::new(
@@ -185,6 +203,9 @@ impl<N: Network> Node<N> {
                 node_ip,
                 rest_ip,
                 rest_rps,
+                rest_verification_limits,
+                history_api_url,
+                history_json,
                 account,
                 trusted_peers,
                 genesis,
@@ -193,7 +214,6 @@ impl<N: Network> Node<N> {
                 node_data_dir,
                 trusted_peers_only,
                 dev,
-                slipstream_configs,
                 signal_handler,
             )
             .await?,
@@ -202,10 +222,15 @@ impl<N: Network> Node<N> {
         let node = Self::Client(client.clone());
 
         // Perform automatic ledger checkpoints.
-        if let Some(path) = auto_db_checkpoints {
-            if let Some(handle) = node.perform_auto_checkpoints(path)? {
-                client.handles.lock().push(handle);
-            }
+        if let Some(path) = auto_db_checkpoints
+            && let Some(handle) = node.perform_auto_checkpoints(path)?
+        {
+            client.handles.lock().push(handle);
+        }
+
+        #[cfg(feature = "metrics")]
+        if let Some(handle) = node.spawn_rocksdb_metrics_polling() {
+            client.handles.lock().push(handle);
         }
 
         Ok(node)
@@ -343,6 +368,19 @@ impl<N: Network> Node<N> {
         }
     }
 
+    /// Spawns a background task that periodically publishes RocksDB internal metrics.
+    #[cfg(feature = "metrics")]
+    pub fn spawn_rocksdb_metrics_polling(&self) -> Option<task::JoinHandle<()>> {
+        let ledger = self.ledger()?.clone();
+        Some(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(ROCKSDB_METRICS_INTERVAL);
+            loop {
+                interval.tick().await;
+                ledger.vm().block_store().export_rocksdb_metrics();
+            }
+        }))
+    }
+
     /// Periodically creates automated ledger checkpoints.
     pub fn perform_auto_checkpoints(&self, auto_checkpoint_path: PathBuf) -> Result<Option<task::JoinHandle<()>>> {
         // Only perform checkpoints if there's a database involved.
@@ -455,10 +493,10 @@ impl<N: Network> Node<N> {
                 // If we have a sufficient number of checkpoints, delete the oldest one(s).
                 let surplus_checkpoints = existing_checkpoints.len().saturating_sub(MAX_AUTO_CHECKPOINTS);
                 for _ in 0..surplus_checkpoints {
-                    if let Some((checkpoint_path, _)) = existing_checkpoints.pop() {
-                        if let Err(e) = fs::remove_dir_all(checkpoint_path) {
-                            warn!("Couldn't remove an automatic ledger checkpoint: {e}");
-                        }
+                    if let Some((checkpoint_path, _)) = existing_checkpoints.pop()
+                        && let Err(e) = fs::remove_dir_all(checkpoint_path)
+                    {
+                        warn!("Couldn't remove an automatic ledger checkpoint: {e}");
                     }
                 }
             }

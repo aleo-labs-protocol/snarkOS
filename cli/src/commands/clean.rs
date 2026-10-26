@@ -17,10 +17,10 @@ use crate::helpers::args::parse_node_data_dir;
 
 use snarkos_utilities::NodeDataDir;
 
-use snarkvm::console::network::{CanaryV0, MainnetV0, Network};
+use snarkvm::console::network::{CanaryV0, MainnetV0, Network, TestnetV0};
 
 use aleo_std::StorageMode;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use colored::Colorize;
 use std::path::PathBuf;
@@ -47,11 +47,23 @@ pub struct Clean {
     /// Sets a custom path for the node configuration. Overrides the default path (also for dev).
     #[clap(long, alias = "node-data-path", conflicts_with = "keep_node_data")]
     pub node_data_storage: Option<PathBuf>,
+
+    /// Remove the legacy RocksDB mapping-history prefixes and leave the ledger in place.
+    ///
+    /// Deletes `MappingUpdate`, `MappingUpdateHeights`, and `StakingRewards`. Node data and the
+    /// rest of the ledger stay.
+    #[clap(long)]
+    pub history: bool,
 }
 
 impl Clean {
     /// Cleans the snarkOS node storage.
     pub fn parse(self) -> Result<String> {
+        // Legacy mapping history is a prefix delete. The ledger and node data stay.
+        if self.history {
+            return self.delete_legacy_mapping_history();
+        }
+
         // Remove the specified node configuration from storage.
         if !self.keep_node_data {
             let node_data_dir = parse_node_data_dir(&self.node_data_storage, self.network, self.dev)?;
@@ -60,7 +72,7 @@ impl Clean {
 
         // Remove the specified ledger from storage.
         let storage_mode = match self.ledger_storage {
-            Some(path) => StorageMode::Custom(path),
+            Some(path) => StorageMode::from(path),
             None => match self.dev {
                 Some(id) => StorageMode::Development(id),
                 None => StorageMode::Production,
@@ -102,5 +114,49 @@ impl Clean {
         } else {
             Ok(format!("✅ No snarkOS ledger was found {path_string}"))
         }
+    }
+
+    /// Deletes the legacy mapping-history prefixes from an existing ledger.
+    fn delete_legacy_mapping_history(&self) -> Result<String> {
+        let storage_mode = match &self.ledger_storage {
+            Some(path) => StorageMode::from(path.clone()),
+            None => match self.dev {
+                Some(id) => StorageMode::Development(id),
+                None => StorageMode::Production,
+            },
+        };
+        let path = aleo_std::aleo_ledger_dir(self.network, &storage_mode);
+        let path_string = format!("(in \"{}\")", path.display()).dimmed();
+        if !path.exists() {
+            return Ok(format!("✅ No snarkOS ledger was found {path_string}"));
+        }
+
+        match self.network {
+            MainnetV0::ID => Self::delete_network::<MainnetV0>(&storage_mode)?,
+            TestnetV0::ID => Self::delete_network::<TestnetV0>(&storage_mode)?,
+            CanaryV0::ID => Self::delete_network::<CanaryV0>(&storage_mode)?,
+            id => bail!("Unsupported network id {id}"),
+        }
+        Ok(format!("✅ Removed legacy mapping history {path_string}"))
+    }
+
+    /// Opens the ledger and deletes the three legacy mapping-history prefixes.
+    fn delete_network<N: Network>(storage_mode: &StorageMode) -> Result<()> {
+        use snarkvm::ledger::store::helpers::rocksdb::{Database, RocksDB};
+        RocksDB::open(N::ID, storage_mode.clone())?.delete_legacy_mapping_history()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_flag_is_opt_in() {
+        let config = Clean::try_parse_from(["snarkos"].iter()).unwrap();
+        assert!(!config.history);
+
+        let config = Clean::try_parse_from(["snarkos", "--history"].iter()).unwrap();
+        assert!(config.history);
     }
 }

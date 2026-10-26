@@ -19,14 +19,12 @@ total_validators=$1
 network_id=$2
 reset_interval=$3
 num_resets=$4
-max_warnings=$5
 
 # Default values if not provided
 : "${total_validators:=7}"
 : "${network_id:=0}"
 : "${reset_interval:=20}"
 : "${num_resets:=3}"
-: "${max_warnings:=4000}" # Allow lots of warnings as we're doing funky stuff in this test.
 
 # Blocks to advance after all restarts complete.
 final_height_advance=20
@@ -42,6 +40,11 @@ max_validator_log_size_bytes=$((3 * 1024 * 1024))
 # The time that is used to determine the total timeout for the test.
 # Set this higher than the interval for the minority test, as more nodes need to sync.
 max_wait_per_block=20
+
+# How long a restarted node may take to become ready again.
+# Loading an existing ledger is dominated by deserializing the cached block tree,
+# which has been observed to take over two minutes on CI.
+max_restart_wait=300
 
 # Define a trap handler that cleans up all processes on exit.
 trap stop_nodes EXIT
@@ -93,10 +96,16 @@ for iter in $(seq 1 "$num_resets"); do
     # Add 1-second delay between starting nodes to avoid hitting rate limits
     sleep 1
   done
-done
 
-# Sleep for a few seconds to make sure the nodes are fully restarted and connected.
-sleep 5
+  # Block until the restarted nodes serve their REST API again.
+  # Note: loading an existing ledger can take a couple of minutes, so be generous here.
+  # Doing this inside the loop also ensures that the startup time is not deducted from
+  # the time budget that the next `wait_for_heights` gets.
+  if ! wait_for_nodes "$total_validators" 0 "$network_name" "$max_restart_wait"; then
+    log "❌ Test failed! Not all nodes became ready within $max_restart_wait seconds after restart #$iter."
+    exit 1
+  fi
+done
 
 log_check_since=$(epoch_now)
 latest_height=$(get_block_height 0 "$network_name")
@@ -112,7 +121,7 @@ fi
 
 log "SUCCESS! Network took $(elapsed_since "$start") seconds to reach final height of $final_height after $num_resets resets."
 
-if check_logs "$log_dir" "$total_validators" 0 "$max_warnings" "$max_validator_log_size_bytes" "" "$log_check_since"; then
+if check_logs "$log_dir" "$total_validators" 0 "$max_validator_log_size_bytes" "" "$log_check_since"; then
   exit 0
 else
   exit 1

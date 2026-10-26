@@ -22,9 +22,6 @@ pub use banned_peers::BannedPeers;
 pub mod connections;
 pub use connections::{Connection, ConnectionSide};
 
-mod known_peers;
-pub use known_peers::KnownPeers;
-
 mod stats;
 pub use stats::Stats;
 
