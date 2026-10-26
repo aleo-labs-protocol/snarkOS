@@ -211,7 +211,7 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Client<N, C> {
             Err(error) => {
                 let err =
                     error.context(format!("Cannot serve block request {start_height}..{end_height} from the ledger"));
-                warn!("{}", flatten_error(&err));
+                debug!("{}", flatten_error(&err));
                 DataBlocks(vec![])
             }
         };

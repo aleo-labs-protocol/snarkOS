@@ -208,7 +208,7 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Validator<N, C> {
             Err(err) => {
                 let err =
                     err.context(format!("Cannot serve block request {start_height}..{end_height} from the ledger"));
-                warn!("{}", flatten_error(err));
+                debug!("{}", flatten_error(err));
                 DataBlocks(vec![])
             }
         };

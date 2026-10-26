@@ -696,7 +696,7 @@ impl<N: Network> Gateway<N> {
                     match self_.ledger.get_blocks(start_height..end_height) {
                         Ok(blocks) => DataBlocks(blocks),
                         Err(error) => {
-                            warn!("Cannot serve block request {start_height}..{end_height} from ledger - {error}");
+                            debug!("Cannot serve block request {start_height}..{end_height} from ledger - {error}");
                             DataBlocks(vec![])
                         }
                     }
