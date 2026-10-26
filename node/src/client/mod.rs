@@ -16,6 +16,7 @@
 mod router;
 
 use crate::{
+    CdnFallback,
     bft::{helpers::fmt_id, ledger_service::CoreLedgerService, spawn_blocking},
     cdn::CdnBlockSync,
     traits::NodeInterface,
@@ -32,7 +33,7 @@ use snarkos_node_router::{
     Routing,
     messages::{Message, UnconfirmedSolution, UnconfirmedTransaction},
 };
-use snarkos_node_sync::{BlockSync, Ping, STUCK_SYNC_SHUTDOWN_THRESHOLD};
+use snarkos_node_sync::{BlockSync, Ping};
 use snarkos_node_tcp::{
     P2P,
     protocols::{Disconnect, Handshake, OnConnect, Reading},
@@ -230,18 +231,23 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
         }
 
         // Set up everything else after CDN sync is done.
-        if let Some(cdn_sync) = cdn_sync
-            && let Err(error) = cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN")
-        {
-            crate::log_clean_error(&storage_mode);
-            node.shut_down().await;
-            return Err(error);
-        }
+        let cdn_fallback = match cdn_sync {
+            None => CdnFallback::Disabled,
+            Some(cdn_sync) => match cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN") {
+                Ok(Ok(_)) => CdnFallback::Available,
+                Ok(Err(_)) => CdnFallback::Failed,
+                Err(error) => {
+                    crate::log_clean_error(&storage_mode);
+                    node.shut_down().await;
+                    return Err(error);
+                }
+            },
+        };
 
         // Initialize the routing.
         node.initialize_routing().await;
         // Initialize the sync module.
-        node.initialize_sync();
+        node.initialize_sync(cdn_fallback);
         // Initialize solution verification.
         node.initialize_solution_verification();
         // Initialize deployment verification.
@@ -277,7 +283,7 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
     const MAX_SYNC_INTERVAL: Duration = Duration::from_secs(30);
 
     /// Spawns the tasks that performs the syncing logic for this client.
-    fn initialize_sync(&self) {
+    fn initialize_sync(&self, cdn_fallback: CdnFallback) {
         // Start the block request generation loop (outgoing).
         let self_ = self.clone();
         self.spawn(async move {
@@ -288,11 +294,10 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
                 // Perform the sync routine.
                 self_.try_issuing_block_requests().await;
 
-                // If the blocks this node needs have been unservable by every connected peer for
-                // too long, shut down: on restart, the node will fetch the missing range from the CDN.
-                if self_.sync.sync_stuck_below_peer_floors().is_some_and(|stuck| stuck >= STUCK_SYNC_SHUTDOWN_THRESHOLD)
-                {
-                    crate::log_stuck_sync_error();
+                // If no connected peer can serve the blocks this node needs, shut down so that the
+                // missing range can be fetched from the CDN on restart (or restored from a snapshot).
+                if crate::is_stuck_sync_fatal(self_.sync.sync_stuck_below_peer_floors(), cdn_fallback) {
+                    crate::log_stuck_sync_error(cdn_fallback);
                     self_.signal_handler.stop_with_failure();
                     break;
                 }

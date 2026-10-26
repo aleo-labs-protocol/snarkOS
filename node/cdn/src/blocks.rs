@@ -110,8 +110,9 @@ impl CdnBlockSync {
 
     /// Wait for CDN sync to finish. Can only be called once.
     ///
-    /// On success, this function returns the completed block height.
-    /// On failure, this function returns the last successful block height (if any), along with the error.
+    /// The outer error means the sync task could not be awaited. The inner result is the sync's
+    /// own outcome: the completed block height, or the last successful height (if any) with the
+    /// error that stopped the sync short of the CDN height.
     pub async fn wait(&self) -> Result<SyncResult> {
         let Some(hdl) = self.task.lock().take() else {
             bail!("CDN task was already awaited");
@@ -143,7 +144,8 @@ impl CdnBlockSync {
         match result {
             Ok(completed_height) => Ok(completed_height),
             Err((completed_height, error)) => {
-                warn!("{}", flatten_error(error.context("Failed to sync block(s) from the CDN")));
+                let error = error.context("Failed to sync block(s) from the CDN");
+                warn!("{}", flatten_error(&error));
 
                 // If the sync made any progress, then check the integrity of the ledger.
                 if completed_height != start_height {
@@ -165,7 +167,7 @@ impl CdnBlockSync {
                     }
                 }
 
-                Ok(completed_height)
+                Err((completed_height, error))
             }
         }
     }

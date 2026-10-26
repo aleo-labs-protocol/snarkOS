@@ -15,7 +15,7 @@
 
 mod router;
 
-use crate::traits::NodeInterface;
+use crate::{CdnFallback, traits::NodeInterface};
 
 use snarkos_account::Account;
 #[cfg(feature = "test_network")]
@@ -213,13 +213,18 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         }
 
         // Set up everything else after CDN sync is done.
-        if let Some(cdn_sync) = cdn_sync
-            && let Err(error) = cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN")
-        {
-            crate::log_clean_error(&storage_mode);
-            node.shut_down().await;
-            return Err(error);
-        }
+        let cdn_fallback = match cdn_sync {
+            None => CdnFallback::Disabled,
+            Some(cdn_sync) => match cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN") {
+                Ok(Ok(_)) => CdnFallback::Available,
+                Ok(Err(_)) => CdnFallback::Failed,
+                Err(error) => {
+                    crate::log_clean_error(&storage_mode);
+                    node.shut_down().await;
+                    return Err(error);
+                }
+            },
+        };
 
         // Start the BFT and consensus handlers now that CDN sync is complete. This ensures that
         // committed subdags are only processed after the initial sync from the CDN has finished.
@@ -227,7 +232,7 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         // Initialize the routing.
         node.initialize_routing().await;
         // Initialize the stuck-sync monitor.
-        node.initialize_stuck_sync_monitor();
+        node.initialize_stuck_sync_monitor(cdn_fallback);
         // Initialize the notification message loop.
         node.handles.lock().push(crate::start_notification_message_loop());
 
@@ -503,18 +508,17 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         Ok(())
     }
 
-    /// Spawns a task that shuts the node down if the blocks it needs to sync have been
-    /// unservable by every connected peer for too long: on restart, the node will fetch
-    /// the missing range from the CDN.
-    fn initialize_stuck_sync_monitor(&self) {
+    /// Spawns a task that shuts the node down if no connected peer can serve the blocks it needs
+    /// to sync, so that the missing range can be fetched from the CDN on restart (or restored
+    /// from a snapshot).
+    fn initialize_stuck_sync_monitor(&self, cdn_fallback: CdnFallback) {
         let node = self.clone();
         self.spawn(async move {
             while !node.signal_handler.is_stopped() {
                 tokio::time::sleep(STUCK_SYNC_SHUTDOWN_THRESHOLD / 10).await;
 
-                if node.sync.sync_stuck_below_peer_floors().is_some_and(|stuck| stuck >= STUCK_SYNC_SHUTDOWN_THRESHOLD)
-                {
-                    crate::log_stuck_sync_error();
+                if crate::is_stuck_sync_fatal(node.sync.sync_stuck_below_peer_floors(), cdn_fallback) {
+                    crate::log_stuck_sync_error(cdn_fallback);
                     node.signal_handler.stop_with_failure();
                     break;
                 }
