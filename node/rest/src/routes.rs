@@ -1237,8 +1237,12 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
     ///                           |         |        |         |
     ///                           v         v        v         v
     ///                          200       422      203       503
+    ///
+    /// The transaction is propagated to peers only after the node has verified it: on a validator once
+    /// the BFT worker has checked it, on a client through the relay queue.
     pub(crate) async fn transaction_broadcast(
         State(rest): State<Self>,
+        ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
         check_transaction: Query<CheckTransaction>,
         json_result: Result<Json<Transaction<N>>, JsonRejection>,
     ) -> Result<impl axum::response::IntoResponse, RestError> {
@@ -1262,10 +1266,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
 
         // Prepare the unconfirmed transaction message.
         let tx_id = tx.id();
-        let message = Message::UnconfirmedTransaction(UnconfirmedTransaction {
-            transaction_id: tx_id,
-            transaction: Data::Object(tx.clone()),
-        });
+        let serialized = UnconfirmedTransaction { transaction_id: tx_id, transaction: Data::Object(tx.clone()) };
 
         // Check if the node is within sync leniency.
         let is_within_sync_leniency = rest.routing.is_within_sync_leniency();
@@ -1306,14 +1307,27 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             tx
         };
 
-        // If the consensus module is enabled, add the unconfirmed transaction to the memory pool.
-        if let Some(consensus) = rest.consensus {
-            // Add the unconfirmed transaction to the memory pool.
-            consensus.add_unconfirmed_transaction(tx.clone()).await?;
+        match &rest.consensus {
+            // If the consensus module is enabled, add the unconfirmed transaction to the memory pool,
+            // and broadcast it once the BFT worker has verified it.
+            Some(consensus) => {
+                if let Some(verified) = consensus.add_unconfirmed_transaction(tx).await? {
+                    let routing = rest.routing.clone();
+                    tokio::spawn(async move {
+                        match verified.await {
+                            Ok(Ok(true)) => routing.propagate(Message::UnconfirmedTransaction(serialized), &[]),
+                            Ok(Ok(false)) => trace!("Not broadcasting transaction '{tx_id}' - already in the BFT"),
+                            Ok(Err(error)) => debug!("Not broadcasting transaction '{tx_id}' - {error}"),
+                            Err(_) => trace!("Not broadcasting transaction '{tx_id}' - evicted before verification"),
+                        }
+                    });
+                }
+            }
+            // Otherwise, hand the transaction to the node's inbound handler, which verifies it before relaying.
+            None => {
+                rest.routing.unconfirmed_transaction(peer_addr, serialized, tx).await;
+            }
         }
-
-        // Broadcast the transaction.
-        rest.routing.propagate(message, &[]);
 
         // Determine if the node is synced and if the transaction was checked.
         match !is_within_sync_leniency && check_transaction {
