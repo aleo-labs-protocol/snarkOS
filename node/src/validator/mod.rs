@@ -213,17 +213,13 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         }
 
         // Set up everything else after CDN sync is done.
-        let cdn_fallback = match cdn_sync {
-            None => CdnFallback::Disabled,
-            Some(cdn_sync) => match cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN") {
-                Ok(Ok(_)) => CdnFallback::Available,
-                Ok(Err(_)) => CdnFallback::Failed,
-                Err(error) => {
-                    crate::log_clean_error(&storage_mode);
-                    node.shut_down().await;
-                    return Err(error);
-                }
-            },
+        let cdn_fallback = match crate::wait_for_cdn(cdn_sync).await {
+            Ok(cdn_fallback) => cdn_fallback,
+            Err(error) => {
+                crate::log_clean_error(&storage_mode);
+                node.shut_down().await;
+                return Err(error);
+            }
         };
 
         // Start the BFT and consensus handlers now that CDN sync is complete. This ensures that
@@ -512,14 +508,13 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
     /// to sync, so that the missing range can be fetched from the CDN on restart (or restored
     /// from a snapshot).
     fn initialize_stuck_sync_monitor(&self, cdn_fallback: CdnFallback) {
-        let node = self.clone();
+        let sync = self.sync.clone();
+        let signal_handler = self.signal_handler.clone();
         self.spawn(async move {
-            while !node.signal_handler.is_stopped() {
+            while !signal_handler.is_stopped() {
                 tokio::time::sleep(STUCK_SYNC_SHUTDOWN_THRESHOLD / 10).await;
 
-                if crate::is_stuck_sync_fatal(node.sync.sync_stuck_below_peer_floors(), cdn_fallback) {
-                    crate::log_stuck_sync_error(cdn_fallback);
-                    node.signal_handler.stop_with_failure();
+                if crate::shut_down_if_stuck_sync(&sync, &signal_handler, cdn_fallback) {
                     break;
                 }
             }

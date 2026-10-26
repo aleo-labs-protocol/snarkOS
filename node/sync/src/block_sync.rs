@@ -94,16 +94,19 @@ pub const MAX_BLOCKS_BEHIND: u32 = 1; // blocks
 /// (see [`BlockSync::sync_stuck_below_peer_floors`]) should give up and shut down.
 pub const STUCK_SYNC_SHUTDOWN_THRESHOLD: Duration = Duration::from_secs(5 * 60);
 
-/// Returns the lowest block height the peer with the given tip is assumed to still serve: peers
-/// prune authority data older than `AUTHORITY_RETENTION_BLOCKS` blocks, so a peer at `tip` retains
+/// Returns the earliest block whose authority data a node at `tip` still retains: nodes prune
+/// authority data older than `AUTHORITY_RETENTION_BLOCKS` blocks, so a node at `tip` retains
 /// `tip - (AUTHORITY_RETENTION_BLOCKS - 1)..=tip`.
 ///
-/// The advertised tip is only a snapshot, so by the time a request arrives the peer may have
-/// advanced and pruned a little more. No slack is applied for that: such a request gets an empty
-/// response and is re-issued, and if the gap is real the stuck detector shuts the node down after
-/// [`STUCK_SYNC_SHUTDOWN_THRESHOLD`].
-fn assumed_peer_floor(peer_tip: u32) -> u32 {
-    peer_tip.saturating_sub(AUTHORITY_RETENTION_BLOCKS - 1)
+/// A peer's advertised tip is a snapshot, so the peer may have pruned a little more by the time a
+/// request arrives. No slack is applied: such a request gets an empty response and is re-issued.
+pub fn earliest_retained_height(tip: u32) -> u32 {
+    tip.saturating_sub(AUTHORITY_RETENTION_BLOCKS - 1)
+}
+
+/// Returns `true` if a peer at `peer_tip` is assumed to still serve block `height + 1`.
+fn peer_can_serve_next_block(peer_tip: u32, height: u32) -> bool {
+    earliest_retained_height(peer_tip) <= height.saturating_add(1)
 }
 
 /// This is a dummy IP address that is used to represent the local node.
@@ -993,73 +996,8 @@ impl<N: Network> BlockSync<N> {
     ///    `Client::try_issuing_block_requests` which calls this function.
     ///  - Provers do not call this function.
     pub fn prepare_block_requests(&self) -> Vec<BlockRequestBatch<N>> {
-        let batches = self.prepare_block_requests_inner();
-        self.update_stuck_tracking(batches.is_empty());
-        batches
-    }
+        self.update_stuck_tracking();
 
-    /// Records whether sync is stuck because the peers have pruned the blocks this node needs
-    /// (see [`Self::sync_stuck_below_peer_floors`]), and since when.
-    ///
-    /// The timer measures a stretch without progress: it is armed when the condition first holds,
-    /// restarted if the ledger height advances while it holds, and cleared when it stops holding.
-    fn update_stuck_tracking(&self, no_new_batches: bool) {
-        let height = self.ledger.latest_block_height();
-        let is_stuck = no_new_batches
-            && !self.is_block_synced()
-            && self.requests.read().is_empty()
-            && self.needed_blocks_pruned_by_peer_majority(height);
-
-        let mut stuck_since = self.stuck_since.lock();
-        if !is_stuck {
-            *stuck_since = None;
-            return;
-        }
-        match *stuck_since {
-            Some((_, armed_height)) if height <= armed_height => {}
-            Some(_) => *stuck_since = Some((Instant::now(), height)),
-            None => {
-                warn!(
-                    "The blocks this node needs are older than what the connected peers retain; block synchronization cannot progress"
-                );
-                *stuck_since = Some((Instant::now(), height));
-            }
-        }
-    }
-
-    /// Returns `true` if the peers corroborate that the blocks this node needs (from `height + 1`)
-    /// have been pruned network-wide: a strict majority of the peers that sent locators are ahead
-    /// of `height`, and every one of those has an assumed pruning floor above `height + 1`.
-    ///
-    /// Requiring a majority keeps a single peer that fabricates a far-ahead tip from stopping an
-    /// otherwise idle node: among honest peers at this node's height, it is a minority. Requiring
-    /// every peer ahead to have pruned the needed block mirrors the candidate filter in
-    /// `find_sync_peers_inner`: if any of them still retains it, peer selection finds it too.
-    fn needed_blocks_pruned_by_peer_majority(&self, height: u32) -> bool {
-        let locators = self.locators.read();
-        let mut num_peers_ahead = 0;
-        for peer_locators in locators.values() {
-            let peer_tip = peer_locators.latest_locator_height();
-            if peer_tip > height {
-                if assumed_peer_floor(peer_tip) <= height.saturating_add(1) {
-                    return false;
-                }
-                num_peers_ahead += 1;
-            }
-        }
-        num_peers_ahead * 2 > locators.len()
-    }
-
-    /// Returns how long sync has made no progress because the peers have pruned the blocks this
-    /// node needs, if that is currently the case (see [`Self::needed_blocks_pruned_by_peer_majority`]).
-    /// Such a node cannot sync via P2P, and should fall back to the CDN (by restarting) or to
-    /// restoring a snapshot.
-    pub fn sync_stuck_below_peer_floors(&self) -> Option<Duration> {
-        self.stuck_since.lock().map(|(since, _)| since.elapsed())
-    }
-
-    /// See [`Self::prepare_block_requests`].
-    fn prepare_block_requests_inner(&self) -> Vec<BlockRequestBatch<N>> {
         let _block_requests_lock = self.prepare_requests_lock.lock();
 
         // Used to print more information when we max out on requests.
@@ -1226,6 +1164,53 @@ impl<N: Network> BlockSync<N> {
 
             print_requests();
             vec![]
+        }
+    }
+
+    /// Returns `true` if the peers corroborate that the blocks this node needs (from `height + 1`)
+    /// have been pruned network-wide: a strict majority of the peers that sent locators are ahead
+    /// of `height`, and every one of those has an assumed pruning floor above `height + 1`.
+    ///
+    /// A lone peer fabricating a far-ahead tip is a minority among honest peers at this height, so
+    /// it cannot trigger a shutdown.
+    fn needed_blocks_pruned_by_peer_majority(&self, height: u32) -> bool {
+        let locators = self.locators.read();
+        let tips_ahead = locators.values().map(|locators| locators.latest_locator_height()).filter(|&tip| tip > height);
+        tips_ahead.clone().count() * 2 > locators.len()
+            && tips_ahead.into_iter().all(|tip| !peer_can_serve_next_block(tip, height))
+    }
+
+    /// Returns how long sync has made no progress because the peers have pruned the blocks this
+    /// node needs, if that is currently the case (see [`Self::needed_blocks_pruned_by_peer_majority`]).
+    pub fn sync_stuck_below_peer_floors(&self) -> Option<Duration> {
+        self.stuck_since.lock().map(|(since, _)| since.elapsed())
+    }
+
+    /// Records whether sync is stuck because the peers have pruned the blocks this node needs
+    /// (see [`Self::sync_stuck_below_peer_floors`]), and since when.
+    ///
+    /// The timer measures a stretch without progress: it is armed when the condition first holds,
+    /// restarted if the ledger height advances while it holds, and cleared when it stops holding.
+    fn update_stuck_tracking(&self) {
+        // The majority rule leaves no peer eligible for new requests, so only outstanding requests
+        // need a separate check.
+        let height = self.ledger.latest_block_height();
+        let is_stuck = self.requests.read().is_empty() && self.needed_blocks_pruned_by_peer_majority(height);
+
+        let mut stuck_since = self.stuck_since.lock();
+        if !is_stuck {
+            *stuck_since = None;
+            return;
+        }
+        match *stuck_since {
+            Some((_, armed_height)) if height <= armed_height => {}
+            Some(_) => *stuck_since = Some((Instant::now(), height)),
+            None => {
+                warn!(
+                    "The blocks this node needs are older than what the connected peers retain; block synchronization cannot progress"
+                );
+                *stuck_since = Some((Instant::now(), height));
+            }
         }
     }
 
@@ -1554,7 +1539,7 @@ impl<N: Network> BlockSync<N> {
             .iter()
             .filter(|(_, locators)| {
                 let peer_tip = locators.latest_locator_height();
-                peer_tip > current_height && assumed_peer_floor(peer_tip) <= current_height.saturating_add(1)
+                peer_tip > current_height && peer_can_serve_next_block(peer_tip, current_height)
             })
             .sorted_by(|(_, a), (_, b)| b.latest_locator_height().cmp(&a.latest_locator_height()))
             .take(NUM_SYNC_CANDIDATE_PEERS)
@@ -2339,7 +2324,7 @@ mod tests {
         assert_eq!(new_sync.requests.read().len(), (locator_height - ledger_height) as usize);
     }
 
-    /// Tests that an empty block response — the peer's explicit "cannot serve this range" signal —
+    /// Tests that an empty block response, the peer's explicit "cannot serve this range" signal,
     /// is treated as benign and re-issues the peer's outstanding requests.
     #[test]
     fn test_empty_block_response_is_benign_and_reissues_requests() {
@@ -2371,52 +2356,32 @@ mod tests {
         assert_eq!(sync.failed_requests.lock().len(), num_requests);
     }
 
-    /// Tests that peers whose assumed pruning floor is above the next needed block are not selected for sync.
-    #[test]
-    fn test_floor_excludes_peers_that_pruned_the_needed_blocks() {
-        let sync = sample_sync_at_height(0);
-
-        // A peer two retention windows ahead is assumed to have pruned everything below
-        // `AUTHORITY_RETENTION_BLOCKS + 1`, so it cannot serve block 1.
-        sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(2 * AUTHORITY_RETENTION_BLOCKS)).unwrap();
-
-        assert!(sync.prepare_block_requests().is_empty());
-        // The sync pool records that the needed blocks are below every peer's retention floor.
-        assert!(sync.sync_stuck_below_peer_floors().is_some());
-    }
-
-    /// Tests that a peer whose retained window covers the next needed block is selected for sync.
-    #[test]
-    fn test_floor_includes_peers_that_retain_the_needed_blocks() {
-        let sync = sample_sync_at_height(AUTHORITY_RETENTION_BLOCKS + AUTHORITY_RETENTION_BLOCKS / 2);
-
-        // A peer two retention windows ahead is assumed to retain blocks from
-        // `AUTHORITY_RETENTION_BLOCKS + 1`, so it can serve the next needed block.
-        sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(2 * AUTHORITY_RETENTION_BLOCKS)).unwrap();
-
-        let (requests, _) = sync.prepare_block_requests().pop().unwrap();
-        assert!(!requests.is_empty());
-        assert!(sync.sync_stuck_below_peer_floors().is_none());
-    }
-
     /// Tests the boundary of the assumed peer floor: `peer_tip − (AUTHORITY_RETENTION_BLOCKS − 1)`
     /// must be at or below the next needed block for the peer to be eligible.
     #[test]
     fn test_floor_boundary() {
         // The next needed block is 1,001. A peer at tip `1_000 + AUTHORITY_RETENTION_BLOCKS` has an
-        // assumed floor of exactly that height — eligible.
+        // assumed floor of exactly that height: eligible.
         let sync = sample_sync_at_height(1_000);
         sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(1_000 + AUTHORITY_RETENTION_BLOCKS))
             .unwrap();
         assert!(!sync.prepare_block_requests().is_empty());
         assert!(sync.sync_stuck_below_peer_floors().is_none());
 
-        // A peer one block further ahead has an assumed floor one block higher — no longer eligible.
+        // A peer one block further ahead has an assumed floor one block higher: no longer eligible.
         let sync = sample_sync_at_height(1_000);
         sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(1_001 + AUTHORITY_RETENTION_BLOCKS))
             .unwrap();
         assert!(sync.prepare_block_requests().is_empty());
         assert!(sync.sync_stuck_below_peer_floors().is_some());
+    }
+
+    #[test]
+    fn test_earliest_retained_height() {
+        assert_eq!(earliest_retained_height(0), 0);
+        assert_eq!(earliest_retained_height(AUTHORITY_RETENTION_BLOCKS - 1), 0);
+        assert_eq!(earliest_retained_height(AUTHORITY_RETENTION_BLOCKS), 1);
+        assert_eq!(earliest_retained_height(2 * AUTHORITY_RETENTION_BLOCKS), AUTHORITY_RETENTION_BLOCKS + 1);
     }
 
     /// Tests that one peer advertising a far-ahead tip among honest peers at this node's height does

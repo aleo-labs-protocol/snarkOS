@@ -231,17 +231,13 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
         }
 
         // Set up everything else after CDN sync is done.
-        let cdn_fallback = match cdn_sync {
-            None => CdnFallback::Disabled,
-            Some(cdn_sync) => match cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN") {
-                Ok(Ok(_)) => CdnFallback::Available,
-                Ok(Err(_)) => CdnFallback::Failed,
-                Err(error) => {
-                    crate::log_clean_error(&storage_mode);
-                    node.shut_down().await;
-                    return Err(error);
-                }
-            },
+        let cdn_fallback = match crate::wait_for_cdn(cdn_sync).await {
+            Ok(cdn_fallback) => cdn_fallback,
+            Err(error) => {
+                crate::log_clean_error(&storage_mode);
+                node.shut_down().await;
+                return Err(error);
+            }
         };
 
         // Initialize the routing.
@@ -294,11 +290,9 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
                 // Perform the sync routine.
                 self_.try_issuing_block_requests().await;
 
-                // If no connected peer can serve the blocks this node needs, shut down so that the
-                // missing range can be fetched from the CDN on restart (or restored from a snapshot).
-                if crate::is_stuck_sync_fatal(self_.sync.sync_stuck_below_peer_floors(), cdn_fallback) {
-                    crate::log_stuck_sync_error(cdn_fallback);
-                    self_.signal_handler.stop_with_failure();
+                // Shut down if no connected peer can serve the blocks this node needs; the missing
+                // range is then fetched from the CDN on restart, or restored from a snapshot.
+                if crate::shut_down_if_stuck_sync(&self_.sync, &self_.signal_handler, cdn_fallback) {
                     break;
                 }
             }

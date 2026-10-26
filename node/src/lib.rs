@@ -50,9 +50,14 @@ pub use node::*;
 mod traits;
 pub use traits::*;
 
+use snarkos_node_cdn::CdnBlockSync;
+use snarkos_node_sync::{BlockSync, STUCK_SYNC_SHUTDOWN_THRESHOLD};
+use snarkos_utilities::SignalHandler;
+use snarkvm::prelude::Network;
+
 use aleo_std::StorageMode;
-use snarkos_node_sync::STUCK_SYNC_SHUTDOWN_THRESHOLD;
-use std::time::Duration;
+use anyhow::{Context, Result};
+use std::sync::Arc;
 
 /// A helper to log instructions to recover.
 pub fn log_clean_error(storage_mode: &StorageMode) {
@@ -82,37 +87,52 @@ pub enum CdnFallback {
     Failed,
 }
 
-/// Returns `true` if the node must shut down because no connected peer can serve the blocks it
-/// needs (see `BlockSync::sync_stuck_below_peer_floors`).
+/// Waits for the startup CDN sync, if any, and reports whether a restart could repeat it.
+pub async fn wait_for_cdn(cdn_sync: Option<Arc<CdnBlockSync>>) -> Result<CdnFallback> {
+    let Some(cdn_sync) = cdn_sync else { return Ok(CdnFallback::Disabled) };
+    match cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN")? {
+        Ok(_) => Ok(CdnFallback::Available),
+        Err(_) => Ok(CdnFallback::Failed),
+    }
+}
+
+/// Shuts the node down, as failed, if no connected peer can serve the blocks it needs (see
+/// `BlockSync::sync_stuck_below_peer_floors`), and returns whether it did.
 ///
 /// With the CDN to fall back to, the condition must persist for `STUCK_SYNC_SHUTDOWN_THRESHOLD`
 /// first, so that a transient set of peers does not restart the node. Without it, waiting changes
 /// nothing, so the node fails at once.
-pub fn is_stuck_sync_fatal(stuck_for: Option<Duration>, cdn_fallback: CdnFallback) -> bool {
-    match stuck_for {
+pub fn shut_down_if_stuck_sync<N: Network>(
+    sync: &BlockSync<N>,
+    signal_handler: &SignalHandler,
+    cdn_fallback: CdnFallback,
+) -> bool {
+    let is_fatal = match sync.sync_stuck_below_peer_floors() {
         None => false,
         Some(_) if cdn_fallback != CdnFallback::Available => true,
         Some(stuck_for) => stuck_for >= STUCK_SYNC_SHUTDOWN_THRESHOLD,
+    };
+    if !is_fatal {
+        return false;
     }
-}
 
-/// Logs an error explaining that no connected peer can serve the blocks this node needs, and how to recover.
-pub fn log_stuck_sync_error(cdn_fallback: CdnFallback) {
-    const WHAT: &str = "No connected peer can serve the blocks this node needs — they have likely been pruned network-wide. Shutting down.";
-    match cdn_fallback {
-        CdnFallback::Available => error!(
-            "{WHAT} On restart, the node will sync the missing blocks from the CDN. \
-            Alternatively, restore a recent ledger snapshot."
-        ),
-        CdnFallback::Disabled => error!(
-            "{WHAT} CDN sync is disabled: restart without --nocdn so the node syncs them from the CDN, \
-            or restore a recent ledger snapshot."
-        ),
-        CdnFallback::Failed => error!(
-            "{WHAT} The startup CDN sync failed (see above): restart the node to retry it, \
-            or restore a recent ledger snapshot."
-        ),
-    }
+    let recovery = match cdn_fallback {
+        CdnFallback::Available => {
+            "On restart, the node will sync the missing blocks from the CDN. Alternatively, restore a recent ledger snapshot."
+        }
+        CdnFallback::Disabled => {
+            "CDN sync is disabled: restart without --nocdn so the node syncs them from the CDN, or restore a recent ledger snapshot."
+        }
+        CdnFallback::Failed => {
+            "The startup CDN sync failed (see above): restart the node to retry it, or restore a recent ledger snapshot."
+        }
+    };
+    error!(
+        "No connected peer can serve the blocks this node needs; they have likely been pruned network-wide. \
+        Shutting down. {recovery}"
+    );
+    signal_handler.stop_with_failure();
+    true
 }
 
 /// Starts the notification message loop.

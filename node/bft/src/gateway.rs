@@ -692,10 +692,7 @@ impl<N: Network> Gateway<N> {
 
                 let self_ = self.clone();
                 let blocks = match task::spawn_blocking(move || {
-                    // Retrieve the blocks within the requested range. If any block is unavailable
-                    // (e.g. its authority data was pruned), send an empty block response to
-                    // explicitly signal that this node cannot serve the requested range, rather
-                    // than penalizing the requester.
+                    // Reply empty rather than disconnect: the peer learns we cannot serve this range (e.g. pruned).
                     match self_.ledger.get_blocks(start_height..end_height) {
                         Ok(blocks) => DataBlocks(blocks),
                         Err(error) => {

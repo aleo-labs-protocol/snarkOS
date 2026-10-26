@@ -16,9 +16,9 @@
 use super::*;
 use snarkos_node_network::PeerPoolHandling;
 use snarkos_node_router::messages::UnconfirmedSolution;
-use snarkos_node_sync::BftSyncMode;
+use snarkos_node_sync::{BftSyncMode, earliest_retained_height};
 use snarkvm::{
-    ledger::{puzzle::Solution, store::AUTHORITY_RETENTION_BLOCKS},
+    ledger::puzzle::Solution,
     prelude::{
         Address,
         ConsensusVersion,
@@ -111,16 +111,9 @@ fn map_missing_resource_error(err: anyhow::Error) -> RestError {
     if is_missing_resource { RestError::not_found(err) } else { RestError::from(err) }
 }
 
-/// The earliest height whose full block a node built with `prune-authority-data` still serves:
-/// authority data older than `AUTHORITY_RETENTION_BLOCKS` is pruned, and a block below this
-/// height can no longer be assembled. Genesis is never pruned.
-#[cfg_attr(not(feature = "prune-authority-data"), allow(dead_code))]
-fn earliest_retained_height(latest_height: u32) -> u32 {
-    latest_height.saturating_sub(AUTHORITY_RETENTION_BLOCKS - 1)
-}
-
-/// Returns a `410 Gone` if the block at `height` is below this node's authority retention window.
-#[cfg_attr(not(feature = "prune-authority-data"), allow(dead_code))]
+/// Returns a `410 Gone` if the block at `height` is below this node's authority retention window:
+/// a node built with `prune-authority-data` can no longer assemble such a block. Genesis is never
+/// pruned.
 fn check_block_retained(height: u32, latest_height: u32) -> Result<(), RestError> {
     let earliest = earliest_retained_height(latest_height);
     if height > 0 && height < earliest {
@@ -362,18 +355,11 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         // Manually parse the height or the height of the hash, axum doesn't support different types
         // for the same path param.
         let hash = if let Ok(height) = height_or_hash.parse::<u32>() {
-            #[cfg(feature = "prune-authority-data")]
-            check_block_retained(height, rest.ledger.latest_height())?;
             rest.ledger
                 .get_hash(height)
                 .with_context(|| "Failed to get a block's hash")
                 .map_err(map_missing_resource_error)?
         } else if let Ok(hash) = height_or_hash.parse::<N::BlockHash>() {
-            // A hash the node does not know falls through to the lookup below, which reports it.
-            #[cfg(feature = "prune-authority-data")]
-            if let Ok(height) = rest.ledger.get_height(&hash) {
-                check_block_retained(height, rest.ledger.latest_height())?;
-            }
             hash
         } else {
             return Err(RestError::bad_request(anyhow!("invalid input: neither a block height nor a block hash")));
@@ -385,18 +371,28 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         }
 
         // Retrieve the block from the database.
-        let json_block = match tokio::task::spawn_blocking(move || match rest.ledger.try_get_block_by_hash(&hash) {
-            Ok(Some(block)) => Some(ErasedJson::new(block)),
-            Ok(None) => None,
-            Err(e) => {
-                error!("Couldn't find a block: {e}");
-                None
+        let json_block = match tokio::task::spawn_blocking(move || {
+            // A pruned block is reported as gone; a hash the node does not know falls through to
+            // the lookup, which reports it.
+            if cfg!(feature = "prune-authority-data")
+                && let Ok(height) = rest.ledger.get_height(&hash)
+            {
+                check_block_retained(height, rest.ledger.latest_height())?;
+            }
+            match rest.ledger.try_get_block_by_hash(&hash) {
+                Ok(Some(block)) => Ok(Some(ErasedJson::new(block))),
+                Ok(None) => Ok(None),
+                Err(e) => {
+                    error!("Couldn't find a block: {e}");
+                    Ok(None)
+                }
             }
         })
         .await
         {
-            Ok(Some(block)) => Ok(block),
-            Ok(None) => Err(RestError::not_found(anyhow!("Couldn't find block {height_or_hash}"))),
+            Ok(Ok(Some(block))) => Ok(block),
+            Ok(Ok(None)) => Err(RestError::not_found(anyhow!("Couldn't find block {height_or_hash}"))),
+            Ok(Err(err)) => Err(err),
             Err(e) => Err(RestError::internal_server_error(anyhow!("tokio error: {e}"))),
         }?;
 
@@ -416,8 +412,9 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
     ) -> Result<ErasedJson, RestError> {
         let latest_height = rest.ledger.latest_height();
         let (start_height, end_height) = check_block_range(block_range, MAX_BLOCK_RANGE, "blocks", latest_height)?;
-        #[cfg(feature = "prune-authority-data")]
-        check_block_retained(start_height, latest_height)?;
+        if cfg!(feature = "prune-authority-data") {
+            check_block_retained(start_height, latest_height)?;
+        }
 
         // Prepare a closure for the blocking work.
         let get_json_blocks = move || -> Result<ErasedJson, RestError> {
@@ -1846,14 +1843,7 @@ mod route_error_tests {
 mod retention_tests {
     use super::*;
     use axum::http::StatusCode;
-
-    #[test]
-    fn the_retention_window_ends_at_the_tip_and_spans_the_retained_blocks() {
-        assert_eq!(earliest_retained_height(0), 0);
-        assert_eq!(earliest_retained_height(AUTHORITY_RETENTION_BLOCKS - 1), 0);
-        assert_eq!(earliest_retained_height(AUTHORITY_RETENTION_BLOCKS), 1);
-        assert_eq!(earliest_retained_height(2 * AUTHORITY_RETENTION_BLOCKS), AUTHORITY_RETENTION_BLOCKS + 1);
-    }
+    use snarkvm::ledger::store::AUTHORITY_RETENTION_BLOCKS;
 
     #[test]
     fn blocks_inside_the_window_are_retained() {

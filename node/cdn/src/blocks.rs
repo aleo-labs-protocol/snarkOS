@@ -50,10 +50,8 @@ const CONCURRENT_REQUESTS: u32 = 16;
 const MAXIMUM_PENDING_BLOCKS: u32 = BLOCKS_PER_FILE * CONCURRENT_REQUESTS * 2;
 /// Maximum number of attempts for a request to the CDN.
 const MAXIMUM_REQUEST_ATTEMPTS: u8 = 10;
-/// Maximum number of attempts to fetch the CDN height before giving up on the CDN.
-///
-/// Fewer than for block bundles: this runs before any blocks are fetched, so a node that is close
-/// enough to the tip to sync from peers should not wait long for an unreachable CDN.
+/// Maximum number of attempts to fetch the CDN height; fewer than for block bundles, so that an
+/// unreachable CDN does not hold up a node that can sync from peers.
 const MAXIMUM_HEIGHT_REQUEST_ATTEMPTS: u8 = 3;
 
 /// The CDN base url.
@@ -202,7 +200,7 @@ pub async fn load_blocks<N: Network>(
         }
     };
 
-    // Fetch the CDN height, retrying with a linear backoff.
+    // Fetch the CDN height, retrying with a short linear backoff.
     let cdn_height = {
         let mut attempts = 0;
         loop {
@@ -211,7 +209,7 @@ pub async fn load_blocks<N: Network>(
                 Err(error) if attempts < MAXIMUM_HEIGHT_REQUEST_ATTEMPTS && !stoppable.is_stopped() => {
                     attempts += 1;
                     warn!("{error} - retrying ({attempts} attempt(s) so far)");
-                    tokio::time::sleep(Duration::from_secs(attempts as u64 * 10)).await;
+                    tokio::time::sleep(Duration::from_secs(attempts as u64 * 2)).await;
                 }
                 Err(error) => return Err((start_height, error)),
             }
