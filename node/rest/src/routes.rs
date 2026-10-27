@@ -116,28 +116,18 @@ fn map_missing_resource_error(err: anyhow::Error) -> RestError {
 /// `prune-authority-data` every block is retained. As with other errors, the status is only visible
 /// on `/v2`: the default and `/v1` prefixes turn it into a 500.
 fn check_block_retained(height: u32, latest_height: u32) -> Result<(), RestError> {
-    let earliest = oldest_retained_authority_height(latest_height);
-    if height > 0 && height < earliest {
-        return Err(block_gone(height, earliest));
-    }
-    Ok(())
-}
-
-/// The `410 Gone` for block `height`, below the retention window that starts at `earliest`.
-fn block_gone(height: u32, earliest: u32) -> RestError {
-    RestError::gone(anyhow!(
-        "block {height} is below this node's authority retention window (earliest {earliest}); \
-        use /block/{height}/header, /block/{height}/transactions, or an archival node"
-    ))
+    check_range_retained(height, height.saturating_add(1), latest_height)
 }
 
 /// Returns a `410 Gone` if the non-empty range `start..end` reaches below this node's authority
 /// retention window (see [`check_block_retained`]).
 fn check_range_retained(start: u32, end: u32, latest_height: u32) -> Result<(), RestError> {
-    match range_below_retention_window(start, end, latest_height) {
-        Some(earliest) => Err(block_gone(start.max(1), earliest)),
-        None => Ok(()),
-    }
+    let Some(earliest) = range_below_retention_window(start, end, latest_height) else { return Ok(()) };
+    let height = start.max(1);
+    Err(RestError::gone(anyhow!(
+        "block {height} is below this node's authority retention window (earliest {earliest}); \
+        use /block/{height}/header, /block/{height}/transactions, or an archival node"
+    )))
 }
 
 /// Deserialize a CSV string into a vector of strings.

@@ -209,19 +209,19 @@ pub async fn load_blocks<N: Network>(
     let cdn_height = {
         let mut attempts = 0;
         loop {
+            if stoppable.is_stopped() {
+                info!("Stopping block sync before fetching the CDN height - shutting down");
+                return Ok(start_height.saturating_sub(1));
+            }
             attempts += 1;
             match cdn_height::<BLOCKS_PER_FILE>(&client, base_url).await {
                 Ok(cdn_height) => break cdn_height,
-                Err(error) if attempts < MAXIMUM_HEIGHT_REQUEST_ATTEMPTS && !stoppable.is_stopped() => {
+                Err(error) if attempts < MAXIMUM_HEIGHT_REQUEST_ATTEMPTS => {
                     warn!("{error} - retrying ({attempts} attempt(s) so far)");
                     // Sleep in short steps, so that a stop interrupts the backoff.
                     let deadline = Instant::now() + Duration::from_secs(attempts as u64 * 2);
                     while Instant::now() < deadline && !stoppable.is_stopped() {
                         tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
-                    if stoppable.is_stopped() {
-                        info!("Stopping block sync before fetching the CDN height - shutting down");
-                        return Ok(start_height.saturating_sub(1));
                     }
                 }
                 Err(error) => return Err((start_height, error)),

@@ -292,6 +292,7 @@ pub struct BlockSync<N: Network> {
     /// This map is used to determine which peers to request blocks from.
     ///
     /// Lock ordering: when locking both, `common_ancestors` and `locators`, `common_ancestors` must be locked first.
+    /// `locators` is locked before `peer_pruning`.
     common_ancestors: RwLock<IndexMap<PeerPair, u32>>,
 
     /// The block requests in progress and their responses.
@@ -574,10 +575,8 @@ impl<N: Network> BlockSync<N> {
         // Calculate the end height.
         let end_height = start_height.saturating_add(requests.len() as u32);
 
-        // A peer may have disconnected, or answered empty below this batch, after we prepared it;
-        // inserting requests that reference a disconnected peer would leave them never cleaned by
-        // remove_peer. Hold the same lock that remove_peer and empty responses use, so we're atomic:
-        // select peers that can still serve the batch, then insert.
+        // Hold `prepare_requests_lock` (shared with remove_peer and empty responses), so that selecting
+        // peers that can still serve the batch and inserting the requests are atomic.
         let sync_ips = {
             let _prepare_requests_lock = self.prepare_requests_lock.lock();
             let Some(sync_ips) = self.select_sync_ips(sync_peers, start_height, max_num_sync_ips) else {
@@ -2587,11 +2586,13 @@ mod tests {
             Block::<CurrentNetwork>::from_bytes_le(CurrentNetwork::genesis_bytes()).unwrap()
         };
 
-        assert!(empty_response_to(&sync, peer_ip, 1).is_benign());
-        assert!(empty_response_to(&sync, peer_ip, 2).is_benign());
+        const MAX: u32 = MAX_CONSECUTIVE_EMPTY_BLOCK_RESPONSES;
+        for height in 1..MAX {
+            assert!(empty_response_to(&sync, peer_ip, height).is_benign());
+        }
         // A rejected response does not reset the strikes.
         assert!(sync.insert_block_responses(peer_ip, vec![genesis.clone()], None).is_err());
-        let error = empty_response_to(&sync, peer_ip, 3);
+        let error = empty_response_to(&sync, peer_ip, MAX);
         assert!(error.requires_disconnect());
         assert!(!error.is_benign());
 
@@ -2601,8 +2602,9 @@ mod tests {
         sync.update_peer_locators(peer_ip, &sample_block_locators(10)).unwrap();
 
         // An inserted response resets the strikes.
-        assert!(empty_response_to(&sync, peer_ip, 1).is_benign());
-        assert!(empty_response_to(&sync, peer_ip, 2).is_benign());
+        for height in 1..MAX {
+            assert!(empty_response_to(&sync, peer_ip, height).is_benign());
+        }
         let request = OutstandingRequest {
             request: (None, None, [peer_ip].into_iter().collect()),
             timestamp: Instant::now(),
@@ -2610,10 +2612,11 @@ mod tests {
         };
         sync.requests.write().insert(0, request);
         sync.insert_block_responses(peer_ip, vec![genesis], None).unwrap();
-        assert_eq!(pruning_of(&sync, peer_ip), (0, 3));
-        assert!(empty_response_to(&sync, peer_ip, 3).is_benign());
-        assert!(empty_response_to(&sync, peer_ip, 4).is_benign());
-        assert!(empty_response_to(&sync, peer_ip, 5).requires_disconnect());
+        assert_eq!(pruning_of(&sync, peer_ip), (0, MAX));
+        for height in MAX..2 * MAX - 1 {
+            assert!(empty_response_to(&sync, peer_ip, height).is_benign());
+        }
+        assert!(empty_response_to(&sync, peer_ip, 2 * MAX - 1).requires_disconnect());
     }
 
     /// Tests that an honest peer that just pruned the next block raises its learned floor, is not
