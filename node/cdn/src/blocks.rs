@@ -77,10 +77,9 @@ fn update_block_metrics<N: Network>(height: u32) {
 /// The outcome of the startup CDN sync.
 #[derive(Debug)]
 pub enum CdnSyncOutcome {
-    /// The ledger was synced up to the given height.
+    /// The ledger was synced up to the given height, which is below the start if the CDN held no
+    /// newer blocks.
     Synced(u32),
-    /// The CDN held no blocks past the node's ledger.
-    NothingNew,
     /// The sync stopped at the given height with an error.
     Failed(u32, anyhow::Error),
 }
@@ -152,8 +151,6 @@ impl CdnBlockSync {
         // TODO (howardwu): Find a way to resolve integrity failures.
         // If the sync failed, check the integrity of the ledger.
         match result {
-            // `load_blocks` reports the height below the start when it loaded nothing.
-            Ok(completed_height) if completed_height < start_height => CdnSyncOutcome::NothingNew,
             Ok(completed_height) => CdnSyncOutcome::Synced(completed_height),
             Err((completed_height, error)) => {
                 let error = error.context("Failed to sync block(s) from the CDN");
