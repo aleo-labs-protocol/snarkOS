@@ -130,6 +130,9 @@ pub const API_VERSION_V2: &str = "v2";
 /// The capacity of the LRU holding recently requested blocks.
 const BLOCK_CACHE_SIZE: usize = 128;
 
+/// Recently requested blocks, serialized, with their heights.
+type BlockCache<N> = LruCache<<N as Network>::BlockHash, (u32, ErasedJson)>;
+
 /// Permits that keep a REST verification in a type's queue and in a concurrent slot.
 ///
 /// Move the slot into the blocking task that performs the verification, so the permits are
@@ -210,7 +213,7 @@ pub struct Rest<N: Network, C: ConsensusStorage<N>, R: Routing<N>> {
     /// Concurrent and queued REST verification slots for deploys, executions, and solutions.
     verification_slots: Arc<VerificationSlots>,
     /// A cache containing recently requested blocks.
-    block_cache: Arc<Mutex<LruCache<N::BlockHash, ErasedJson>>>,
+    block_cache: Arc<Mutex<BlockCache<N>>>,
     /// The upstream for the routes of the removed `history` feature, if `--history-compat-mode` is set.
     history_compat: Option<Arc<HistoryCompat>>,
 }

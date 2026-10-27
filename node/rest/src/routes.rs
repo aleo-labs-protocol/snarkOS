@@ -350,7 +350,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         let block = rest.ledger.latest_block();
         let hash = block.hash();
         // When present, this is 3x faster than serializing the block from the ledger.
-        rest.block_cache.lock().get_or_insert(hash, || ErasedJson::new(block)).clone()
+        rest.block_cache.lock().get_or_insert(hash, || (block.height(), ErasedJson::new(block))).1.clone()
     }
 
     /// GET /<network>/block/{height}
@@ -376,8 +376,15 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             return Err(RestError::bad_request(anyhow!("invalid input: neither a block height nor a block hash")));
         };
 
-        // Report a pruned block as gone, even if it is still cached. Only a pruning node needs the
-        // lookup; a hash it does not know falls through to the 404 below.
+        // Attempt to find a serialized block in the cache. A pruned block is gone even if still cached.
+        let cached = rest.block_cache.lock().get(&hash).cloned();
+        if let Some((height, json_block)) = cached {
+            check_block_retained(height, latest_height)?;
+            return Ok(json_block);
+        }
+
+        // Report a pruned block as gone. Only a pruning node needs the lookup; a hash it does not
+        // know falls through to the 404 below.
         if is_hash_input && oldest_retained_authority_height(latest_height) > 1 {
             let ledger = rest.ledger.clone();
             let height = tokio::task::spawn_blocking(move || ledger.get_height(&hash))
@@ -386,11 +393,6 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             if let Ok(height) = height {
                 check_block_retained(height, latest_height)?;
             }
-        }
-
-        // Attempt to find a serialized block in the cache.
-        if let Some(json_block) = rest.block_cache.lock().get(&hash) {
-            return Ok(json_block.clone());
         }
 
         // Retrieve the block from the database.
