@@ -17,35 +17,15 @@
 
 #[allow(dead_code)]
 mod common;
-use common::test_peer::TestPeer;
+use common::test_peer::connect_test_peer;
 
 use snarkos_node_network::PeerPoolHandling;
-use snarkos_node_router::{
-    Router,
-    messages::{BlockRequest, Message},
-};
+use snarkos_node_router::messages::{BlockRequest, Message};
 
 use deadline::deadline;
 use paste::paste;
-use pea2pea::{Pea2Pea, protocols::Writing};
-use snarkvm::prelude::MainnetV0 as CurrentNetwork;
-use std::{net::SocketAddr, time::Duration};
-
-/// Spins up a test peer, connects the node's router to it, and waits until both sides see the
-/// connection. Returns the peer and the node's address as the peer sees it.
-async fn connect_test_peer(router: &Router<CurrentNetwork>) -> (TestPeer, SocketAddr) {
-    let peer = TestPeer::client().await;
-    let peer_addr = peer.node().listening_addr().await.unwrap();
-    router.connect(peer_addr).unwrap().await.unwrap().unwrap();
-
-    let router_clone = router.clone();
-    deadline!(Duration::from_secs(5), move || router_clone.number_of_connected_peers() == 1);
-    let peer_clone = peer.clone();
-    deadline!(Duration::from_secs(5), move || peer_clone.node().num_connected() == 1);
-
-    let node_addr = *peer.node().connected_addrs().first().unwrap();
-    (peer, node_addr)
-}
+use pea2pea::protocols::Writing;
+use std::time::Duration;
 
 macro_rules! test_block_request_handling {
     ($($node_type:ident),*) => {
@@ -80,21 +60,6 @@ macro_rules! test_block_request_handling {
 
                     // The node remains connected to the peer.
                     assert_eq!(node.router().number_of_connected_peers(), 1);
-                }
-
-                /// Tests that a malformed block request (empty range) still disconnects the requester.
-                #[tokio::test]
-                async fn [<$node_type _disconnects_on_malformed_block_request>]() {
-                    // Spin up a full node, connected to a test peer.
-                    let node = $crate::common::node::$node_type().await;
-                    let (peer, node_addr) = connect_test_peer(node.router()).await;
-
-                    // Send a malformed block request (start >= end).
-                    assert!(peer.unicast(node_addr, Message::BlockRequest(BlockRequest { start_height: 3, end_height: 3 })).is_ok());
-
-                    // The node disconnects the peer for the protocol violation.
-                    let node_clone = node.clone();
-                    deadline!(Duration::from_secs(5), move || node_clone.router().number_of_connected_peers() == 0);
                 }
             }
         )*

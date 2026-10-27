@@ -123,7 +123,6 @@ impl<N: Network> DataBlocks<N> {
         start_height: u32,
         end_height: u32,
     ) -> Result<()> {
-        // An empty response indicates the peer cannot serve the requested range.
         if self.0.is_empty() {
             return Ok(());
         }

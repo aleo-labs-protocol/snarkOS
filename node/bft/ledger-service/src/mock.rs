@@ -55,17 +55,14 @@ impl<N: Network> MockLedgerService<N> {
 
     /// Initializes a new mock ledger service at the specified height.
     pub fn new_at_height(committee: Committee<N>, height: u32) -> Self {
-        let ledger = Self::new(committee);
-        ledger.advance_to_height(height);
-        ledger
-    }
-
-    /// Advances the mock ledger to the given height, for tests that simulate sync progress.
-    pub fn advance_to_height(&self, height: u32) {
-        let mut height_to_hash = self.height_to_round_and_hash.lock();
-        let start = height_to_hash.last_key_value().map_or(0, |(height, _)| height + 1);
-        for i in start..=height {
+        let mut height_to_hash = BTreeMap::new();
+        for i in 0..=height {
             height_to_hash.insert(i, (i as u64 * 2, Field::<N>::from_u32(i).into()));
+        }
+        Self {
+            committee,
+            height_to_round_and_hash: Mutex::new(height_to_hash),
+            known_transmission_ids: Default::default(),
         }
     }
 

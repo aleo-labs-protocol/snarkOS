@@ -81,16 +81,19 @@ pub fn log_clean_error(storage_mode: &StorageMode) {
 pub enum CdnFallback {
     /// The startup CDN sync completed, so a restart repeats it and fills the gap.
     Available,
-    /// CDN sync is disabled (`--nocdn`, `--dev`, or a prover).
+    /// CDN sync is disabled (`--nocdn` or `--dev`).
     Disabled,
     /// The startup CDN sync failed, so a restart may fail the same way.
     Failed,
+    /// The CDN holds no blocks past this node's ledger, so a restart cannot fill the gap.
+    Behind,
 }
 
 /// Waits for the startup CDN sync, if any, and reports whether a restart could repeat it.
 pub async fn wait_for_cdn(cdn_sync: Option<Arc<CdnBlockSync>>) -> Result<CdnFallback> {
     let Some(cdn_sync) = cdn_sync else { return Ok(CdnFallback::Disabled) };
     match cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN")? {
+        Ok(height) if height < cdn_sync.start_height() => Ok(CdnFallback::Behind),
         Ok(_) => Ok(CdnFallback::Available),
         Err(_) => Ok(CdnFallback::Failed),
     }
@@ -121,11 +124,12 @@ pub fn shut_down_if_stuck_sync<N: Network>(
             "On restart, the node will sync the missing blocks from the CDN. Alternatively, restore a recent ledger snapshot."
         }
         CdnFallback::Disabled => {
-            "CDN sync is disabled: restart without --nocdn so the node syncs them from the CDN, or restore a recent ledger snapshot."
+            "CDN sync is disabled: restore a recent ledger snapshot, or restart with CDN sync enabled."
         }
         CdnFallback::Failed => {
             "The startup CDN sync failed (see above): restart the node to retry it, or restore a recent ledger snapshot."
         }
+        CdnFallback::Behind => "The CDN holds no blocks past this node's ledger: restore a recent ledger snapshot.",
     };
     error!(
         "No connected peer can serve the blocks this node needs; they have likely been pruned network-wide. \

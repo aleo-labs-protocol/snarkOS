@@ -18,7 +18,6 @@ use snarkos_node_network::{PeerPoolHandling, harden_socket};
 use snarkos_node_router::messages::{
     BlockRequest,
     BlockResponse,
-    DataBlocks,
     DisconnectReason,
     Message,
     MessageCodec,
@@ -27,6 +26,7 @@ use snarkos_node_router::messages::{
     Pong,
     UnconfirmedTransaction,
 };
+use snarkos_node_sync::blocks_or_empty;
 use snarkos_node_tcp::{ConnectError, Connection, ConnectionSide, Tcp, connections::DisconnectOrigin};
 use snarkvm::{
     console::network::{ConsensusVersion, Network},
@@ -202,16 +202,7 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Validator<N, C> {
             }
         };
 
-        // An empty response tells the peer this node cannot serve the range (e.g. pruned).
-        let blocks = match self.ledger.get_blocks(*start_height..*end_height) {
-            Ok(blocks) => DataBlocks(blocks),
-            Err(err) => {
-                let err =
-                    err.context(format!("Cannot serve block request {start_height}..{end_height} from the ledger"));
-                debug!("{}", flatten_error(err));
-                DataBlocks(vec![])
-            }
-        };
+        let blocks = blocks_or_empty(self.ledger.get_blocks(*start_height..*end_height), *start_height, *end_height);
         // Send the `BlockResponse` message to the peer.
         self.router()
             .send(peer_ip, Message::BlockResponse(BlockResponse::new(message, blocks, latest_consensus_version)));

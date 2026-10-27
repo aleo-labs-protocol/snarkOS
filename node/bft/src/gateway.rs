@@ -66,7 +66,7 @@ use snarkos_node_network::{
     },
     shorten_snarkos_sha,
 };
-use snarkos_node_sync::{MAX_BLOCKS_BEHIND, communication_service::CommunicationService};
+use snarkos_node_sync::{MAX_BLOCKS_BEHIND, blocks_or_empty, communication_service::CommunicationService};
 use snarkos_node_tcp::{
     Config,
     ConnectError,
@@ -692,14 +692,7 @@ impl<N: Network> Gateway<N> {
 
                 let self_ = self.clone();
                 let blocks = match task::spawn_blocking(move || {
-                    // An empty response tells the peer this node cannot serve the range (e.g. pruned).
-                    match self_.ledger.get_blocks(start_height..end_height) {
-                        Ok(blocks) => DataBlocks(blocks),
-                        Err(error) => {
-                            debug!("Cannot serve block request {start_height}..{end_height} from ledger - {error}");
-                            DataBlocks(vec![])
-                        }
-                    }
+                    blocks_or_empty(self_.ledger.get_blocks(start_height..end_height), start_height, end_height)
                 })
                 .await
                 {

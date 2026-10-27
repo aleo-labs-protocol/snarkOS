@@ -86,6 +86,8 @@ pub struct CdnBlockSync {
     task: Mutex<Option<JoinHandle<SyncResult>>>,
     /// This flag will be set to true once the sync task has been successfully awaited.
     done: AtomicBool,
+    /// The first block height the sync asks the CDN for.
+    start_height: u32,
 }
 
 impl CdnBlockSync {
@@ -95,13 +97,20 @@ impl CdnBlockSync {
         ledger: Ledger<N, C>,
         stoppable: Arc<SignalHandler>,
     ) -> Self {
+        let start_height = ledger.latest_height() + 1;
         let task = {
             let base_url = base_url.clone();
-            tokio::spawn(async move { Self::worker(base_url, ledger, stoppable).await })
+            tokio::spawn(async move { Self::worker(base_url, ledger, start_height, stoppable).await })
         };
 
         debug!("Started sync from CDN at {base_url}");
-        Self { done: AtomicBool::new(false), base_url, task: Mutex::new(Some(task)) }
+        Self { done: AtomicBool::new(false), base_url, task: Mutex::new(Some(task)), start_height }
+    }
+
+    /// The first block height the sync asks the CDN for. A completed sync that reports a lower
+    /// height found nothing on the CDN past the node's own ledger.
+    pub fn start_height(&self) -> u32 {
+        self.start_height
     }
 
     /// Did the CDN sync finish?
@@ -129,10 +138,9 @@ impl CdnBlockSync {
     async fn worker<N: Network, C: ConsensusStorage<N>>(
         base_url: http::Uri,
         ledger: Ledger<N, C>,
+        start_height: u32,
         stoppable: Arc<dyn Stoppable>,
     ) -> SyncResult {
-        // Fetch the node height.
-        let start_height = ledger.latest_height() + 1;
         // Load the blocks from the CDN into the ledger.
         let ledger_clone = ledger.clone();
         let result = load_blocks(&base_url, start_height, None, stoppable, move |block: Block<N>| {
