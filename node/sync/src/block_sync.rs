@@ -1547,6 +1547,9 @@ impl<N: Network> BlockSync<N> {
                     );
                 }
             }
+            drop(failed_requests);
+            // Wake the request loop to re-issue them.
+            self.peer_notify.notify_one();
         }
 
         // No need to remove responses here, because requests with responses will be retained.
