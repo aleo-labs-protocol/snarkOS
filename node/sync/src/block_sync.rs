@@ -48,10 +48,7 @@ use rand::seq::{IteratorRandom, SliceRandom};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque, hash_map},
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 #[cfg(not(feature = "locktick"))]
@@ -295,9 +292,9 @@ pub struct BlockSync<N: Network> {
     /// this node needs (see [`Self::sync_stuck_below_peer_floors`]).
     stuck_since: Mutex<Option<(Instant, u32)>>,
 
-    /// Whether the last request round found peers ahead but all assumed to have pruned the first
-    /// needed block; used to warn once rather than every round.
-    warned_all_peers_pruned: AtomicBool,
+    /// When the node last warned that every peer ahead has pruned the blocks it needs, while too few
+    /// peers corroborate it for [`Self::sync_stuck_below_peer_floors`] to report sync as stuck.
+    last_pruned_peers_warning: Mutex<Option<Instant>>,
 }
 
 impl<N: Network> BlockSync<N> {
@@ -321,7 +318,7 @@ impl<N: Network> BlockSync<N> {
             failed_requests: Default::default(),
             last_response_at: Default::default(),
             stuck_since: Default::default(),
-            warned_all_peers_pruned: Default::default(),
+            last_pruned_peers_warning: Default::default(),
         }
     }
 
@@ -1162,12 +1159,9 @@ impl<N: Network> BlockSync<N> {
 
             print_requests();
             vec![]
-        } else if let Some((sync_peers, min_common_ancestor)) = {
-            let first_needed = self.retention_height().saturating_add(1);
-            let sync_peers = self.find_sync_peers_inner(current_height, Some(first_needed));
-            self.warn_once_if_all_peers_pruned(sync_peers.is_none(), current_height, first_needed);
-            sync_peers
-        } {
+        } else if let Some((sync_peers, min_common_ancestor)) =
+            self.find_sync_peers_inner(current_height, Some(self.retention_height().saturating_add(1)))
+        {
             // Retrieve the greatest block height of any connected peer.
             // We do not need to update the sync state here, as that already happens when the block locators are received.
             let greatest_peer_height = sync_peers.values().map(|l| l.latest_locator_height()).max().unwrap_or(0);
@@ -1205,28 +1199,27 @@ impl<N: Network> BlockSync<N> {
         }
     }
 
-    /// Returns `true` if the peers corroborate that the blocks this node needs (from `height + 1`)
-    /// have been pruned network-wide: at least `MINIMUM_NUMBER_OF_PEERS` peers have sent locators,
-    /// a strict majority of them are ahead of `height`, and every one of those has an assumed
-    /// pruning floor above `height + 1`.
-    ///
-    /// A lone peer fabricating a far-ahead tip is a minority among honest peers at this height, so
-    /// it cannot trigger a shutdown.
-    fn needed_blocks_pruned_by_peer_majority(&self, height: u32) -> bool {
+    /// Returns `(peers ahead of height, peers with locators)` if at least one peer is ahead of
+    /// `height` and every such peer is assumed to have pruned block `height + 1`.
+    fn peers_ahead_all_pruned(&self, height: u32) -> Option<(usize, usize)> {
         let locators = self.locators.read();
         let mut num_ahead = 0;
         for tip in locators.values().map(|locators| locators.latest_locator_height()).filter(|&tip| tip > height) {
             if peer_can_serve(tip, height.saturating_add(1)) {
-                return false;
+                return None;
             }
             num_ahead += 1;
         }
-        // A strict majority of the peers that sent locators, written without division so it is exact.
-        locators.len() >= MINIMUM_NUMBER_OF_PEERS && num_ahead * 2 > locators.len()
+        (num_ahead > 0).then_some((num_ahead, locators.len()))
     }
 
     /// Returns how long sync has made no progress because the peers have pruned the blocks this
-    /// node needs, if that is currently the case (see [`Self::needed_blocks_pruned_by_peer_majority`]).
+    /// node needs, if that is currently the case.
+    ///
+    /// The peers must corroborate it: at least `MINIMUM_NUMBER_OF_PEERS` peers have sent locators,
+    /// and a strict majority of them are ahead with an assumed floor above the next needed block.
+    /// A lone peer fabricating a far-ahead tip is a minority among honest peers at this height, so
+    /// it cannot trigger a shutdown. With fewer peers, a warning is logged instead.
     ///
     /// The condition is evaluated on every call, so a window armed earlier cannot outlive it. The
     /// window is armed when the condition first holds, restarted if the ledger height advances while
@@ -1240,7 +1233,11 @@ impl<N: Network> BlockSync<N> {
             let requests = self.requests.read();
             requests.contains_key(&height.saturating_add(1)) || requests.values().any(|r| !r.sync_ips().is_empty())
         };
-        let is_stuck = !can_progress && self.needed_blocks_pruned_by_peer_majority(height);
+        let pruned = if can_progress { None } else { self.peers_ahead_all_pruned(height) };
+        // A strict majority, written without division so it is exact.
+        let is_stuck = pruned
+            .is_some_and(|(num_ahead, num_peers)| num_peers >= MINIMUM_NUMBER_OF_PEERS && num_ahead * 2 > num_peers);
+        self.warn_if_pruned_without_majority(pruned.is_some() && !is_stuck, height);
 
         let mut stuck_since = self.stuck_since.lock();
         match *stuck_since {
@@ -1269,22 +1266,20 @@ impl<N: Network> BlockSync<N> {
         self.metrics.count_request_completed();
     }
 
-    /// Warns once, until request building next finds peers, when there are peers ahead of
-    /// `current_height` but all are assumed to have pruned `first_needed`. Fewer peers than the stuck
-    /// detector needs are not otherwise reported.
-    fn warn_once_if_all_peers_pruned(&self, no_sync_peers: bool, current_height: u32, first_needed: u32) {
-        let all_pruned = no_sync_peers && {
-            let locators = self.locators.read();
-            let mut tips_ahead =
-                locators.values().map(|locators| locators.latest_locator_height()).filter(|&tip| tip > current_height);
-            tips_ahead.clone().next().is_some() && tips_ahead.all(|tip| !peer_can_serve(tip, first_needed))
-        };
-        if all_pruned && !self.warned_all_peers_pruned.swap(true, Ordering::Relaxed) {
+    /// Warns, every `STUCK_SYNC_SHUTDOWN_THRESHOLD` while `pruned` holds, that every peer ahead has
+    /// pruned the next needed block but too few peers corroborate it to shut down.
+    fn warn_if_pruned_without_majority(&self, pruned: bool, height: u32) {
+        let mut last_warning = self.last_pruned_peers_warning.lock();
+        if !pruned {
+            *last_warning = None;
+        } else if last_warning.is_none_or(|at| at.elapsed() >= STUCK_SYNC_SHUTDOWN_THRESHOLD) {
+            *last_warning = Some(Instant::now());
             warn!(
-                "Every peer ahead of this node is assumed to have pruned block {first_needed}; block sync is waiting"
+                "Every peer ahead of this node has pruned block {}, and too few peers corroborate it to shut down \
+                automatically. Sync will not progress unless a peer that retains the block connects: restart the \
+                node to sync from the CDN, or restore a recent ledger snapshot.",
+                height.saturating_add(1)
             );
-        } else if !all_pruned {
-            self.warned_all_peers_pruned.store(false, Ordering::Relaxed);
         }
     }
 
@@ -1917,7 +1912,7 @@ mod tests {
             prepare_requests_lock: Default::default(),
             last_response_at: Default::default(),
             stuck_since: Default::default(),
-            warned_all_peers_pruned: Default::default(),
+            last_pruned_peers_warning: Default::default(),
         }
     }
 
@@ -2522,6 +2517,20 @@ mod tests {
             assert!(sync.prepare_block_requests().is_empty());
             assert_eq!(sync.sync_stuck_below_peer_floors().is_some(), armed, "{num_pruned} pruned, {num_level} level");
         }
+    }
+
+    /// Tests that too few peers to arm the stuck signal, all ahead and pruned, raise the warning
+    /// instead, and that a peer that retains the needed blocks clears it.
+    #[test]
+    fn test_pruned_peers_without_majority_warn() {
+        let sync = sample_sync_at_height(1_000);
+        add_peers(&sync, 1, 1, 1_000 + 2 * AUTHORITY_RETENTION_BLOCKS);
+        assert!(sync.sync_stuck_below_peer_floors().is_none());
+        assert!(sync.last_pruned_peers_warning.lock().is_some());
+
+        add_peers(&sync, 2, 1, 1_000 + AUTHORITY_RETENTION_BLOCKS);
+        assert!(sync.sync_stuck_below_peer_floors().is_none());
+        assert!(sync.last_pruned_peers_warning.lock().is_none());
     }
 
     /// Tests that a sync height left behind the ledger (e.g. after CDN sync) does not make peers that
