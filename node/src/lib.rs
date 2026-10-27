@@ -53,7 +53,7 @@ pub use traits::*;
 use snarkos_node_cdn::{CdnBlockSync, CdnSyncOutcome};
 use snarkos_node_sync::{BlockSync, STUCK_SYNC_SHUTDOWN_THRESHOLD};
 use snarkos_utilities::SignalHandler;
-use snarkvm::prelude::Network;
+use snarkvm::{prelude::Network, utilities::flatten_error};
 
 use aleo_std::StorageMode;
 use anyhow::{Context, Result};
@@ -95,7 +95,10 @@ pub async fn wait_for_cdn(cdn_sync: Option<Arc<CdnBlockSync>>) -> Result<CdnFall
     Ok(match cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN")? {
         CdnSyncOutcome::Synced(_) => CdnFallback::Available,
         CdnSyncOutcome::NothingNew => CdnFallback::Behind,
-        CdnSyncOutcome::Failed(..) => CdnFallback::Failed,
+        CdnSyncOutcome::Failed(height, error) => {
+            warn!("{}", flatten_error(error.context(format!("The startup CDN sync stopped at block {height}"))));
+            CdnFallback::Failed
+        }
     })
 }
 

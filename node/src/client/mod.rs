@@ -239,8 +239,9 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
                 return Err(error);
             }
         };
-        // Blocks added by CDN sync do not pass through block sync, so record them.
+        // Blocks added by CDN sync do not pass through block sync, so record and advertise them.
         node.sync.set_sync_height(ledger.latest_height());
+        node.ping.update_block_locators(node.sync.get_block_locators()?);
 
         // Initialize the routing.
         node.initialize_routing().await;

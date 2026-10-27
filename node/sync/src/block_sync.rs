@@ -127,7 +127,9 @@ pub fn blocks_or_empty<N: Network>(
     latest_height: u32,
     get_blocks: impl FnOnce() -> Result<Vec<Block<N>>>,
 ) -> DataBlocks<N> {
-    if start_height > 0 && start_height < oldest_retained_authority_height(latest_height) {
+    // Genesis is never pruned, so a range from 0 is checked from block 1.
+    let first_prunable = start_height.max(1);
+    if end_height > first_prunable && first_prunable < oldest_retained_authority_height(latest_height) {
         debug!("Cannot serve block request {start_height}..{end_height} - below the retention window");
         return DataBlocks(vec![]);
     }
@@ -1166,9 +1168,12 @@ impl<N: Network> BlockSync<N> {
 
             print_requests();
             vec![]
-        } else if let Some((sync_peers, min_common_ancestor)) =
-            self.find_sync_peers_inner(current_height, Some(self.retention_height().saturating_add(1)))
-        {
+        } else if let Some((sync_peers, min_common_ancestor)) = {
+            let first_needed = self.retention_height().saturating_add(1);
+            let sync_peers = self.find_sync_peers_inner(current_height, Some(first_needed));
+            self.warn_once_if_all_peers_pruned(sync_peers.is_none(), current_height, first_needed);
+            sync_peers
+        } {
             // Retrieve the greatest block height of any connected peer.
             // We do not need to update the sync state here, as that already happens when the block locators are received.
             let greatest_peer_height = sync_peers.values().map(|l| l.latest_locator_height()).max().unwrap_or(0);
@@ -1235,8 +1240,7 @@ impl<N: Network> BlockSync<N> {
     pub fn sync_stuck_below_peer_floors(&self) -> Option<Duration> {
         // The majority rule leaves no peer eligible for new requests, so only existing requests need
         // a separate check: one still awaiting a response, or one for the next block, means sync can
-        // still progress. Answered requests above an unservable gap do not count. The sync height is
-        // what request generation starts from.
+        // still progress. Answered requests above an unservable gap do not count.
         let height = self.retention_height();
         let can_progress = {
             let requests = self.requests.read();
@@ -1269,6 +1273,25 @@ impl<N: Network> BlockSync<N> {
     /// TODO(kaimast): remove this public function once the sync logic is fully unified `BlockSync`.
     pub fn count_request_completed(&self) {
         self.metrics.count_request_completed();
+    }
+
+    /// Warns once, until request building next finds peers, when there are peers ahead of
+    /// `current_height` but all are assumed to have pruned `first_needed`. Fewer peers than the stuck
+    /// detector needs are not otherwise reported.
+    fn warn_once_if_all_peers_pruned(&self, no_sync_peers: bool, current_height: u32, first_needed: u32) {
+        let all_pruned = no_sync_peers && {
+            let locators = self.locators.read();
+            let mut tips_ahead =
+                locators.values().map(|locators| locators.latest_locator_height()).filter(|&tip| tip > current_height);
+            tips_ahead.clone().next().is_some() && tips_ahead.all(|tip| !peer_can_serve(tip, first_needed))
+        };
+        if all_pruned && !self.warned_all_peers_pruned.swap(true, Ordering::Relaxed) {
+            warn!(
+                "Every peer ahead of this node is assumed to have pruned block {first_needed}; block sync is waiting"
+            );
+        } else if !all_pruned {
+            self.warned_all_peers_pruned.store(false, Ordering::Relaxed);
+        }
     }
 
     /// Returns the height whose successor the retention floor is checked against: the higher of the
@@ -1593,32 +1616,18 @@ impl<N: Network> BlockSync<N> {
         // Pick a set of peers above the latest ledger height, and include their locators.
         // This will sort the peers by locator height in descending order.
         // Peers assumed to have pruned the authority data of the first needed block are excluded.
-        let mut num_pruned = 0;
         let candidate_locators: IndexMap<_, _> = self
             .locators
             .read()
             .iter()
             .filter(|(_, locators)| {
                 let peer_tip = locators.latest_locator_height();
-                let can_serve = first_needed.is_none_or(|height| peer_can_serve(peer_tip, height));
-                num_pruned += usize::from(peer_tip > current_height && !can_serve);
-                peer_tip > current_height && can_serve
+                peer_tip > current_height && first_needed.is_none_or(|height| peer_can_serve(peer_tip, height))
             })
             .sorted_by(|(_, a), (_, b)| b.latest_locator_height().cmp(&a.latest_locator_height()))
             .take(NUM_SYNC_CANDIDATE_PEERS)
             .map(|(peer_ip, locators)| (*peer_ip, locators.clone()))
             .collect();
-
-        // Warn once when every peer ahead is assumed to have pruned the first needed block.
-        let all_pruned = candidate_locators.is_empty() && num_pruned > 0;
-        if let Some(first_needed) = first_needed
-            && self.warned_all_peers_pruned.swap(all_pruned, Ordering::Relaxed) != all_pruned
-            && all_pruned
-        {
-            warn!(
-                "Every peer ahead of this node is assumed to have pruned block {first_needed}; block sync is waiting"
-            );
-        }
 
         // Case 0: If there are no candidate peers, return `None`.
         if candidate_locators.is_empty() {

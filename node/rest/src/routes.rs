@@ -362,24 +362,31 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         // Manually parse the height or the height of the hash, axum doesn't support different types
         // for the same path param.
         let latest_height = rest.ledger.latest_height();
-        let hash = if let Ok(height) = height_or_hash.parse::<u32>() {
+        let (hash, is_hash_input) = if let Ok(height) = height_or_hash.parse::<u32>() {
             check_block_retained(height, latest_height)?;
-            rest.ledger
+            let hash = rest
+                .ledger
                 .get_hash(height)
                 .with_context(|| "Failed to get a block's hash")
-                .map_err(map_missing_resource_error)?
+                .map_err(map_missing_resource_error)?;
+            (hash, false)
         } else if let Ok(hash) = height_or_hash.parse::<N::BlockHash>() {
-            // Report a pruned block as gone, even if it is still cached. Only a pruning node needs the
-            // lookup; a hash it does not know falls through to the 404 below.
-            if oldest_retained_authority_height(latest_height) > 1
-                && let Ok(height) = rest.ledger.get_height(&hash)
-            {
-                check_block_retained(height, latest_height)?;
-            }
-            hash
+            (hash, true)
         } else {
             return Err(RestError::bad_request(anyhow!("invalid input: neither a block height nor a block hash")));
         };
+
+        // Report a pruned block as gone, even if it is still cached. Only a pruning node needs the
+        // lookup; a hash it does not know falls through to the 404 below.
+        if is_hash_input && oldest_retained_authority_height(latest_height) > 1 {
+            let ledger = rest.ledger.clone();
+            let height = tokio::task::spawn_blocking(move || ledger.get_height(&hash))
+                .await
+                .map_err(|e| RestError::internal_server_error(anyhow!("tokio error: {e}")))?;
+            if let Ok(height) = height {
+                check_block_retained(height, latest_height)?;
+            }
+        }
 
         // Attempt to find a serialized block in the cache.
         if let Some(json_block) = rest.block_cache.lock().get(&hash) {
@@ -392,10 +399,9 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             .map_err(|e| RestError::internal_server_error(anyhow!("tokio error: {e}")))?;
         match block {
             Ok(Some(block)) => Ok(ErasedJson::new(block)),
-            Ok(None) | Err(_) => {
-                if let Err(e) = block {
-                    error!("Couldn't find a block: {e}");
-                }
+            Ok(None) => Err(RestError::not_found(anyhow!("Couldn't find block {height_or_hash}"))),
+            Err(e) => {
+                error!("Couldn't find a block: {e}");
                 Err(RestError::not_found(anyhow!("Couldn't find block {height_or_hash}")))
             }
         }
