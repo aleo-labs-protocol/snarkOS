@@ -111,7 +111,7 @@ fn peer_can_serve(peer_tip: u32, height: u32) -> bool {
 /// Returns the blocks to answer a block request for `start_height..end_height` with: the blocks
 /// from `get_blocks`, or none if this node cannot serve the range (see
 /// [`DataBlocks::ensure_response_is_well_formed`]). A range below this node's retention window is
-/// answered empty without reading storage.
+/// answered empty without reading storage. A read error within the window is logged as a warning.
 pub fn blocks_or_empty<N: Network>(
     start_height: u32,
     end_height: u32,
@@ -125,7 +125,12 @@ pub fn blocks_or_empty<N: Network>(
         return DataBlocks(vec![]);
     }
     get_blocks().map(DataBlocks).unwrap_or_else(|error| {
-        debug!("Cannot serve block request {start_height}..{end_height} - {}", flatten_error(&error));
+        // A range within this node's window should be readable, so a failure there is a storage problem.
+        if end_height <= latest_height.saturating_add(1) {
+            warn!("Failed to read blocks {start_height}..{end_height} for a block request - {}", flatten_error(&error));
+        } else {
+            debug!("Cannot serve block request {start_height}..{end_height} - {}", flatten_error(&error));
+        }
         DataBlocks(vec![])
     })
 }
