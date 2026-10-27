@@ -220,7 +220,8 @@ pub async fn load_blocks<N: Network>(
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                     if stoppable.is_stopped() {
-                        return Err((start_height, error));
+                        info!("Stopping block sync before fetching the CDN height - shutting down");
+                        return Ok(start_height.saturating_sub(1));
                     }
                 }
                 Err(error) => return Err((start_height, error)),
