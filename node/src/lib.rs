@@ -81,7 +81,7 @@ pub fn log_clean_error(storage_mode: &StorageMode) {
 pub enum CdnFallback {
     /// The startup CDN sync completed, so a restart repeats it and fills the gap.
     Available,
-    /// CDN sync is disabled (`--nocdn` or `--dev`).
+    /// CDN sync is disabled (`--nocdn`, or `--dev` without `--cdn`).
     Disabled,
     /// The startup CDN sync failed, so a restart may fail the same way.
     Failed,

@@ -422,7 +422,7 @@ The following are the options for the `snarkos start` command:
           For validators, it also contains the latest proposal cache, which is required to participate in consensus.
 
       --cdn <CDN>
-          Enables the node to prefetch initial blocks from a CDN
+          Enables the node to prefetch initial blocks from a CDN, also with `--dev` (which otherwise disables it)
 
       --nocdn
           If the flag is set, the node will not prefetch from a CDN
