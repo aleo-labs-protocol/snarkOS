@@ -436,15 +436,16 @@ impl<N: Network> Consensus<N> {
                 // The queue returns an error only when it is full.
                 Err(_) => "rejected_pool_full",
             });
-            insertion?;
+            // A duplicate was counted and tracked when its first copy was queued.
             #[cfg(feature = "metrics")]
-            {
+            if matches!(insertion, Ok(QueueInsertion::Inserted | QueueInsertion::InsertedWithEviction)) {
                 metrics::increment_gauge(metrics::consensus::UNCONFIRMED_TRANSACTIONS, 1f64);
                 let timestamp = snarkos_node_bft::helpers::now();
                 self.transmissions_tracker
                     .lock()
                     .insert(TransmissionID::Transaction(transaction_id, checksum), timestamp);
             }
+            insertion?;
             trace!("Received unconfirmed transaction '{}' in the queue", fmt_id(transaction_id));
         }
 
