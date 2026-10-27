@@ -292,7 +292,6 @@ pub struct BlockSync<N: Network> {
     /// This map is used to determine which peers to request blocks from.
     ///
     /// Lock ordering: when locking both, `common_ancestors` and `locators`, `common_ancestors` must be locked first.
-    /// `locators` is locked before `peer_pruning`.
     common_ancestors: RwLock<IndexMap<PeerPair, u32>>,
 
     /// The block requests in progress and their responses.
@@ -335,8 +334,12 @@ pub struct BlockSync<N: Network> {
     /// peers corroborate it for [`Self::sync_stuck_below_peer_floors`] to report sync as stuck.
     last_pruned_peers_warning: Mutex<Option<Instant>>,
 
-    /// What was learned about each peer's pruning from its empty block responses. Updated while
-    /// holding `prepare_requests_lock`, so that a prepared batch is checked against it before sending.
+    /// What was learned about each peer's pruning from its empty block responses.
+    ///
+    /// Locking: `peer_pruning` is locked after `locators` (and after `prepare_requests_lock`). An entry
+    /// is only created while holding `locators` and seeing the peer in it, so that it cannot outlive
+    /// `remove_peer`. A floor that rises after `select_sync_ips` read it costs one more empty response
+    /// below the new floor, which is not a strike.
     peer_pruning: Mutex<HashMap<SocketAddr, PeerPruning>>,
 
     /// Whether the node only connects to trusted peers (see [`Self::sync_stuck_below_peer_floors`]).
@@ -449,11 +452,6 @@ impl<N: Network> BlockSync<N> {
         self.requests.read().len()
     }
 
-    /// Returns the latest locator height of the given peer.
-    fn get_peer_height(&self, peer_ip: &SocketAddr) -> Option<u32> {
-        self.locators.read().get(peer_ip).map(|locators| locators.latest_locator_height())
-    }
-
     //// Returns the latest locator height for all known peers.
     pub fn get_peer_heights(&self) -> HashMap<SocketAddr, u32> {
         self.locators.read().iter().map(|(addr, locators)| (*addr, locators.latest_locator_height())).collect()
@@ -490,6 +488,11 @@ impl<N: Network> BlockSync<N> {
 // Helper functions needed for testing
 #[cfg(test)]
 impl<N: Network> BlockSync<N> {
+    /// Returns the latest locator height of the given peer.
+    fn get_peer_height(&self, peer_ip: &SocketAddr) -> Option<u32> {
+        self.locators.read().get(peer_ip).map(|locators| locators.latest_locator_height())
+    }
+
     /// Returns the common ancestor for the given peer pair, if it exists.
     fn get_common_ancestor(&self, peer_a: SocketAddr, peer_b: SocketAddr) -> Option<u32> {
         self.common_ancestors.read().get(&PeerPair(peer_a, peer_b)).copied()
@@ -575,8 +578,8 @@ impl<N: Network> BlockSync<N> {
         // Calculate the end height.
         let end_height = start_height.saturating_add(requests.len() as u32);
 
-        // Hold `prepare_requests_lock` (shared with remove_peer and empty responses), so that selecting
-        // peers that can still serve the batch and inserting the requests are atomic.
+        // Hold `prepare_requests_lock` (shared with remove_peer), so that selecting peers that are
+        // still connected and inserting the requests are atomic.
         let sync_ips = {
             let _prepare_requests_lock = self.prepare_requests_lock.lock();
             let Some(sync_ips) = self.select_sync_ips(sync_peers, start_height, max_num_sync_ips) else {
@@ -780,8 +783,9 @@ impl<N: Network> BlockSync<N> {
     /// peer claims to hold, and counts as a strike.
     fn record_empty_block_response(&self, peer_ip: SocketAddr, start_height: u32) -> InsertBlockResponseError<N> {
         let height = start_height;
-        let _prepare_requests_lock = self.prepare_requests_lock.lock();
-        let Some(tip) = self.get_peer_height(&peer_ip) else {
+        // Holding `locators` keeps a concurrent `remove_peer` from leaving this peer's entry behind.
+        let locators = self.locators.read();
+        let Some(tip) = locators.get(&peer_ip).map(|locators| locators.latest_locator_height()) else {
             return InsertBlockResponseError::EmptyBlockResponse;
         };
         let mut peer_pruning = self.peer_pruning.lock();
