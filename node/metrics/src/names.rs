@@ -132,7 +132,7 @@ pub mod consensus {
     pub const VERSION: &str = "snarkos_consensus_version";
     /// `1` while validators holding the availability threshold of stake run a consensus version
     /// earlier than this build does, and `0` otherwise. This build may lack the version, or schedule
-    /// it at a later height; either way it stops at the required height.
+    /// it at a later height; either way it stops 100 blocks before the required height.
     pub const NEEDS_UPGRADE: &str = "snarkos_consensus_needs_upgrade";
     /// The height at which validators run the consensus version this build lacks, or `0`.
     pub const REQUIRED_UPGRADE_HEIGHT: &str = "snarkos_consensus_required_upgrade_height";

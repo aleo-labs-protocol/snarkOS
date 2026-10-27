@@ -588,15 +588,6 @@ impl<N: Network> Consensus<N> {
         transmissions: IndexMap<TransmissionID<N>, Transmission<N>>,
         callback: oneshot::Sender<Result<bool>>,
     ) {
-        // Build no block while validators may run a consensus version this build lacks.
-        // The BFT retries the subdag with its next commit.
-        let next_height = self.ledger.latest_block_height().saturating_add(1);
-        if let Err(error) = self.bft.primary().gateway().ensure_block_may_be_built(next_height) {
-            self.reinsert_transmissions(transmissions).await;
-            callback.send(Err(error)).ok();
-            return;
-        }
-
         // Try to advance to the next block.
         let self_ = self.clone();
         let transmissions_ = transmissions.clone();
@@ -695,7 +686,9 @@ impl<N: Network> Consensus<N> {
 
         let block_height = block.height();
 
-        // The ledger may have advanced between the check in `process_bft_subdag` and this update.
+        // Build no block while validators may run a consensus version this build lacks. The BFT
+        // retries the subdag with its next commit. A subdag that the ledger already passed has
+        // returned `Ok(false)` above, which lets the BFT mark it as committed.
         self.bft.primary().gateway().ensure_block_may_be_built(block_height)?;
 
         // Advance to the next block.

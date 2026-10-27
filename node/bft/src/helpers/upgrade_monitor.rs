@@ -180,15 +180,16 @@ impl UpgradeStatus {
             Self::Clear | Self::Scheduled(_) => None,
         }
     }
+}
 
-    /// Returns the values of the `needs_upgrade`, `required_upgrade_height` and
-    /// `required_upgrade_version` metrics. An upgrade counts as soon as it is scheduled, so that
-    /// operators can act before this build stops.
-    pub fn metric_values(&self) -> (u8, u32, u16) {
-        match self {
-            Self::Clear => (0, 0, 0),
-            Self::Scheduled(required) | Self::Required(required) => (1, required.height, required.consensus_version),
-        }
+/// The values of the `needs_upgrade`, `required_upgrade_height` and `required_upgrade_version`
+/// metrics. An upgrade counts as soon as it is scheduled, so that operators can act before this
+/// build stops, and a record counts while it holds back blocks.
+fn metric_values(status: UpgradeStatus, recorded: Option<RequiredUpgrade>) -> (u8, u32, u16) {
+    match (status, recorded) {
+        (UpgradeStatus::Scheduled(required) | UpgradeStatus::Required(required), _)
+        | (UpgradeStatus::Clear, Some(required)) => (1, required.height, required.consensus_version),
+        (UpgradeStatus::Clear, None) => (0, 0, 0),
     }
 }
 
@@ -203,6 +204,8 @@ struct State<N: Network> {
     recorded: Option<RequiredUpgrade>,
     /// When the monitor last asked for the scheduled upgrade to be logged.
     warned_at: Option<Instant>,
+    /// The metric values last published, which start at those of `Clear` without a record.
+    metrics: (u8, u32, u16),
 }
 
 /// Tracks the consensus schedules of validators, and decides whether this build may build a block.
@@ -258,7 +261,7 @@ impl<N: Network> UpgradeMonitor<N> {
                 Some(unreadable)
             }
         };
-        let state = State { schedules: Default::default(), recorded, warned_at: None };
+        let state = State { schedules: Default::default(), recorded, warned_at: None, metrics: (0, 0, 0) };
         Self { address, own, record_path, state: Mutex::new(state), status: watch::Sender::new(UpgradeStatus::Clear) }
     }
 
@@ -312,18 +315,18 @@ impl<N: Network> UpgradeMonitor<N> {
             }
             None => UpgradeStatus::Clear,
         };
-        // The metrics start at the values of `Clear`, so they only change with the status.
-        if self.status.send_if_modified(|current| std::mem::replace(current, status) != status) {
+        self.status.send_if_modified(|current| std::mem::replace(current, status) != status);
+        let metrics = metric_values(status, state.recorded);
+        if std::mem::replace(&mut state.metrics, metrics) != metrics {
             #[cfg(feature = "metrics")]
-            Self::publish_metrics(status);
+            Self::publish_metrics(metrics);
         }
         status
     }
 
     /// Sets the metrics that let operators alert on an upgrade that validators require of this build.
     #[cfg(feature = "metrics")]
-    fn publish_metrics(status: UpgradeStatus) {
-        let (needs_upgrade, height, consensus_version) = status.metric_values();
+    fn publish_metrics((needs_upgrade, height, consensus_version): (u8, u32, u16)) {
         metrics::gauge(metrics::consensus::NEEDS_UPGRADE, needs_upgrade);
         metrics::gauge(metrics::consensus::REQUIRED_UPGRADE_HEIGHT, height);
         metrics::gauge(metrics::consensus::REQUIRED_UPGRADE_VERSION, consensus_version);
@@ -778,13 +781,31 @@ mod tests {
     fn the_metrics_report_an_upgrade_from_when_it_is_scheduled() {
         let Fixture { committee, addresses, dir: _dir, monitor } = setup();
         let connected = connected(&addresses);
-        assert_eq!(monitor.update(&committee, &connected, H - 1).metric_values(), (0, 0, 0));
+        let stop = required(H).stop_height();
+        monitor.update(&committee, &connected, stop - 1);
+        assert_eq!(monitor.state.lock().metrics, (0, 0, 0));
 
         two_ahead_at(&monitor, &addresses, H);
         let expected = (1, H, next_version());
-        assert_eq!(monitor.update(&committee, &connected, H - 1).metric_values(), expected);
-        assert_eq!(monitor.update(&committee, &connected, H).metric_values(), expected);
-        assert!(matches!(monitor.status(), UpgradeStatus::Required(_)));
+        assert_eq!(monitor.update(&committee, &connected, stop - 1), UpgradeStatus::Scheduled(required(H)));
+        assert_eq!(monitor.state.lock().metrics, expected);
+        assert_eq!(monitor.update(&committee, &connected, stop), UpgradeStatus::Required(required(H)));
+        assert_eq!(monitor.state.lock().metrics, expected);
+    }
+
+    #[test]
+    fn the_metrics_report_a_record_until_it_is_refuted() {
+        let (committee, addresses) = sample_committee();
+        let dir = RecordDir::new();
+        dir.write(&required(H).to_bytes_le().unwrap());
+        let monitor = monitor(&addresses, &dir);
+
+        assert_eq!(monitor.update(&committee, &HashSet::new(), 1), UpgradeStatus::Clear);
+        assert_eq!(monitor.state.lock().metrics, (1, H, next_version()));
+
+        monitor.record_schedule(addresses[0], Some(&own_schedule()));
+        monitor.update(&committee, &connected(&addresses[..2]), 1);
+        assert_eq!(monitor.state.lock().metrics, (0, 0, 0));
     }
 
     #[test]

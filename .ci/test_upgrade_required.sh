@@ -2,10 +2,10 @@
 
 ####################################################
 # Runs a devnet in which one validator lacks the next consensus version.
-# Checks that the outdated validator warns as soon as it connects, keeps building blocks up to the
-# activation height, and then exits with an error and without forking. Checks the same exit on
-# every restart, with or without its record of the required upgrade. Then checks that it rejoins
-# the network once upgraded, and that it discards a record no validator confirms.
+# Checks that the outdated validator warns as soon as it connects, keeps building blocks up to 100
+# blocks before the activation height, and then exits with an error and without forking. Checks the
+# same exit on every restart, with or without its record of the required upgrade. Then checks that
+# it rejoins the network once upgraded, and that it discards a record no validator confirms.
 ####################################################
 
 set -eo pipefail
@@ -180,7 +180,7 @@ done
 
 wait_for_nodes "$total_validators" 0 "$network_name" 180
 
-# The outdated validator warns as soon as it connects, and builds blocks until the activation height.
+# The outdated validator warns as soon as it connects, and builds blocks until the stop height.
 expect_outdated_exit "first run" "$log_dir/validator-$outdated_validator.log" $((stop_height - 5))
 if [[ -z "$warned_height" ]] || (( warned_height >= stop_height - 10 )); then
   fail "The outdated validator first warned at height '$warned_height', not well before $stop_height"
