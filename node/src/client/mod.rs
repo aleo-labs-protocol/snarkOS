@@ -365,15 +365,13 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
                     let _node = node.clone();
                     // For each solution, spawn a task to verify it.
                     tokio::task::spawn_blocking(move || {
-                        // Retrieve the latest epoch hash.
-                        if let Ok(epoch_hash) = _node.ledger.latest_epoch_hash() {
-                            // Check if the prover has reached their solution limit.
-                            // While snarkVM will ultimately abort any excess solutions for safety, performing this check
-                            // here prevents the to-be aborted solutions from propagating through the network.
-                            let prover_address = solution.address();
-                            if _node.ledger.is_solution_limit_reached(&prover_address, 0) {
-                                debug!("Invalid Solution '{}' - Prover '{prover_address}' has reached their solution limit for the current epoch", fmt_id(solution.id()));
-                            }
+                        // Check if the prover has reached their solution limit.
+                        // While snarkVM will ultimately abort any excess solutions for safety, performing this check
+                        // here prevents the to-be aborted solutions from propagating through the network.
+                        let prover_address = solution.address();
+                        if _node.ledger.is_solution_limit_reached(&prover_address, 0) {
+                            debug!("Invalid Solution '{}' - Prover '{prover_address}' has reached their solution limit for the current epoch", fmt_id(solution.id()));
+                        } else if let Ok(epoch_hash) = _node.ledger.latest_epoch_hash() {
                             // Retrieve the latest proof target.
                             let proof_target = _node.ledger.latest_block().header().proof_target();
                             // Ensure that the solution is valid for the given epoch.
