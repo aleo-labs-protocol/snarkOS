@@ -16,7 +16,7 @@
 use super::*;
 use snarkos_node_network::PeerPoolHandling;
 use snarkos_node_router::messages::UnconfirmedSolution;
-use snarkos_node_sync::BftSyncMode;
+use snarkos_node_sync::{BftSyncMode, range_below_retention_window};
 use snarkvm::{
     ledger::{puzzle::Solution, store::oldest_retained_authority_height},
     prelude::{
@@ -129,7 +129,11 @@ fn check_block_retained(height: u32, latest_height: u32) -> Result<(), RestError
 /// Returns a `410 Gone` if the non-empty range `start..end` reaches below this node's authority
 /// retention window (see [`check_block_retained`]).
 fn check_range_retained(start: u32, end: u32, latest_height: u32) -> Result<(), RestError> {
-    if start < end && end > 1 { check_block_retained(start.max(1), latest_height) } else { Ok(()) }
+    if range_below_retention_window(start, end, latest_height) {
+        check_block_retained(start.max(1), latest_height)
+    } else {
+        Ok(())
+    }
 }
 
 /// Deserialize a CSV string into a vector of strings.

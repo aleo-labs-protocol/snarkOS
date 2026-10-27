@@ -112,6 +112,13 @@ fn peer_can_serve(peer_tip: u32, height: u32) -> bool {
     peer_tip.saturating_sub(AUTHORITY_RETENTION_BLOCKS - 1) <= height
 }
 
+/// Returns `true` if the range `start_height..end_height` reaches below this node's authority
+/// retention window when its tip is `latest_height`. Genesis is never pruned.
+pub fn range_below_retention_window(start_height: u32, end_height: u32, latest_height: u32) -> bool {
+    let first_prunable = start_height.max(1);
+    end_height > first_prunable && first_prunable < oldest_retained_authority_height(latest_height)
+}
+
 /// Returns the blocks to answer a block request for `start_height..end_height` with: the blocks
 /// from `get_blocks`, or none if this node cannot serve the range (see
 /// [`DataBlocks::ensure_response_is_well_formed`]). A range below this node's retention window is
@@ -122,9 +129,7 @@ pub fn blocks_or_empty<N: Network>(
     latest_height: u32,
     get_blocks: impl FnOnce() -> Result<Vec<Block<N>>>,
 ) -> DataBlocks<N> {
-    // Genesis is never pruned, so a range from 0 is checked from block 1.
-    let first_prunable = start_height.max(1);
-    if end_height > first_prunable && first_prunable < oldest_retained_authority_height(latest_height) {
+    if range_below_retention_window(start_height, end_height, latest_height) {
         debug!("Cannot serve block request {start_height}..{end_height} - below the retention window");
         return DataBlocks(vec![]);
     }
