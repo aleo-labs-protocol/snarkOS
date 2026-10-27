@@ -1149,7 +1149,7 @@ impl<N: Network> BlockSync<N> {
             print_requests();
             vec![]
         } else if let Some((sync_peers, min_common_ancestor)) =
-            self.find_sync_peers_inner(current_height, Some(current_height.saturating_add(1)))
+            self.find_sync_peers_inner(current_height, Some(self.retention_height().saturating_add(1)))
         {
             // Retrieve the greatest block height of any connected peer.
             // We do not need to update the sync state here, as that already happens when the block locators are received.
@@ -1216,7 +1216,7 @@ impl<N: Network> BlockSync<N> {
         // a separate check: one still awaiting a response, or one for the next block, means sync can
         // still progress. Answered requests above an unservable gap do not count. The sync height is
         // what request generation starts from.
-        let height = self.get_sync_height();
+        let height = self.retention_height();
         let can_progress =
             self.num_outstanding_block_requests() > 0 || self.requests.read().contains_key(&height.saturating_add(1));
         let is_stuck = !can_progress && self.needed_blocks_pruned_by_peer_majority(height);
@@ -1248,6 +1248,13 @@ impl<N: Network> BlockSync<N> {
     /// TODO(kaimast): remove this public function once the sync logic is fully unified `BlockSync`.
     pub fn count_request_completed(&self) {
         self.metrics.count_request_completed();
+    }
+
+    /// Returns the height whose successor the retention floor is checked against: the higher of the
+    /// ledger and sync heights, so that a sync height not yet updated after blocks were added by
+    /// other means (e.g. CDN sync) cannot make every peer look pruned.
+    fn retention_height(&self) -> u32 {
+        self.ledger.latest_block_height().max(self.get_sync_height())
     }
 
     /// Set the sync height to a the given value.
@@ -2456,6 +2463,19 @@ mod tests {
             assert!(sync.prepare_block_requests().is_empty());
             assert_eq!(sync.sync_stuck_below_peer_floors().is_some(), armed, "{num_pruned} pruned, {num_level} level");
         }
+    }
+
+    /// Tests that a sync height left behind the ledger (e.g. after CDN sync) does not make peers that
+    /// retain the next ledger block look pruned.
+    #[test]
+    fn test_stale_sync_height_uses_ledger_height() {
+        let sync = BlockSync::<CurrentNetwork>::new(Arc::new(sample_ledger_service(0)), ConnectionMode::Router);
+        let sync = BlockSync { ledger: Arc::new(sample_ledger_service(1_000)), ..sync };
+        assert_eq!(sync.get_sync_height(), 0);
+        add_peers(&sync, 1, STUCK_SYNC_MINIMUM_PEERS, 1_000 + AUTHORITY_RETENTION_BLOCKS);
+
+        assert!(!sync.prepare_block_requests().is_empty());
+        assert!(sync.sync_stuck_below_peer_floors().is_none());
     }
 
     /// Tests that requests already answered, but waiting on an unservable gap below them, do not
