@@ -177,6 +177,7 @@ impl TestNetwork {
                     false,
                     NodeDataDir::new_test(None),
                     None,
+                    1,
                 )
                 .unwrap();
                 (bft.primary().clone(), Some(bft))
@@ -191,6 +192,7 @@ impl TestNetwork {
                     false,
                     NodeDataDir::new_test(None),
                     None,
+                    1,
                 )
                 .unwrap();
                 (primary, None)
@@ -261,7 +263,7 @@ impl TestNetwork {
 
     // Connects all nodes to each other.
     pub async fn connect_all(&self) {
-        for (validator, other_validator) in self.validators.values().tuple_combinations() {
+        for [validator, other_validator] in self.validators.values().array_combinations() {
             // Connect to the node.
             let ip = other_validator.primary.gateway().local_ip();
             let _ = validator.primary.gateway().connect(ip);

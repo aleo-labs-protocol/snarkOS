@@ -317,22 +317,58 @@ fn bench_mapping_lookups(c: &mut Criterion) {
     group.finish();
 }
 
+/// Advances `ledger` to the latest consensus version with empty blocks.
+///
+/// A ledger at genesis is at `ConsensusVersion::V1`, which verifies with Varuna V1, a verifier the
+/// network no longer runs. Under `test_consensus_heights` each version from V2 onward lasts one
+/// block, so only the latest version stays put across the blocks a benchmark adds.
+#[cfg(feature = "test_consensus_heights")]
+fn advance_to_latest(
+    ledger: &Ledger<CurrentNetwork, CurrentStorage>,
+    private_key: &PrivateKey<CurrentNetwork>,
+    rng: &mut TestRng,
+) {
+    let latest = ConsensusVersion::latest();
+    let target = CurrentNetwork::CONSENSUS_HEIGHT(latest).unwrap();
+    while ledger.latest_height() < target {
+        let block = ledger.prepare_advance_to_next_beacon_block(private_key, vec![], vec![], vec![], rng).unwrap();
+        ledger.advance_to_next_block(&block).unwrap();
+    }
+    let consensus_version = CurrentNetwork::CONSENSUS_VERSION(ledger.latest_height()).unwrap();
+    assert_eq!(consensus_version, latest, "height {} is {consensus_version:?}", ledger.latest_height());
+    eprintln!(
+        "transaction_verification: height {}, {consensus_version:?}, Varuna {:?}",
+        ledger.latest_height(),
+        snarkvm::console::network::varuna_version_from_consensus(consensus_version)
+    );
+}
+
 /// Benchmarks `check_transaction_basic` (called from `transaction_broadcast`) for a deploy and an
-/// execute transaction, mirroring what snarkVM's own `ledger/benches/transaction.rs` measures for
-/// `vm.check_transaction` -- `Ledger::check_transaction_basic` just forwards to it.
+/// execute transaction, mirroring snarkVM's `cached_verify` benches in `ledger/benches/transaction.rs`
+/// -- `Ledger::check_transaction_basic` forwards to `vm.check_transaction`. Each ledger is first
+/// advanced to the latest consensus version, so the verifier is the one the network runs.
+///
+/// `vm.check_transaction` caches each transaction it accepts and skips proof verification on a
+/// repeat, so after the first iteration these benches time a cache hit, not verification. snarkVM's
+/// `ledger/benches/verify_transaction.rs` times verification itself.
 ///
 /// Each transaction is built fresh, checked, but never applied to its ledger. Both pay with a
 /// public fee, not a fee record -- see the comment on the equivalent deploy in
 /// `build_chain_fixture` for why.
+#[cfg(feature = "test_consensus_heights")]
 fn bench_transaction_verification(c: &mut Criterion) {
     let mut group = c.benchmark_group("transaction_verification");
 
     {
         let rng = &mut TestRng::default();
         let (ledger, private_key, _records) = fresh_ledger(rng);
+        advance_to_latest(&ledger, &private_key, rng);
         let program = Program::<CurrentNetwork>::from_str(
             r"
 program rest_bench_verify_deploy.aleo;
+
+constructor:
+    assert.eq edition 0u16;
 
 function hello:
     input r0 as u32.private;
@@ -344,7 +380,7 @@ function hello:
         .unwrap();
         let deploy_tx = ledger.vm().deploy(&private_key, &program, None, 600_000, None, rng).unwrap();
 
-        group.bench_function("check_transaction_basic(deploy)", |b| {
+        group.bench_function("check_transaction_basic(deploy) - cached_verify", |b| {
             b.iter(|| ledger.check_transaction_basic(&deploy_tx, None, rng).unwrap())
         });
     }
@@ -352,6 +388,7 @@ function hello:
     {
         let rng = &mut TestRng::default();
         let (ledger, private_key, _records) = fresh_ledger(rng);
+        advance_to_latest(&ledger, &private_key, rng);
         let address = Address::try_from(&private_key).unwrap();
 
         let inputs = [
@@ -369,7 +406,7 @@ function hello:
             .execute_authorization(execute_authorization.replicate(), Some(fee_authorization.replicate()), None, rng)
             .unwrap();
 
-        group.bench_function("check_transaction_basic(execute transfer_public)", |b| {
+        group.bench_function("check_transaction_basic(execute transfer_public) - cached_verify", |b| {
             b.iter(|| ledger.check_transaction_basic(&execute_tx, None, rng).unwrap())
         });
     }
@@ -413,7 +450,12 @@ criterion_group!(
     bench_program_lookups,
     bench_state_path_lookups,
     bench_mapping_lookups,
-    bench_transaction_verification,
     bench_db_backup,
 );
+#[cfg(feature = "test_consensus_heights")]
+criterion_group!(verification, bench_transaction_verification);
+
+#[cfg(feature = "test_consensus_heights")]
+criterion_main!(handlers, verification);
+#[cfg(not(feature = "test_consensus_heights"))]
 criterion_main!(handlers);

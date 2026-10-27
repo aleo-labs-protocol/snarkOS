@@ -27,6 +27,8 @@ MAX_CLIENT_LOG_SIZE_BYTES=$((1 * 1024 * 1024))
 : "${network_id:=0}"
 : "${min_height:=60}" # To likely go past the 100 round garbage collection limit.
 
+tx_file="${TMPDIR:-/tmp}/transfer_public_tx.txt"
+
 # shellcheck source=SCRIPTDIR/utils.sh
 . ./.ci/utils.sh
 
@@ -45,7 +47,7 @@ function exit_handler() {
   # Remove all temporary files and folders
   rm program/program.json program/main.aleo || true
   rm program/txn_data.json program/invalid_txn_data.json || true
-  rm /tmp/transfer_public_tx.txt || true
+  rm "$tx_file" || true
   rmdir program || true
 }
 trap exit_handler EXIT
@@ -152,13 +154,13 @@ snarkos developer execute \
   --query "$query" \
   credits.aleo transfer_public "$recipient" 100u64 \
   --network "$network_id" \
-  --store /tmp/transfer_public_tx.txt \
+  --store "$tx_file" \
   --store-format string
 
 broadcast_body=$(mktemp)
 broadcast_status=$(curl -s -w "%{http_code}" -o "$broadcast_body" -X POST \
   -H "Content-Type: application/json" \
-  --data-binary @/tmp/transfer_public_tx.txt \
+  --data-binary @"$tx_file" \
   "http://$localhost:3030/v2/$network_name/transaction/broadcast?check_transaction=true")
 
 if (( broadcast_status != 200 )); then
@@ -475,8 +477,8 @@ if wait_for_heights 0 $((total_validators+total_clients)) "$min_height" "$networ
   log "🎉 Test passed! All nodes reached minimum height."
 else
   log "❌ Test failed! Not all nodes reached minimum height within 10 minutes."
-  log_validator_logs "$log_dir" "$total_validators" "$total_clients"
-  log_client_logs "$log_dir" "$total_validators" "$total_clients"
+  print_validator_logs "$log_dir" "$total_validators" "$total_clients"
+  print_client_logs "$log_dir" "$total_validators" "$total_clients"
   exit 1
 fi
 

@@ -1377,6 +1377,7 @@ mod tests {
             false,
             NodeDataDir::new_test(None),
             None,
+            1,
         )
         .unwrap();
 
@@ -1446,6 +1447,7 @@ mod tests {
             false,
             NodeDataDir::new_test(None),
             None,
+            1,
         )
         .unwrap();
 
@@ -1537,6 +1539,7 @@ mod tests {
             false,
             NodeDataDir::new_test(None),
             None,
+            1,
         )
         .unwrap();
 
@@ -1622,6 +1625,7 @@ mod tests {
             false,
             NodeDataDir::new_test(None),
             None,
+            1,
         )
         .unwrap();
 
@@ -1704,6 +1708,7 @@ mod tests {
             false,
             NodeDataDir::new_test(None),
             None,
+            1,
         )
         .unwrap();
 

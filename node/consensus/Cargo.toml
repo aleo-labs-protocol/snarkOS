@@ -1,6 +1,6 @@
 [package]
 name = "snarkos-node-consensus"
-version = "4.11.0"
+version = "4.12.0"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "A node consensus for a decentralized operating system"
 homepage = "https://aleo.org"
@@ -43,9 +43,6 @@ workspace = true
 workspace = true
 
 [dependencies.cfg-if]
-workspace = true
-
-[dependencies.colored]
 workspace = true
 
 [dependencies.indexmap]

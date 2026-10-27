@@ -25,7 +25,6 @@ use snarkvm::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use colored::Colorize;
 #[cfg(feature = "locktick")]
 use locktick::{parking_lot::Mutex, tokio::Mutex as TMutex};
 #[cfg(not(feature = "locktick"))]
@@ -400,7 +399,7 @@ async fn download_block_bundles<N: Network>(
                                     Err(idx) => pending_blocks.insert(idx, block),
                                 }
                             }
-                            debug!("Received {ctx} {}", format!("(in {:.2?})", request_time.elapsed()).dimmed());
+                            debug!(dim = true, "Received {ctx} (in {:.2?})", request_time.elapsed());
                             break;
                         }
                         Err(error) => {
@@ -570,10 +569,7 @@ fn log_progress<const OBJECTS_PER_FILE: u32>(
     // Prepare the estimate message (in secs).
     let estimate = format!("(started at height {cdn_start}, est. {time_remaining} remaining)");
     // Log the progress.
-    info!(
-        "Reached {object_name} {current_index} of {cdn_end} - Sync is {sync_percentage}% complete {}",
-        estimate.dimmed()
-    );
+    info!("Reached {object_name} {current_index} of {cdn_end} - Sync is {sync_percentage}% complete {estimate}");
 }
 
 #[cfg(test)]

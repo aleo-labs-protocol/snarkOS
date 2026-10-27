@@ -1,6 +1,6 @@
 [package]
 name = "snarkos-node-router"
-version = "4.11.0"
+version = "4.12.0"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "A node router for a decentralized operating system"
 homepage = "https://aleo.org"
@@ -36,9 +36,6 @@ serial = [ "snarkos-node-bft-ledger-service/serial" ]
 workspace = true
 
 [dependencies.async-trait]
-workspace = true
-
-[dependencies.colored]
 workspace = true
 
 [dependencies.futures]
@@ -117,7 +114,7 @@ workspace = true
 features = [ "codec" ]
 
 [dependencies.tokio-stream]
-version = "=0.1"
+version = "0.1"
 
 [dependencies.tracing]
 workspace = true

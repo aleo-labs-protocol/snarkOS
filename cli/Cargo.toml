@@ -1,6 +1,6 @@
 [package]
 name = "snarkos-cli"
-version = "4.11.0"
+version = "4.12.0"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "Command-line interface for snarkOS"
 homepage = "https://aleo.org"
@@ -180,7 +180,7 @@ workspace = true
 features = [ "test-helpers" ]
 
 [target."cfg(target_family = \"unix\")".dependencies.nix]
-version = "0.30"
+version = "0.31"
 default-features = false
 features = [ "resource" ]
 

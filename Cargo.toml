@@ -1,6 +1,6 @@
 [package]
 name = "snarkos"
-version = "4.11.0"
+version = "4.12.0"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "A decentralized operating system"
 homepage = "https://aleo.org"
@@ -15,7 +15,7 @@ keywords = [
 categories = [ "cryptography", "cryptography::cryptocurrencies", "os" ]
 license = "Apache-2.0"
 edition = "2024"
-rust-version = "1.96.0" # Attention - The MSRV is pinned in Cargo.toml, rust-toolchain.toml, .circleci/config.yml and .github/workflows/benchmarks.yml; change all of them together.
+rust-version = "1.96.0" # Attention - The MSRV is pinned in Cargo.toml, rust-toolchain.toml and .github/workflows/benchmarks.yml; change all of them together.
 
 [workspace]
 members = [
@@ -48,8 +48,8 @@ default-features = false
 [workspace.dependencies.snarkvm]
 #path = "../snarkVM"
 git = "https://github.com/ProvableHQ/snarkVM.git"
-rev = "c72ff6bf14e54fbfab697daa902b9342dfe36018" #staging + mainnet_4_11_0
-#version = "=4.11.0"
+rev = "9796eb19dee4fd2c671be9b3a1322eda62586991" #staging
+#version = "=4.12.0"
 default-features = false
 
 [workspace.dependencies.anyhow]
@@ -62,7 +62,7 @@ version = "0.1"
 version = "0.8"
 
 [workspace.dependencies.axum-extra]
-version = "0.10"
+version = "0.12"
 
 [workspace.dependencies.base64]
 version = "0.23"
@@ -89,7 +89,7 @@ features = [ "std" ]
 version = "3"
 
 [workspace.dependencies.criterion]
-version = "0.7"
+version = "0.8"
 default-features = false
 features = [ "cargo_bench_support" ]
 
@@ -106,7 +106,7 @@ version = "0.3"
 version = "0.6"
 
 [workspace.dependencies.lru]
-version = "0.18.2"
+version = "0.19.0"
 
 [workspace.dependencies.num_cpus]
 version = "1"
@@ -118,7 +118,6 @@ version = "1"
 version = "0.57.2"
 
 [workspace.dependencies.proptest]
-# Pin to 1.6 to match the version used in snarkVM. Avoids pulling in rand >=0.9.
 version = "1.6"
 
 [workspace.dependencies.rayon]
@@ -140,7 +139,7 @@ version = "0.7"
 version = "1.5"
 
 [workspace.dependencies.itertools]
-version = "0.14"
+version = "0.15"
 
 [workspace.dependencies.indexmap]
 version = "2"
@@ -184,9 +183,7 @@ default-features = false
 version = "0.2"
 
 [workspace.dependencies.tracing-subscriber]
-# TODO remove this once colored logs work again in a newer version
-# See: https://github.com/tokio-rs/tracing/issues/3378
-version = "=0.3.19"
+version = "0.3.23"
 
 [workspace.dependencies.test-strategy]
 version = "0.4"
@@ -196,84 +193,84 @@ version = "0.2"
 
 [workspace.dependencies.snarkos-account]
 path = "account"
-version = "=4.11.0"
+version = "=4.12.0"
 
 [workspace.dependencies.snarkos-cli]
 path = "cli"
-version = "=4.11.0"
+version = "=4.12.0"
 
 [workspace.dependencies.snarkos-display]
 path = "display"
-version = "=4.11.0"
+version = "=4.12.0"
 
 [workspace.dependencies.snarkos-node]
 path = "node"
-version = "=4.11.0"
+version = "=4.12.0"
 
 [workspace.dependencies.snarkos-node-bft]
 path = "node/bft"
-version = "=4.11.0"
+version = "=4.12.0"
 
 [workspace.dependencies.snarkos-node-bft-events]
 path = "node/bft/events"
-version = "=4.11.0"
+version = "=4.12.0"
 
 [workspace.dependencies.snarkos-node-bft-storage-service]
 path = "node/bft/storage-service"
-version = "=4.11.0"
+version = "=4.12.0"
 
 [workspace.dependencies.snarkos-node-bft-ledger-service]
 path = "node/bft/ledger-service"
-version = "=4.11.0"
+version = "=4.12.0"
 default-features = false
 
 [workspace.dependencies.snarkos-node-consensus]
 path = "node/consensus"
-version = "=4.11.0"
+version = "=4.12.0"
 
 [workspace.dependencies.snarkos-node-cdn]
 path = "node/cdn"
-version = "=4.11.0"
+version = "=4.12.0"
 
 [workspace.dependencies.snarkos-node-metrics]
 path = "node/metrics"
-version = "=4.11.0"
+version = "=4.12.0"
 
 [workspace.dependencies.snarkos-node-network]
 path = "node/network"
-version = "=4.11.0"
+version = "=4.12.0"
 
 [workspace.dependencies.snarkos-node-router]
 path = "node/router"
-version = "=4.11.0"
+version = "=4.12.0"
 
 [workspace.dependencies.snarkos-node-router-messages]
 path = "node/router/messages"
-version = "=4.11.0"
+version = "=4.12.0"
 
 [workspace.dependencies.snarkos-node-rest]
 path = "node/rest"
-version = "=4.11.0"
+version = "=4.12.0"
 
 [workspace.dependencies.snarkos-node-sync]
 path = "node/sync"
-version = "=4.11.0"
+version = "=4.12.0"
 
 [workspace.dependencies.snarkos-node-sync-communication-service]
 path = "node/sync/communication-service"
-version = "=4.11.0"
+version = "=4.12.0"
 
 [workspace.dependencies.snarkos-node-sync-locators]
 path = "node/sync/locators"
-version = "=4.11.0"
+version = "=4.12.0"
 
 [workspace.dependencies.snarkos-node-tcp]
 path = "node/tcp"
-version = "=4.11.0"
+version = "=4.12.0"
 
 [workspace.dependencies.snarkos-utilities]
 path = "utilities"
-version = "=4.11.0"
+version = "=4.12.0"
 
 [[bin]]
 name = "snarkos"
@@ -378,19 +375,6 @@ tikv-jemallocator = "0.7"
 [dependencies.tracing]
 workspace = true
 
-# Pinned to =0.14.1 because k256 v0.14.0 requires it.
-# Adding this as a direct dependency forces cargo to resolve the exact version
-# and prevents automatic upgrades to incompatible releases.
-[dependencies.elliptic-curve]
-version = "=0.14.1"
-default-features = false
-
-# Pinned alongside elliptic-curve to avoid resolving yanked crypto-bigint releases.
-[dependencies.crypto-bigint]
-version = "=0.7.5"
-default-features = false
-features = ["hybrid-array", "rand_core", "subtle", "zeroize"]
-
 [dev-dependencies.rusty-hook]
 version = "0.11.2"
 
@@ -422,8 +406,6 @@ opt-level = 2
 
 [package.metadata.cargo-machete]
 ignored = [
-  "elliptic-curve", # Needed to pin the crate to a specific version
-  "crypto-bigint", # Needed to pin the crate to a specific version
   "snarkos-account", # Needed for cuda feature
   "snarkos-node", # Needed for metrics feature
   "snarkos-node-bft", # Needed for cuda and locktick features

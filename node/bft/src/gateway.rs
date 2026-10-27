@@ -91,7 +91,6 @@ use snarkvm::{
     utilities::flatten_error,
 };
 
-use colored::Colorize;
 use futures::future::join_all;
 use indexmap::IndexMap;
 #[cfg(feature = "locktick")]
@@ -1056,13 +1055,12 @@ impl<N: Network> Gateway<N> {
         // Resolve the total number of connectable validators.
         let validators_total = committee.num_members().saturating_sub(1);
         // Format the total validators message.
-        let total_validators = format!("(of {validators_total} bonded validators)").dimmed();
-        // Construct the connections message.
-        let connections_msg = match connected_validators.len() {
-            0 => "No connected validators".to_string(),
-            num_connected => format!("Connected to {num_connected} validators {total_validators}"),
-        };
-        info!("{connections_msg}");
+        let total_validators = format!("(of {validators_total} bonded validators)");
+        // Log the connections.
+        match connected_validators.len() {
+            0 => info!("No connected validators"),
+            num_connected => info!("Connected to {num_connected} validators {total_validators}"),
+        }
 
         // Collect the connected validator addresses and stake.
         let mut connected_validator_addresses = HashSet::with_capacity(connected_validators.len());
@@ -1084,21 +1082,18 @@ impl<N: Network> Gateway<N> {
             *connected_validator_shas.entry(short_peer_sha.clone()).or_default() += address_stake;
 
             debug!(
-                "{}",
-                format!(
-                    "  Connected to: {} - {} (connection age {:?})",
-                    peer.listener_addr,
-                    peer.aleo_addr,
-                    peer.first_seen.elapsed()
-                )
-                .dimmed()
+                dim = true,
+                "  Connected to: {} - {} (connection age {:?})",
+                peer.listener_addr,
+                peer.aleo_addr,
+                peer.first_seen.elapsed()
             );
         }
 
         // Log how much of the stake uses our git commit hash.
         if let Some(combined_stake) = connected_validator_shas.get(&our_sha) {
             let percentage = *combined_stake as f64 / committee.total_stake() as f64 * 100.0;
-            debug!("{}", format!("  Combined stake @ {our_sha}: {percentage:.2}%").dimmed());
+            debug!(dim = true, "  Combined stake @ {our_sha}: {percentage:.2}%");
             #[cfg(feature = "metrics")]
             metrics::gauge(metrics::bft::CONNECTED_STAKE_WITH_MATCHING_SHA, percentage);
         }
@@ -1121,9 +1116,8 @@ impl<N: Network> Gateway<N> {
                     let address_stake_as_percentage =
                         if total_stake == 0 { 0.0 } else { address_stake as f64 / total_stake_f64 * 100.0 };
                     debug!(
-                        "{}",
-                        format!("  Not connected to {address} ({address_stake_as_percentage:.2}% of total stake)")
-                            .dimmed()
+                        dim = true,
+                        "  Not connected to {address} ({address_stake_as_percentage:.2}% of total stake)"
                     );
                     address_stake
                 })
@@ -1164,10 +1158,7 @@ impl<N: Network> Gateway<N> {
             // Log the participation scores.
             debug!("Participation Scores (in the last {} rounds):", self.storage.max_gc_rounds());
             for (address, (cert_score, sig_score)) in participation_scores {
-                debug!(
-                    "{}",
-                    format!("  {address} - certificates: {cert_score:.2}%  signatures: {sig_score:.2}%").dimmed()
-                );
+                debug!(dim = true, "  {address} - certificates: {cert_score:.2}%  signatures: {sig_score:.2}%");
             }
         }
     }

@@ -1,6 +1,6 @@
 [package]
 name = "snarkos-node-bft-storage-service"
-version = "4.11.0"
+version = "4.12.0"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "A storage service for the memory pool in a decentralized operating system"
 homepage = "https://aleo.org"

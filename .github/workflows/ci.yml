@@ -1,0 +1,378 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [staging, canary, testnet, mainnet]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A superseded PR run holds a one-slot box the new head is queued behind, so a
+# new push cancels it. Pushes are grouped by branch and commit instead: a group
+# keeps one pending run and drops the rest, and every push to every branch
+# needs its own verdict.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || format('{0}-{1}', github.ref, github.sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Every self-hosted job carries the same guard: a fork's code never runs on
+# the fleet, whose target dirs, sccache and home directories persist between
+# jobs.
+jobs:
+  start-cpu-runners:
+    uses: aleo-labs-protocol/gh-actions/.github/workflows/start-runner.yml@v2
+    permissions: { id-token: write, contents: read, actions: read }
+    secrets:
+      runner_app_key: ${{ secrets.RUNNER_APP_KEY }}
+    with:
+      role-to-assume: ${{ vars.RUNNER_ROLE_ARN }}
+      label: cpu
+      # Below the default of 3: snarkOS's jobs run ten minutes or more, so a
+      # box absorbs fewer of them within the critical path.
+      jobs-per-box: 2
+      runner-app-id: ${{ vars.RUNNER_APP_ID }}
+    if: >-
+      github.event.pull_request == null ||
+      github.event.pull_request.head.repo.full_name == github.repository
+
+  check-shared-refs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: { persist-credentials: false }
+      - uses: aleo-labs-protocol/gh-actions/.github/actions/check-shared-refs@v2
+
+  fmt:
+    runs-on: ubuntu-latest
+    env:
+      # `.rustfmt.toml` uses nightly-only options, which stable drops without
+      # an error. Bumping this pin may reformat the tree.
+      FMT_TOOLCHAIN: nightly-2026-04-02
+    steps:
+      - uses: actions/checkout@v7
+        with: { persist-credentials: false }
+      - run: rustup toolchain install "$FMT_TOOLCHAIN" --profile minimal --component rustfmt
+      - run: cargo "+$FMT_TOOLCHAIN" fmt --all -- --check
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: { persist-credentials: false }
+      - uses: taiki-e/install-action@v2
+        with: { tool: cargo-deny@0.20.2 }
+      # Advisories: bump-advisories.yml.
+      - run: cargo deny check bans licenses sources
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    env:
+      SHELLCHECK_VERSION: v0.11.0
+    steps:
+      - uses: actions/checkout@v7
+        with: { persist-credentials: false }
+      - run: |
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
+            | tar -xJ -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/shellcheck-${SHELLCHECK_VERSION}/shellcheck" -x .ci/*.sh scripts/*.sh .github/*.sh
+
+  # The shallow checkout lacks the history the replays of real merges need, so
+  # those are skipped here and run locally.
+  merge-fixup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: { persist-credentials: false }
+      - run: .github/merge-fixup.test.sh
+
+  lint:
+    needs: start-cpu-runners
+    runs-on: [self-hosted, linux, x64, cpu]
+    timeout-minutes: 90
+    if: >-
+      github.event.pull_request == null ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v7
+        with: { persist-credentials: false }
+      - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # Two crates without tests, each alone: the workspace pass above unifies
+      # features, so it misses a feature one of them fails to declare.
+      - run: cargo check -p snarkos-node-metrics --all-features
+      - run: cargo check -p snarkos-display --all-features
+
+  # Each entry is one build. `cargo test -p a -p b` unifies the features of
+  # a and b, and several crates enable features on their dependencies that
+  # change what those dependencies do: `snarkos-node-router/test`,
+  # `snarkos-node-network/test` and `snarkvm-ledger-block/test` skip checks,
+  # and `rocks` and `metrics` select other code paths. Crates share an entry
+  # only where that unification enables none of these on any crate. Helper
+  # features such as `test-helpers` and `mock` can still be unified.
+  #
+  # Cheap entries run on free hosted runners and do not wait for the fleet.
+  test-hosted:
+    permissions: { contents: read, actions: write }
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: light
+            runs: >-
+              nextest run -p snarkos-account -p snarkos-utilities -p snarkos-node-tcp
+              -p snarkos-node-sync-locators -p snarkos-node-network
+          - name: cdn
+            runs: nextest run -p snarkos-node-cdn
+          - name: messages
+            runs: >-
+              nextest run -p snarkos-node-bft-events -p snarkos-node-router-messages
+              -p snarkos-node-bft-ledger-service
+    name: test (${{ matrix.name }})
+    steps: &test-steps
+      - uses: actions/checkout@v7
+        with: { persist-credentials: false }
+      - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
+      - uses: ./.github/actions/job-home
+      - uses: Swatinem/rust-cache@v2
+        if: runner.environment == 'github-hosted'
+        with:
+          key: ${{ matrix.name }}
+          save-if: ${{ github.ref == 'refs/heads/staging' }}
+      # rust-cache mints a key per dependency set and removes none.
+      - uses: ./.github/actions/rust-cache-prune
+        if: runner.environment == 'github-hosted' && github.ref == 'refs/heads/staging'
+        with: { key: '${{ matrix.name }}' }
+      # Downloaded parameters. A box keeps its own; a hosted runner starts
+      # without, and parallel tests downloading the same file can read it
+      # half-written.
+      - uses: actions/cache/restore@v6
+        if: runner.environment == 'github-hosted'
+        with: &aleo-resources
+          path: ~/.aleo/resources
+          key: aleo-resources-${{ matrix.name }}-${{ hashFiles('Cargo.lock') }}
+      - uses: taiki-e/install-action@v2
+        with: { tool: cargo-nextest@0.9.114 }
+      # Each line of `runs` is one cargo command.
+      - name: Test
+        env:
+          RUNS: ${{ matrix.runs }}
+          NEXTEST_PROFILE: ci
+          NEXTEST_NO_TESTS: pass
+        run: |
+          # Under the workspace, wherever CARGO_TARGET_DIR points.
+          junit=target/nextest/ci/junit.xml
+          mkdir -p "$RUNNER_TEMP/junit"
+          rc=0 n=0
+          while read -ra args; do
+            [ "${#args[@]}" -gt 0 ] || continue
+            echo "::group::cargo ${args[*]}"
+            start=$SECONDS
+            rm -f "$junit"
+            cargo "${args[@]}" < /dev/null || rc=1
+            echo "::endgroup::"
+            echo "${args[*]}: $((SECONDS - start))s" | tee -a "$GITHUB_STEP_SUMMARY"
+            if [ -f "$junit" ]; then mv "$junit" "$RUNNER_TEMP/junit/$((n += 1)).xml"; fi
+          done <<< "$RUNS"
+          exit "$rc"
+      # Per-test timings, for deciding what to shard or drop.
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: junit-${{ matrix.name }}
+          path: ${{ runner.temp }}/junit
+      - uses: actions/cache/save@v6
+        if: runner.environment == 'github-hosted' && github.ref == 'refs/heads/staging'
+        with: *aleo-resources
+
+  test:
+    needs: start-cpu-runners
+    permissions: { contents: read, actions: write }
+    runs-on: [self-hosted, linux, x64, cpu]
+    timeout-minutes: 90
+    if: >-
+      github.event.pull_request == null ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: services
+            runs: nextest run -p snarkos-node-consensus -p snarkos-node-rest -p snarkos-cli
+          - name: node
+            runs: nextest run -p snarkos-node -p snarkos-node-bft-storage-service --features snarkos-node-bft-storage-service/memory,snarkos-node-bft-storage-service/persistent
+          - name: bft
+            runs: nextest run -p snarkos-node-bft
+          - name: router
+            runs: nextest run -p snarkos-node-router
+          - name: sync
+            runs: nextest run -p snarkos-node-sync
+    name: test (${{ matrix.name }})
+    steps: *test-steps
+
+  # The node binary the devnet jobs run, built once per workflow run.
+  build-snarkos:
+    needs: start-cpu-runners
+    runs-on: [self-hosted, linux, x64, cpu]
+    timeout-minutes: 60
+    if: >-
+      github.event.pull_request == null ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v7
+        with: { persist-credentials: false }
+      - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
+      # The same profile as `ci_cargo_install_snarkos` in .ci/utils.sh, which
+      # the upgrade tests build the latest release with.
+      - run: cargo build --release --locked --features test_network
+        env:
+          CARGO_PROFILE_RELEASE_LTO: "off"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: "2"
+          CARGO_PROFILE_RELEASE_DEBUG: "0"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: snarkos
+          path: ${{ env.CARGO_TARGET_DIR }}/release/snarkos
+          if-no-files-found: error
+          retention-days: 3
+
+  # Each entry runs a local devnet of several nodes on fixed ports, so it
+  # needs a box to itself; a one-slot box gives it one. Nodes, ports and the
+  # loopback qdiscs outlive a job that is cancelled or whose box dies, so each
+  # entry clears them before it starts as well as after.
+  devnet:
+    needs: [start-cpu-runners, build-snarkos]
+    runs-on: [self-hosted, linux, x64, cpu]
+    timeout-minutes: ${{ matrix.timeout }}
+    if: >-
+      github.event.pull_request == null ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: devnet
+            timeout: 40
+            delay: false
+            runs: |
+              ./.ci/test_db_backup.sh
+              ./.ci/test_devnet.sh
+    name: devnet (${{ matrix.name }})
+    steps: &devnet-steps
+      - uses: actions/checkout@v7
+        with: { persist-credentials: false }
+      - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
+      - name: Stop leftover nodes
+        run: &stop-nodes |
+          pkill -x snarkos || true
+          for _ in $(seq 20); do pgrep -x snarkos > /dev/null || break; sleep 1; done
+          pkill -9 -x snarkos || true
+          sudo -n /usr/local/sbin/runner-netem clear
+      - uses: actions/download-artifact@v8
+        with:
+          name: snarkos
+          path: ${{ runner.temp }}/bin
+      - uses: ./.github/actions/job-home
+        with:
+          # The upgrade entry also runs the latest release, whose genesis
+          # blocks must not land in the cache the PR's binary reads.
+          genesis-scope: ${{ matrix.name == 'upgrade' && 'upgrade' || '' }}
+      - run: |
+          chmod +x "$RUNNER_TEMP/bin/snarkos"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Delay loopback traffic
+        if: matrix.delay
+        run: sudo -n /usr/local/sbin/runner-netem spikes 5000-5100
+      - name: Test
+        env:
+          RUNS: ${{ matrix.runs }}
+        run: bash -eo pipefail -c "$RUNS"
+      - name: Stop nodes
+        if: always()
+        run: *stop-nodes
+
+  # Slower devnets. On every push to a release branch, and on demand.
+  devnet-merge:
+    needs: [start-cpu-runners, build-snarkos]
+    runs-on: [self-hosted, linux, x64, cpu]
+    timeout-minutes: ${{ matrix.timeout }}
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: dev-on-prod-restart
+            timeout: 45
+            runs: ./.ci/test_dev_on_prod_restart.sh
+          - name: chaotic-minority-reset
+            timeout: 45
+            delay: true
+            runs: ./.ci/test_reset_minority.sh
+          - name: chaotic-majority-restart
+            timeout: 45
+            delay: true
+            runs: ./.ci/test_restart_majority.sh
+          # Builds the latest release on a box the first time it sees its tag,
+          # in a target dir of its own so the old dependency tree stays out of
+          # the one the other jobs build in.
+          - name: upgrade
+            timeout: 90
+            runs: |
+              export CARGO_TARGET_DIR="$SNARKOS_RELEASE_DIR/target"
+              ./.ci/test_full_upgrade.sh
+              ./.ci/test_partial_upgrade.sh
+    name: devnet (${{ matrix.name }})
+    steps: *devnet-steps
+
+  machete:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: { persist-credentials: false }
+      - uses: taiki-e/install-action@v2
+        with: { tool: cargo-machete@0.7.0 }
+      - run: cargo machete
+
+  windows:
+    runs-on: windows-latest
+    permissions: { contents: read, actions: write }
+    if: github.event_name != 'pull_request'
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: [account, cli, display, node]
+    steps:
+      - uses: actions/checkout@v7
+        with: { persist-credentials: false }
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.dir }}
+          save-if: ${{ github.ref == 'refs/heads/staging' }}
+      - uses: ./.github/actions/rust-cache-prune
+        if: github.ref == 'refs/heads/staging'
+        with: { key: '${{ matrix.dir }}' }
+      - run: cargo check --examples --benches --tests
+        working-directory: ${{ matrix.dir }}
+
+  # The one job to require on protected branches. A skipped job counts as passed
+  # for a required check, so each job a pull request runs must succeed here.
+  ci-ok:
+    if: always()
+    needs: [check-shared-refs, fmt, deny, shellcheck, merge-fixup, machete, lint, test-hosted, test, build-snarkos, devnet]
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "$RESULTS"
+          for r in $RESULTS; do [ "$r" = success ] || exit 1; done

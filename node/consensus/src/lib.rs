@@ -16,6 +16,8 @@
 #![forbid(unsafe_code)]
 
 mod transactions_queue;
+#[cfg(feature = "metrics")]
+use transactions_queue::QueueInsertion;
 use transactions_queue::TransactionsQueue;
 
 #[macro_use]
@@ -60,7 +62,6 @@ use snarkvm::{
 use aleo_std::StorageMode;
 use anyhow::{Context, Result, bail};
 use cfg_if::cfg_if;
-use colored::Colorize;
 use indexmap::IndexMap;
 #[cfg(feature = "locktick")]
 use locktick::parking_lot::{Mutex, RwLock};
@@ -143,6 +144,7 @@ impl<N: Network> Consensus<N> {
         node_data_dir: NodeDataDir,
         ping: Arc<Ping<N>>,
         dev: Option<u16>,
+        proposal_spent_limit_multiplier: u64,
     ) -> Result<Self> {
         // Initialize the primary channels.
         let (primary_sender, primary_receiver) = init_primary_channels::<N>();
@@ -162,6 +164,7 @@ impl<N: Network> Consensus<N> {
             trusted_peers_only,
             node_data_dir,
             dev,
+            proposal_spent_limit_multiplier,
         )?;
         // Initialize the consensus channels.
         let (consensus_sender, consensus_receiver) = init_consensus_channels();
@@ -317,7 +320,7 @@ impl<N: Network> Consensus<N> {
             }
             // Check if the solution already exists in the ledger.
             if self.ledger.contains_transmission(&TransmissionID::Solution(solution_id, checksum))? {
-                bail!("Solution '{}' exists in the ledger {}", fmt_id(solution_id), "(skipping)".dimmed());
+                bail!("Solution '{}' exists in the ledger (skipping)", fmt_id(solution_id));
             }
             // Add the solution to the memory pool.
             if self.solutions_queue.lock().put(solution_id, solution).is_some() {
@@ -325,7 +328,7 @@ impl<N: Network> Consensus<N> {
             }
             #[cfg(feature = "metrics")]
             {
-                metrics::increment_gauge(metrics::consensus::UNCONFIRMED_SOLUTIONS, 1f64);
+                metrics::increment_counter(metrics::consensus::UNCONFIRMED_SOLUTIONS);
                 let timestamp = snarkos_node_bft::helpers::now();
                 self.transmissions_tracker.lock().insert(TransmissionID::Solution(solution_id, checksum), timestamp);
             }
@@ -392,38 +395,57 @@ impl<N: Network> Consensus<N> {
     pub async fn add_unconfirmed_transaction(&self, transaction: Transaction<N>) -> Result<()> {
         // Calculate the transmission checksum.
         let checksum = Data::<Transaction<N>>::Buffer(transaction.to_bytes_le()?.into()).to_checksum::<N>()?;
+        #[cfg(feature = "metrics")]
+        let kind = metrics::transaction_kind(&transaction);
         // Queue the unconfirmed transaction.
         {
             let transaction_id = transaction.id();
 
             // Check that the transaction is not a fee transaction.
             if transaction.is_fee() {
-                bail!("Transaction '{}' is a fee transaction {}", fmt_id(transaction_id), "(skipping)".dimmed());
+                #[cfg(feature = "metrics")]
+                metrics::record_mempool_transaction(kind, "rejected_fee_transaction");
+                bail!("Transaction '{}' is a fee transaction (skipping)", fmt_id(transaction_id));
             }
             // Check if the transaction was recently seen.
             if self.seen_transactions.lock().put(transaction_id, ()).is_some() {
+                #[cfg(feature = "metrics")]
+                metrics::record_mempool_transaction(kind, "recently_seen");
                 // If the transaction was recently seen, return early.
                 return Ok(());
             }
             // Check if the transaction already exists in the ledger.
             if self.ledger.contains_transmission(&TransmissionID::Transaction(transaction_id, checksum))? {
-                bail!("Transaction '{}' exists in the ledger {}", fmt_id(transaction_id), "(skipping)".dimmed());
+                #[cfg(feature = "metrics")]
+                metrics::record_mempool_transaction(kind, "in_ledger");
+                bail!("Transaction '{}' exists in the ledger (skipping)", fmt_id(transaction_id));
             }
             // Check that the transaction is not in the mempool.
             if self.contains_transaction(&transaction_id) {
+                #[cfg(feature = "metrics")]
+                metrics::record_mempool_transaction(kind, "already_queued");
                 bail!("Transaction '{}' exists in the memory pool", fmt_id(transaction_id));
             }
             // Add the transaction to the memory pool.
             let priority_fee = transaction.priority_fee_amount()?;
-            self.transactions_queue.write().insert(transaction_id, transaction, priority_fee)?;
+            let insertion = self.transactions_queue.write().insert(transaction_id, transaction, priority_fee);
             #[cfg(feature = "metrics")]
-            {
-                metrics::increment_gauge(metrics::consensus::UNCONFIRMED_TRANSACTIONS, 1f64);
+            metrics::record_mempool_transaction(kind, match insertion {
+                Ok(QueueInsertion::Inserted | QueueInsertion::InsertedWithEviction) => "accepted",
+                Ok(QueueInsertion::Duplicate) => "already_queued",
+                // The queue returns an error only when it is full.
+                Err(_) => "rejected_pool_full",
+            });
+            // A duplicate was counted and tracked when its first copy was queued.
+            #[cfg(feature = "metrics")]
+            if matches!(insertion, Ok(QueueInsertion::Inserted | QueueInsertion::InsertedWithEviction)) {
+                metrics::increment_counter(metrics::consensus::UNCONFIRMED_TRANSACTIONS);
                 let timestamp = snarkos_node_bft::helpers::now();
                 self.transmissions_tracker
                     .lock()
                     .insert(TransmissionID::Transaction(transaction_id, checksum), timestamp);
             }
+            insertion?;
             trace!("Received unconfirmed transaction '{}' in the queue", fmt_id(transaction_id));
         }
 
@@ -549,16 +571,13 @@ impl<N: Network> Consensus<N> {
 
         // Process the unconfirmed transactions in the memory pool.
         //
-        // This loop wakes up either when a block is committed (signaled via notify) or after a timeout.
-        // When a block is committed, the BFT workers have freed capacity for more transmissions.
+        // Local proposals and block commits wake this loop to refill available worker capacity.
         // The timeout serves as a fallback for startup or idle periods when blocks are not being produced.
-        //
-        // TODO(kaimast): wake up the loop after a proposal is created, not only when a block commits.
         let self_ = self.clone();
         self.spawn(async move {
             loop {
-                // Wait for either a block commit notification or timeout.
                 tokio::select! {
+                    _ = self_.bft.primary().wait_for_proposal() => {}
                     _ = self_.block_commit_notify.notified() => {}
                     _ = tokio::time::sleep(MAX_BATCH_DELAY) => {}
                 }
@@ -809,13 +828,13 @@ impl<N: Network> Consensus<N> {
                 Ok(false) => debug!(
                     "Unable to reinsert transmission {}:{} into the memory pool. Already exists.",
                     fmt_id(transmission_id),
-                    fmt_id(transmission_id.checksum().unwrap_or_default()).dimmed()
+                    fmt_id(transmission_id.checksum().unwrap_or_default())
                 ),
                 Err(err) => {
                     let err = err.context(format!(
                         "Unable to reinsert transmission {}.{} into the memory pool",
                         fmt_id(transmission_id),
-                        fmt_id(transmission_id.checksum().unwrap_or_default()).dimmed()
+                        fmt_id(transmission_id.checksum().unwrap_or_default())
                     ));
                     warn!("{}", flatten_error(err));
                 }

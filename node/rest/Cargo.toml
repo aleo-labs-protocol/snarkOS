@@ -1,6 +1,6 @@
 [package]
 name = "snarkos-node-rest"
-version = "4.11.0"
+version = "4.12.0"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "A REST API server for a decentralized virtual machine"
 homepage = "https://aleo.org"
@@ -30,6 +30,8 @@ locktick = [
   "snarkos-node-router/locktick",
   "snarkvm/locktick"
 ]
+# Lets benches advance a test ledger to the latest consensus version.
+test_consensus_heights = [ "snarkvm/test_consensus_heights" ]
 serial = [
   "snarkos-node-router/serial",
   "snarkos-node-consensus/serial"
@@ -56,7 +58,7 @@ workspace = true
 features = [ "serde", "rayon" ]
 
 [dependencies.jsonwebtoken]
-version = "10.4"
+version = "11.1"
 default-features = false
 features = [ "aws_lc_rs" ]
 
@@ -130,7 +132,7 @@ features = [ "axum" ]
 
 [dependencies.tower-http]
 version = "0.7"
-features = [ "cors", "trace" ]
+features = [ "compression-gzip", "cors", "trace" ]
 
 [dependencies.tracing]
 workspace = true

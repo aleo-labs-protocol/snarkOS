@@ -113,31 +113,80 @@ impl<N: Network> Ping<N> {
 #[cfg(test)]
 pub mod prop_tests {
     use crate::{MAX_PING_LOCATOR_HEIGHT, Ping, challenge_request::prop_tests::any_node_type};
-    use snarkos_node_sync_locators::{BlockLocators, test_helpers::sample_block_locators};
+    use snarkos_node_network::NodeType;
+    use snarkos_node_sync_locators::{
+        BlockLocators,
+        CHECKPOINT_INTERVAL,
+        NUM_RECENT_BLOCKS,
+        test_helpers::sample_block_locators,
+    };
     use snarkvm::utilities::{FromBytes, ToBytes};
 
     use bytes::{Buf, BufMut, BytesMut};
-    use proptest::prelude::{BoxedStrategy, Strategy, any};
+    use proptest::{
+        option,
+        prelude::{BoxedStrategy, Strategy, any},
+    };
     use test_strategy::proptest;
 
     type CurrentNetwork = snarkvm::prelude::MainnetV0;
 
+    /// Locator size is linear in height, so the random heights stay below 2^25 (at most 3,356
+    /// checkpoints). Half of them are at least 2^24, so their recent heights use all four bytes.
+    /// `ping_roundtrip_at_locator_boundaries` covers the heights a uniform draw is unlikely to hit.
+    ///
+    /// Heights of `MAX_CHECKPOINTS * CHECKPOINT_INTERVAL` and above do not round-trip: their
+    /// locators carry more than `MAX_CHECKPOINTS` checkpoints, which `BlockLocators::read_le`
+    /// rejects. `BlockLocators::new` already rejects a height of `u32::MAX`, so
+    /// `sample_block_locators` panics there.
     pub fn any_block_locators() -> BoxedStrategy<BlockLocators<CurrentNetwork>> {
-        any::<u32>().prop_map(sample_block_locators).boxed()
+        (0u32..1 << 25).prop_map(sample_block_locators).boxed()
     }
 
     pub fn any_ping() -> BoxedStrategy<Ping<CurrentNetwork>> {
-        (any::<u32>(), any_block_locators(), any_node_type())
-            .prop_map(|(version, bls, node_type)| Ping { version, block_locators: Some(bls), node_type })
+        (any::<u32>(), option::of(any_block_locators()), any_node_type())
+            .prop_map(|(version, block_locators, node_type)| Ping { version, block_locators, node_type })
             .boxed()
+    }
+
+    fn assert_roundtrip(ping: &Ping<CurrentNetwork>) {
+        let mut bytes = BytesMut::default().writer();
+        ping.write_le(&mut bytes).unwrap();
+        let decoded = Ping::<CurrentNetwork>::read_le(&mut bytes.into_inner().reader()).unwrap();
+        assert_eq!(ping, &decoded);
     }
 
     #[proptest]
     fn ping_roundtrip(#[strategy(any_ping())] ping: Ping<CurrentNetwork>) {
-        let mut bytes = BytesMut::default().writer();
-        ping.write_le(&mut bytes).unwrap();
-        let decoded = Ping::<CurrentNetwork>::read_le(&mut bytes.into_inner().reader()).unwrap();
-        assert_eq!(ping, decoded);
+        assert_roundtrip(&ping);
+    }
+
+    /// The heights where the locator layout changes shape:
+    /// - below `NUM_RECENT_BLOCKS`, the recents start at height 0 and share it with the first
+    ///   checkpoint;
+    /// - within `NUM_RECENT_BLOCKS` past a checkpoint, the recents share that checkpoint's height;
+    /// - `MAX_PING_LOCATOR_HEIGHT` is the chain height `MAX_PING_MESSAGE_SIZE` is sized for.
+    #[test]
+    fn ping_roundtrip_at_locator_boundaries() {
+        let recent = NUM_RECENT_BLOCKS as u32;
+        let heights = [
+            0,
+            1,
+            recent - 1,
+            recent,
+            CHECKPOINT_INTERVAL - 1,
+            CHECKPOINT_INTERVAL,
+            CHECKPOINT_INTERVAL + recent - 1,
+            CHECKPOINT_INTERVAL + recent,
+            MAX_PING_LOCATOR_HEIGHT,
+        ];
+        for height in heights {
+            assert_roundtrip(&Ping {
+                version: u32::MAX,
+                node_type: NodeType::Client,
+                block_locators: Some(sample_block_locators(height)),
+            });
+        }
     }
 
     /// The largest `Ping` the cap is sized to accept: the locators of a chain at

@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-    <a href="https://circleci.com/gh/ProvableHQ/snarkOS"><img src="https://circleci.com/gh/ProvableHQ/snarkOS.svg?style=svg"></a>
+    <a href="https://github.com/aleo-labs-protocol/snarkOS/actions/workflows/ci.yml?query=branch%3Amainnet"><img src="https://github.com/aleo-labs-protocol/snarkOS/actions/workflows/ci.yml/badge.svg?branch=mainnet"></a>
     <a href="https://codecov.io/gh/ProvableHQ/snarkOS"><img src="https://codecov.io/gh/ProvableHQ/snarkOS/branch/master/graph/badge.svg?token=cck8tS9HpO"/></a>
     <a href="https://discord.gg/aleo"><img src="https://img.shields.io/discord/700454073459015690?logo=discord"/></a>
     <a href="https://twitter.com/AleoHQ"><img src="https://img.shields.io/twitter/follow/AleoHQ?style=social"/></a>

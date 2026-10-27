@@ -1700,7 +1700,10 @@ mod tests {
     #[cfg(not(feature = "locktick"))]
     use parking_lot::RwLock;
     use rand::RngExt;
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::{
+        collections::BTreeSet,
+        net::{IpAddr, Ipv4Addr},
+    };
 
     type CurrentNetwork = snarkvm::prelude::MainnetV0;
 
@@ -2059,20 +2062,35 @@ mod tests {
         sync.insert_block_request(10, (None, None, indexset![sample_peer_ip(1)])).unwrap();
     }
 
+    /// Returns the peer heights for `test_update_peer_locators`, in ascending order.
+    ///
+    /// These are every 17th height below `5 * NUM_RECENT_BLOCKS`, plus the heights next to each of `boundaries`.
+    /// Some pairs of them are `NUM_RECENT_BLOCKS - 1`, `NUM_RECENT_BLOCKS` and `NUM_RECENT_BLOCKS + 1` apart,
+    /// both near genesis and across a checkpoint.
+    fn sample_peer_locator_heights() -> Vec<u32> {
+        let recent = NUM_RECENT_BLOCKS as u32;
+        let mut heights: BTreeSet<u32> = (0..5 * recent).step_by(17).collect();
+        let boundaries =
+            [recent, 2 * recent, CHECKPOINT_INTERVAL, CHECKPOINT_INTERVAL + recent, 2 * CHECKPOINT_INTERVAL];
+        for boundary in boundaries {
+            heights.extend(boundary - 2..=boundary + 1);
+        }
+        heights.into_iter().collect()
+    }
+
     #[test]
     fn test_update_peer_locators() {
         let sync = sample_sync_at_height(0);
+        let heights = sample_peer_locator_heights();
 
         // Test 2 peers.
         let peer1_ip = sample_peer_ip(1);
-        for peer1_height in 0..500u32 {
+        for &peer1_height in &heights {
             sync.update_peer_locators(peer1_ip, &sample_block_locators(peer1_height)).unwrap();
             assert_eq!(sync.get_peer_height(&peer1_ip), Some(peer1_height));
 
             let peer2_ip = sample_peer_ip(2);
-            for peer2_height in 0..500u32 {
-                println!("Testing peer 1 height at {peer1_height} and peer 2 height at {peer2_height}");
-
+            for &peer2_height in &heights {
                 sync.update_peer_locators(peer2_ip, &sample_block_locators(peer2_height)).unwrap();
                 assert_eq!(sync.get_peer_height(&peer2_ip), Some(peer2_height));
 

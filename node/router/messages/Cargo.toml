@@ -1,6 +1,6 @@
 [package]
 name = "snarkos-node-router-messages"
-version = "4.11.0"
+version = "4.12.0"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "Node messages for a decentralized operating system"
 homepage = "https://aleo.org"

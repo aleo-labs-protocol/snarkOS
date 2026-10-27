@@ -63,11 +63,12 @@ use parking_lot::Mutex;
 use std::{net::SocketAddr, num::NonZeroUsize, sync::Arc, time::Duration};
 use tokio::{
     net::TcpListener,
-    sync::{Semaphore, SemaphorePermit},
+    sync::{OwnedSemaphorePermit, Semaphore},
     task::JoinHandle,
 };
 use tower_governor::{GovernorError, GovernorLayer, governor::GovernorConfigBuilder};
 use tower_http::{
+    compression::CompressionLayer,
     cors::{Any, CorsLayer},
     trace::TraceLayer,
 };
@@ -130,10 +131,13 @@ pub const API_VERSION_V2: &str = "v2";
 const BLOCK_CACHE_SIZE: usize = 128;
 
 /// Permits that keep a REST verification in a type's queue and in a concurrent slot.
+///
+/// Move the slot into the blocking task that performs the verification, so the permits are
+/// held until the work finishes even if the client disconnects and the handler is dropped.
 #[derive(Debug)]
-pub(crate) struct VerificationSlot<'a> {
-    _queued: SemaphorePermit<'a>,
-    _concurrent: SemaphorePermit<'a>,
+pub(crate) struct VerificationSlot {
+    _queued: OwnedSemaphorePermit,
+    _concurrent: OwnedSemaphorePermit,
 }
 
 /// Concurrent and queued REST verification permits for deployments, executions, and solutions.
@@ -146,11 +150,11 @@ pub(crate) struct VerificationSlots {
 /// A concurrent semaphore and a queued semaphore for one kind of REST verification.
 pub(crate) struct VerificationLane {
     /// Maximum number of verifications of this kind that may run at once.
-    pub(crate) concurrent: Semaphore,
+    pub(crate) concurrent: Arc<Semaphore>,
     /// Maximum number of verifications of this kind that may be waiting or in progress.
     ///
     /// Capacity is twice that of `concurrent`.
-    pub(crate) queued: Semaphore,
+    pub(crate) queued: Arc<Semaphore>,
 }
 
 impl VerificationSlots {
@@ -166,20 +170,22 @@ impl VerificationSlots {
 impl VerificationLane {
     fn new(concurrent_limit: usize) -> Self {
         Self {
-            concurrent: Semaphore::new(concurrent_limit),
-            queued: Semaphore::new(concurrent_limit.saturating_mul(2)),
+            concurrent: Arc::new(Semaphore::new(concurrent_limit)),
+            queued: Arc::new(Semaphore::new(concurrent_limit.saturating_mul(2))),
         }
     }
 
     /// Rejects immediately when this lane's queue is already full.
-    pub(crate) async fn acquire(&self) -> Result<VerificationSlot<'_>, RestError> {
+    pub(crate) async fn acquire(&self) -> Result<VerificationSlot, RestError> {
         let queued = self
             .queued
-            .try_acquire()
+            .clone()
+            .try_acquire_owned()
             .map_err(|_| RestError::too_many_requests(anyhow::anyhow!("Too many verifications in progress")))?;
         let concurrent = self
             .concurrent
-            .acquire()
+            .clone()
+            .acquire_owned()
             .await
             .map_err(|_| RestError::too_many_requests(anyhow::anyhow!("Too many verifications in progress")))?;
         Ok(VerificationSlot { _queued: queued, _concurrent: concurrent })
@@ -481,8 +487,8 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         let v2_router =
             axum::Router::new().nest(&format!("/{API_VERSION_V2}/{}", N::SHORT_NAME), self.build_routes(rest_rps));
 
-        // Combine all routes.
-        default_router.merge(v1_router).merge(v2_router)
+        // The v1 error middleware reads and converts response bodies before compression.
+        default_router.merge(v1_router).merge(v2_router).layer(CompressionLayer::new())
     }
 
     async fn spawn_server(&mut self, rest_ip: SocketAddr, rest_rps: u32) -> Result<()> {
@@ -690,6 +696,29 @@ mod tests {
         let err = lane.acquire().await.unwrap_err();
         assert_eq!(err, StatusCode::TOO_MANY_REQUESTS);
     }
+
+    #[tokio::test]
+    async fn a_slot_moved_into_a_detached_blocking_task_holds_its_permits() {
+        let lane = VerificationLane::new(1);
+        let slot = lane.acquire().await.expect("verification slot");
+
+        // Simulate a client disconnect: the handler drops the join handle while the task still runs.
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let (finished, on_finish) = tokio::sync::oneshot::channel();
+        drop(tokio::task::spawn_blocking(move || {
+            wait.recv().unwrap();
+            drop(slot);
+            finished.send(()).unwrap();
+        }));
+
+        assert_eq!(lane.concurrent.available_permits(), 0);
+        assert_eq!(lane.queued.available_permits(), 1);
+
+        release.send(()).unwrap();
+        on_finish.await.unwrap();
+        assert_eq!(lane.concurrent.available_permits(), 1);
+        assert_eq!(lane.queued.available_permits(), 2);
+    }
 }
 
 #[cfg(test)]
@@ -781,6 +810,20 @@ mod route_tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
 
         (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn responses_are_compact_json() {
+        let rest = sample_rest().await;
+
+        // Clients such as `snarkos developer scan` parse this body directly as an integer.
+        let (status, body) = get(&rest, "/block/height/latest").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "0");
+
+        let (status, body) = get(&rest, "/block/latest").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.contains('\n'), "the block was served with line breaks: {body}");
     }
 
     #[tokio::test]

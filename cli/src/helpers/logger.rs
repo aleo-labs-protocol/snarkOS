@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::helpers::{DynamicFormatter, LogWriter};
+use crate::helpers::{DynamicFormatter, LogWriter, SnarkosFields};
 
 use anyhow::{Result, bail};
 
@@ -175,6 +175,7 @@ pub fn initialize_logger<P: AsRef<Path>>(
             // Add layer using LogWriter for stdout / terminal
             tracing_subscriber::fmt::Layer::default()
                 .with_ansi(log_sender.is_none() && io::stdout().is_tty())
+                .fmt_fields(SnarkosFields)
                 .with_writer(move || LogWriter::new(&log_sender))
                 .with_target(show_target)
                 .event_format(DynamicFormatter::new(shutdown))
@@ -184,6 +185,7 @@ pub fn initialize_logger<P: AsRef<Path>>(
             // Add layer redirecting logs to the file
             tracing_subscriber::fmt::Layer::default()
                 .with_ansi(false)
+                .fmt_fields(SnarkosFields)
                 .with_writer(logfile)
                 .with_target(show_target)
                 .with_filter(logfile_filter?),
@@ -213,6 +215,7 @@ pub fn initialize_terminal_logger(verbosity: u8) -> Result<()> {
             // Add layer using LogWriter for stdout / terminal
             tracing_subscriber::fmt::Layer::default()
                 .with_ansi(io::stdout().is_tty())
+                .fmt_fields(SnarkosFields)
                 .with_target(show_target)
                 .event_format(DynamicFormatter::new(Arc::new(AtomicBool::new(false))))
                 .with_filter(stdout_filter),

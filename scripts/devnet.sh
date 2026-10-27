@@ -103,16 +103,16 @@ if [[ $build_binary == "y" ]]; then
   crate_features=${crate_features:-test_network}
 
   # Build command
-  build_cmd="cargo install --locked --path $repo_root"
+  build_cmd=(cargo install --locked --path "$repo_root")
 
   # Add any extra features if provided
   if [[ -n $crate_features ]]; then
-    build_cmd+=" --features ${crate_features}"
+    build_cmd+=(--features "$crate_features")
   fi
 
   # Build command
-  echo "Running build command: \"$build_cmd\""
-  eval "$build_cmd" || exit 1
+  echo "Running build command: \"${build_cmd[*]}\""
+  "${build_cmd[@]}" || exit 1
 else
   # Ask the user whether to use a custom relative path
   read -r -p "Do you want to run snarkos from a relative path? (e.g. ./target/debug/, defaults to the installed binary): " binary_path
@@ -209,37 +209,41 @@ fi
 
 if [ -n "$compose_cmd" ]; then
   metrics_compose_file="$repo_root/node/metrics/docker-compose.yml"
-  $compose_cmd -f "$metrics_compose_file" up --detach
   # Compose won't restart an already-running container just because the
   # bind-mounted prometheus.yml changed underneath it, so force a restart to
-  # pick up the scrape targets regenerated above.
-  $compose_cmd -f "$metrics_compose_file" restart prometheus
-
-  grafana_url="http://localhost:3000/d/snarkos"
-  grafana_ready=""
-  for _ in $(seq 1 30); do
-    if curl -sf http://localhost:3000/api/health >/dev/null 2>&1; then
-      grafana_ready="1"
-      break
-    fi
-    sleep 1
-  done
-
-  if [ -n "$grafana_ready" ]; then
-    opener=""
-    if command -v xdg-open >/dev/null 2>&1; then
-      opener="xdg-open"
-    elif command -v open >/dev/null 2>&1; then
-      opener="open"
-    fi
-
-    if [ -n "$opener" ]; then
-      "$opener" "$grafana_url" >/dev/null 2>&1 &
-    else
-      echo "Grafana is up at $grafana_url (no xdg-open/open found to launch a browser automatically)."
-    fi
+  # pick up the scrape targets regenerated above. If either step fails, skip
+  # opening the dashboard, since it could be backed by stale scrape targets.
+  if ! $compose_cmd -f "$metrics_compose_file" up --detach; then
+    echo "Warning: failed to start the Prometheus/Grafana stack; skipping dashboard setup. See node/metrics/README.md to start it manually."
+  elif ! $compose_cmd -f "$metrics_compose_file" restart prometheus; then
+    echo "Warning: failed to restart Prometheus with the new scrape targets; skipping dashboard setup. See node/metrics/README.md to start it manually."
   else
-    echo "Grafana didn't become ready in time; check it manually at $grafana_url."
+    grafana_url="http://localhost:3000/d/snarkos"
+    grafana_ready=""
+    for _ in $(seq 1 30); do
+      if curl -sf http://localhost:3000/api/health >/dev/null 2>&1; then
+        grafana_ready="1"
+        break
+      fi
+      sleep 1
+    done
+
+    if [ -n "$grafana_ready" ]; then
+      opener=""
+      if command -v xdg-open >/dev/null 2>&1; then
+        opener="xdg-open"
+      elif command -v open >/dev/null 2>&1; then
+        opener="open"
+      fi
+
+      if [ -n "$opener" ]; then
+        "$opener" "$grafana_url" >/dev/null 2>&1 &
+      else
+        echo "Grafana is up at $grafana_url (no xdg-open/open found to launch a browser automatically)."
+      fi
+    else
+      echo "Grafana didn't become ready in time; check it manually at $grafana_url."
+    fi
   fi
 else
   echo "Docker not found; skipping automatic Prometheus/Grafana setup. See node/metrics/README.md to start it manually."

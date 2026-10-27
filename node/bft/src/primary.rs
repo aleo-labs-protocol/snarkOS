@@ -70,7 +70,6 @@ use snarkvm::{
 };
 
 use anyhow::Context;
-use colored::Colorize;
 use futures::stream::{FuturesUnordered, StreamExt};
 use indexmap::{IndexMap, IndexSet};
 #[cfg(feature = "locktick")]
@@ -198,6 +197,11 @@ pub struct Primary<N: Network> {
     /// Used to wake up a the dedicated round-increment task, if we may be able to advance to the next round.
     /// This is used, so the timeout for round advancement is reset on every round increment.
     round_increment_notify: Arc<Notify>,
+
+    /// Wakes the mempool refill task after a new proposal has drained the workers.
+    proposal_notify: Arc<Notify>,
+    /// Factor applied to the batch spend limit while this primary builds a proposal.
+    proposal_spent_limit_multiplier: u64,
 }
 
 impl<N: Network> Primary<N> {
@@ -216,6 +220,7 @@ impl<N: Network> Primary<N> {
         trusted_peers_only: bool,
         node_data_dir: NodeDataDir,
         dev: Option<u16>,
+        proposal_spent_limit_multiplier: u64,
     ) -> Result<Self> {
         // Initialize the gateway.
         let gateway = Gateway::new(
@@ -249,6 +254,8 @@ impl<N: Network> Primary<N> {
             handles: Default::default(),
             proposal_task: Default::default(),
             round_increment_notify: Default::default(),
+            proposal_notify: Default::default(),
+            proposal_spent_limit_multiplier,
         })
     }
 
@@ -393,6 +400,14 @@ impl<N: Network> Primary<N> {
     /// Returns the number of unconfirmed transmissions.
     pub fn num_unconfirmed_transmissions(&self) -> usize {
         self.workers().iter().map(|worker| worker.num_transmissions()).sum()
+    }
+
+    /// Waits for a new local proposal so the mempool can refill the workers.
+    ///
+    /// This has a single consumer. Proposals made while that consumer is busy are coalesced
+    /// into one pending notification. Rebroadcasts do not notify the consumer.
+    pub async fn wait_for_proposal(&self) {
+        self.proposal_notify.notified().await;
     }
 
     /// Returns the number of unconfirmed ratifications.
@@ -590,7 +605,7 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
                     false => return Ok(false),
                 }
             }
-            debug!("Primary is safely skipping {}", format!("(round {round} was already certified)").dimmed());
+            debug!(dim = true, "Primary is safely skipping (round {round} was already certified)");
             return Ok(false);
         }
 
@@ -617,8 +632,8 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
             // If quorum threshold is not reached, return early.
             if !committee_lookback.is_quorum_threshold_reached(&connected_validators) {
                 debug!(
-                    "Primary is safely skipping a batch proposal for round {round} {}",
-                    "(please connect to more validators)".dimmed()
+                    dim = true,
+                    "Primary is safely skipping a batch proposal for round {round} (please connect to more validators)"
                 );
                 trace!("Primary is connected to {} validators", connected_validators.len() - 1);
                 return Ok(false);
@@ -656,8 +671,8 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
         // If the batch is not ready to be proposed, return early.
         if !is_ready {
             debug!(
-                "Primary is safely skipping a batch proposal for round {round} {}",
-                format!("(previous round {previous_round} has not reached quorum)").dimmed()
+                dim = true,
+                "Primary is safely skipping a batch proposal for round {round} (previous round {previous_round} has not reached quorum)"
             );
             return Ok(false);
         }
@@ -720,7 +735,10 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
                             continue;
                         }
                         // Check if the solution is still valid.
-                        if let Err(e) = self.ledger.check_solution_basic(solution_id, solution).await {
+                        let result = self.ledger.check_solution_basic(solution_id, solution).await;
+                        #[cfg(feature = "metrics")]
+                        metrics::record_solution_check("propose_batch", result.is_ok());
+                        if let Err(e) = result {
                             trace!("Proposing - Skipping solution '{}' - {e}", fmt_id(solution_id));
                             continue;
                         }
@@ -752,7 +770,12 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
                         };
 
                         // Check if the transaction is still valid.
-                        if let Err(e) = self.ledger.check_transaction_basic(transaction_id, transaction).await {
+                        #[cfg(feature = "metrics")]
+                        let timer = metrics::TransactionCheckTimer::start("propose_batch", &transaction);
+                        let result = self.ledger.check_transaction_basic(transaction_id, transaction).await;
+                        #[cfg(feature = "metrics")]
+                        timer.finish(&result);
+                        if let Err(e) = result {
                             trace!("Proposing - Skipping transaction '{}' - {e}", fmt_id(transaction_id));
                             continue;
                         }
@@ -769,11 +792,12 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
 
                         // Check if the next proposal cost exceeds the batch proposal spend limit.
                         let batch_spend_limit = BatchHeader::<N>::batch_spend_limit(current_block_height);
-                        if next_proposal_cost > batch_spend_limit {
+                        let proposal_spend_limit =
+                            batch_spend_limit.saturating_mul(self.proposal_spent_limit_multiplier);
+                        if next_proposal_cost > proposal_spend_limit {
                             debug!(
-                                "Proposing - Skipping transaction '{}' - Batch spend limit surpassed ({next_proposal_cost} > {})",
+                                "Proposing - Skipping transaction '{}' - Batch spend limit surpassed ({next_proposal_cost} > {proposal_spend_limit})",
                                 fmt_id(transaction_id),
-                                batch_spend_limit
                             );
 
                             // Reinsert the transmission into the worker.
@@ -844,6 +868,7 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
         );
         // Store the proposal in memory.
         *self.proposed_batch.write() = ProposedBatchState::Certifying(Box::new(proposal));
+        self.proposal_notify.notify_one();
         // Record the wall-clock time at which the batch was proposed.
         #[cfg(feature = "metrics")]
         {
@@ -955,8 +980,8 @@ impl<N: Network> Primary<N> {
         // Note this is already checked in `check_batch_header`, however we can return early here without creating a blocking task.
         if self.storage.contains_batch(batch_header.batch_id()) {
             debug!(
-                "Primary is safely skipping a batch proposal from '{peer_ip}' - {}",
-                format!("batch for round {batch_round} already exists in storage").dimmed()
+                dim = true,
+                "Primary is safely skipping a batch proposal from '{peer_ip}' - batch for round {batch_round} already exists in storage"
             );
             return Ok(());
         }
@@ -982,11 +1007,27 @@ impl<N: Network> Primary<N> {
         // If the peer is ahead, use the batch header to sync up to the peer.
         let mut missing_transmissions = self.sync_with_batch_header_from_peer::<true>(peer_ip, &batch_header).await?;
 
+        #[cfg(feature = "metrics")]
+        {
+            let num_solutions =
+                missing_transmissions.keys().filter(|id| matches!(id, TransmissionID::Solution(..))).count();
+            let num_transactions = missing_transmissions.len().saturating_sub(num_solutions);
+            metrics::counter_1(metrics::bft::PEER_PROPOSAL_TRANSMISSIONS, "type", "solution", num_solutions as u64);
+            metrics::counter_1(
+                metrics::bft::PEER_PROPOSAL_TRANSMISSIONS,
+                "type",
+                "transaction",
+                num_transactions as u64,
+            );
+        }
+
         // Check that the transmission ids match and are not fee transactions.
         if let Err(err) = cfg_iter_mut!(&mut missing_transmissions).try_for_each(|(transmission_id, transmission)| {
             // If the transmission is not well-formed, then return early.
             self.ledger.ensure_transmission_is_well_formed(*transmission_id, transmission)
         }) {
+            #[cfg(feature = "metrics")]
+            metrics::increment_counter(metrics::bft::PEER_PROPOSALS_MALFORMED);
             let err = err.context(format!(
                 "Batch propose at round {batch_round} from '{peer_ip}' contains an invalid transmission"
             ));
@@ -2221,7 +2262,7 @@ mod tests {
         let account = accounts[account_index].1.clone();
         let block_sync = Arc::new(BlockSync::new(ledger.clone(), ConnectionMode::Gateway));
         let primary =
-            Primary::new(account, storage, ledger, block_sync, None, &[], false, NodeDataDir::new_test(None), None)
+            Primary::new(account, storage, ledger, block_sync, None, &[], false, NodeDataDir::new_test(None), None, 1)
                 .unwrap();
 
         // Construct a worker instance.

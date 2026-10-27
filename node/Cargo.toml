@@ -1,6 +1,6 @@
 [package]
 name = "snarkos-node"
-version = "4.11.0"
+version = "4.12.0"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "A node for a decentralized operating system"
 homepage = "https://aleo.org"
@@ -158,7 +158,7 @@ workspace = true
 features = [ "rt", "signal" ]
 
 [dependencies.tokio-stream]
-version = "=0.1"
+version = "0.1"
 
 [dependencies.tokio-util]
 workspace = true

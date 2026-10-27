@@ -9,7 +9,7 @@ cargo +nightly-2026-04-02 fmt
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-Formatting requires the nightly `.circleci/config.yml` pins as `fmt_nightly` --
+Formatting requires the nightly `.github/workflows/ci.yml` pins as `FMT_TOOLCHAIN` --
 `.rustfmt.toml` uses nightly-only options, and plain `cargo fmt` drops them
 silently rather than refusing.
 

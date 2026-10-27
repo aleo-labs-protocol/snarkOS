@@ -1,6 +1,6 @@
 [package]
 name = "snarkos-display"
-version = "4.11.0"
+version = "4.12.0"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "A display for a decentralized operating system"
 homepage = "https://aleo.org"

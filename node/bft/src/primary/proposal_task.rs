@@ -16,7 +16,6 @@
 use crate::{CREATE_BATCH_INTERVAL, MAX_BATCH_DELAY, MIN_BATCH_DELAY};
 
 use anyhow::Result;
-use colored::Colorize;
 use snarkvm::{prelude::Network, utilities::flatten_error};
 use std::{marker::PhantomData, sync::Arc};
 use tokio::{
@@ -87,20 +86,20 @@ impl<N: Network> ProposalTask<N> {
     /// The three stages are implemented as separate methods; see their doc-comments for details.
     pub(super) async fn run<P: BatchPropose + 'static>(self, primary: P) {
         let mut ready_rx = self.inner.ready.subscribe();
+        let mut earliest_proposal = Instant::now() + MIN_BATCH_DELAY;
 
         loop {
             let round = primary.current_round();
-            // TODO(kaimast): the round_start time should be based on the timestamp of the
-            // previous batch, not the current wall-clock time.
             let round_start = Instant::now();
 
-            if !Self::wait_until_proposal_ready(&primary, &mut ready_rx, round, round_start).await {
+            if !Self::wait_until_proposal_ready(&primary, &mut ready_rx, round, round_start, earliest_proposal).await {
                 continue; // round changed; restart
             }
 
             if !Self::propose(&primary, round).await {
                 continue; // round changed; restart
             }
+            earliest_proposal = Instant::now() + MIN_BATCH_DELAY;
 
             // Reset readiness so the next round waits for an explicit signal.
             self.inner.ready.send_replace(false);
@@ -111,8 +110,8 @@ impl<N: Network> ProposalTask<N> {
 
     /// Stage 1: Wait until conditions are met to propose a batch.
     ///
-    /// Blocks until MIN_BATCH_DELAY has elapsed since `round_start`, and either `signal()` fires
-    /// (leader cert arrived) or MAX_BATCH_DELAY expires without one.
+    /// Blocks until the minimum spacing from the last successful proposal has elapsed, and either
+    /// `signal()` fires (leader cert arrived) or MAX_BATCH_DELAY expires since `round_start`.
     ///
     /// Returns `true` if ready to propose, `false` if the round changed (caller should restart).
     async fn wait_until_proposal_ready<P: BatchPropose>(
@@ -120,6 +119,7 @@ impl<N: Network> ProposalTask<N> {
         ready_rx: &mut watch::Receiver<bool>,
         round: u64,
         round_start: Instant,
+        earliest_proposal: Instant,
     ) -> bool {
         loop {
             if primary.current_round() != round {
@@ -128,7 +128,7 @@ impl<N: Network> ProposalTask<N> {
 
             // Enforce the minimum inter-proposal delay.
             // This is a no-op once the deadline has already passed.
-            sleep_until(round_start + MIN_BATCH_DELAY).await;
+            sleep_until(earliest_proposal).await;
 
             // Wait for a readiness signal, the MAX_BATCH_DELAY deadline, or a short heartbeat
             // that lets the round-change check at the top of the loop fire regularly.
@@ -141,7 +141,7 @@ impl<N: Network> ProposalTask<N> {
                     return true;
                 },
                 _ = sleep(CREATE_BATCH_INTERVAL) => {
-                    debug!("Skipping batch proposal for round {round} {}", "(not ready yet)".dimmed());
+                    debug!(dim = true, "Skipping batch proposal for round {round} (not ready yet)");
                 }
             };
         }

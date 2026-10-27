@@ -38,7 +38,6 @@ use snarkvm::{
 };
 
 use anyhow::Context;
-use colored::Colorize;
 use indexmap::{IndexMap, IndexSet};
 #[cfg(feature = "locktick")]
 use locktick::parking_lot::RwLock;
@@ -91,6 +90,7 @@ impl<N: Network> BFT<N> {
         trusted_peers_only: bool,
         node_data_dir: NodeDataDir,
         dev: Option<u16>,
+        proposal_spent_limit_multiplier: u64,
     ) -> Result<Self> {
         Ok(Self {
             primary: Primary::new(
@@ -103,6 +103,7 @@ impl<N: Network> BFT<N> {
                 trusted_peers_only,
                 node_data_dir,
                 dev,
+                proposal_spent_limit_multiplier,
             )?,
             dag: Default::default(),
             leader_certificate: Default::default(),
@@ -261,7 +262,7 @@ impl<N: Network> PrimaryCallback<N> for BFT<N> {
             } else {
                 match is_ready {
                     true => info!("Round {current_round} reached quorum without a leader"),
-                    false => info!("{}", format!("Round {current_round} did not elect a leader (yet)").dimmed()),
+                    false => info!(dim = true, "Round {current_round} did not elect a leader (yet)"),
                 }
             }
         }
@@ -724,7 +725,7 @@ impl<N: Network> BFT<N> {
                         format!(
                             "BFT failed to retrieve transmission '{}.{}' from round {}",
                             fmt_id(transmission_id),
-                            fmt_id(transmission_id.checksum().unwrap_or_default()).dimmed(),
+                            fmt_id(transmission_id.checksum().unwrap_or_default()),
                             certificate.round()
                         )
                     })?;
@@ -1034,6 +1035,7 @@ mod tests {
             false,
             NodeDataDir::new_test(None),
             None,
+            1,
         )
     }
 

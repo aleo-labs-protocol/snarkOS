@@ -1,0 +1,73 @@
+name: Prune rust-cache's entries
+description: >
+  Keeps the newest few of this job's `~/.cargo` entries and deletes the rest.
+  rust-cache mints a new key whenever the dependency set changes and removes
+  none, so its families grow until they push out the entries in use. Call from
+  a job that uses rust-cache, guarded on staging.
+
+inputs:
+  key:
+    description: The `key` given to rust-cache; with the job name it forms the family.
+    required: true
+  grace-seconds:
+    description: >
+      Entries used this recently are kept whatever their rank, so a prune
+      cannot take an entry a concurrent run is restoring from.
+    required: false
+    default: "7200"
+  keep:
+    description: >
+      How many to leave. rust-cache saves in a post step, so this runs before
+      this job's own entry exists -- `keep: 1` settles at two per family, and
+      never at zero if the save then finds its key already taken.
+    required: false
+    default: "1"
+
+runs:
+  using: composite
+  steps:
+    # Nothing here is fatal: a ceiling is a slow problem, and a composite step
+    # has no `continue-on-error` to say so with.
+    - name: Drop this job's superseded rust-cache entries
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PREFIX: v0-rust-${{ inputs.key }}-${{ github.job }}-
+        KEEP: ${{ inputs.keep }}
+        GRACE: ${{ inputs.grace-seconds }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -uo pipefail
+        if ! raw=$(gh api --paginate "repos/${REPO}/actions/caches?per_page=100"); then
+          echo "::warning::could not list caches; nothing pruned"; exit 0
+        fi
+        all=$(jq -s '[.[].actions_caches[]]' <<<"${raw}") || {
+          echo "::warning::unreadable cache listing; nothing pruned"; exit 0; }
+
+        # The prefix replicates rust-cache's key layout, which is not ours to
+        # rely on: a `prefix-key` default that moves, or a job switching to
+        # `shared-key` (which drops the job segment), makes this match nothing.
+        # Silence there looks exactly like success, so say so instead.
+        matched=$(jq --arg p "${PREFIX}" '[.[]|select(.key|startswith($p))]|length' <<<"${all}")
+        if [ "${matched}" = "0" ]; then
+          echo "::warning::no cache entries under ${PREFIX} -- rust-cache's key layout has moved and this prune is doing nothing"
+          exit 0
+        fi
+
+        # By last use, not by age: the newest entry is not necessarily the one
+        # in use, and an exact hit makes rust-cache skip its save -- so deleting
+        # what a concurrent run restored loses it with nothing written back.
+        # GRACE keeps anything touched recently regardless of rank.
+        # `sub` because GitHub returns fractional seconds, which
+        # `fromdateiso8601` refuses.
+        jq -r --arg p "${PREFIX}" --argjson n "${KEEP}" --argjson g "${GRACE}" \
+          '[.[]|select(.key|startswith($p))]
+           |sort_by(.last_accessed_at)|reverse|.[$n:]
+           |map(select((.last_accessed_at|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601) < (now - $g)))
+           |.[]|[.id,.key]|@tsv' <<<"${all}" \
+          | while IFS=$'\t' read -r id key; do
+              echo "deleting ${key}"
+              gh api -X DELETE "repos/${REPO}/actions/caches/${id}" >/dev/null \
+                || echo "::warning::could not delete ${key}"
+            done
+        exit 0
