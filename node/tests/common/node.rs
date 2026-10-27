@@ -81,6 +81,7 @@ pub async fn validator() -> Validator<CurrentNetwork, ConsensusMemory<CurrentNet
         false, // No dev traffic in production mode.
         None,
         None, // No dev committee hotswap in production mode.
+        1,    // Leave the batch spend limit unchanged.
         SignalHandler::new(None),
     )
     .await

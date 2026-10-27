@@ -100,6 +100,7 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         dev: Option<u16>,
         #[cfg(feature = "test_network")] dev_hotswap_config: Option<DevHotswapConfig>,
         #[cfg(not(feature = "test_network"))] _dev_hotswap_config: Option<DevHotswapConfig>,
+        proposal_spent_limit_multiplier: u64,
         signal_handler: Arc<SignalHandler>,
     ) -> Result<Self> {
         // Initialize the ledger, installing the dev committee override (when configured)
@@ -169,6 +170,7 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
             node_data_dir.clone(),
             ping.clone(),
             dev,
+            proposal_spent_limit_multiplier,
         )
         .await?;
 
@@ -591,6 +593,7 @@ mod tests {
             dev_txs,
             None,
             None,
+            1,
             SignalHandler::new(None),
         )
         .await

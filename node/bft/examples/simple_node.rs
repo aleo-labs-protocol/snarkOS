@@ -161,6 +161,7 @@ pub async fn start_bft(
         trusted_peers_only,
         node_data_dir,
         None,
+        1,
     )?;
     // Run the BFT instance.
     bft.run(None, Some(consensus_sender), sender.clone(), receiver).await?;
@@ -211,6 +212,7 @@ pub async fn start_primary(
         trusted_peers_only,
         node_data_dir,
         None,
+        1,
     )?;
     // Run the primary instance.
     primary.run(None, None, None, sender.clone(), receiver).await?;

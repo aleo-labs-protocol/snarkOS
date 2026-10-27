@@ -97,6 +97,10 @@ fn num_verifying_solutions_parser() -> RangedU64ValueParser<usize> {
     RangedU64ValueParser::<usize>::new().range(1..=DEFAULT_NUM_VERIFYING_SOLUTIONS as u64)
 }
 
+fn proposal_spent_limit_multiplier_parser() -> RangedU64ValueParser<u64> {
+    RangedU64ValueParser::<u64>::new().range(1..)
+}
+
 // A mapping of `staker_address` to `(validator_address, withdrawal_address, amount)`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct BondedBalances(IndexMap<String, (String, String, u64)>);
@@ -175,6 +179,19 @@ pub struct Start {
     /// This argument is only allowed for validator nodes.
     #[clap(long, requires = "validator")]
     pub bft: Option<SocketAddr>,
+
+    /// Multiply the batch spend limit used when this validator builds a proposal.
+    ///
+    /// This argument is only allowed for validator nodes.
+    /// The default of 1 leaves the batch spend limit unchanged.
+    #[clap(
+        long,
+        requires = "validator",
+        conflicts_with_all = ["client", "prover", "bootstrap_client"],
+        default_value_t = 1,
+        value_parser = proposal_spent_limit_multiplier_parser()
+    )]
+    pub proposal_spent_limit_multiplier: u64,
 
     /// Specify the host:port address pairs of the peer(s) to connect to (as a comma-separated list).
     ///
@@ -985,7 +1002,7 @@ impl Start {
 
         // Initialize the node.
         let node = match node_type {
-            NodeType::Validator => Node::new_validator(node_ip, self.bft, rest_ip, self.rest_rps, rest_verification_limits, history_api_url.clone(), self.history_json, account, &trusted_peers, &trusted_validators, genesis, cdn, storage_mode, node_data_dir, self.trusted_peers_only, self.auto_db_checkpoints.clone(), dev_txs, self.dev, dev_hotswap_config, signal_handler.clone()).await,
+            NodeType::Validator => Node::new_validator(node_ip, self.bft, rest_ip, self.rest_rps, rest_verification_limits, history_api_url.clone(), self.history_json, account, &trusted_peers, &trusted_validators, genesis, cdn, storage_mode, node_data_dir, self.trusted_peers_only, self.auto_db_checkpoints.clone(), dev_txs, self.dev, dev_hotswap_config, self.proposal_spent_limit_multiplier, signal_handler.clone()).await,
             NodeType::Prover => Node::new_prover(node_ip, account, &trusted_peers, genesis, node_data_dir, self.trusted_peers_only, self.dev, signal_handler.clone()).await,
             NodeType::Client => Node::new_client(node_ip, rest_ip, self.rest_rps, rest_verification_limits, history_api_url.clone(), self.history_json, account, &trusted_peers, genesis, cdn, storage_mode, node_data_dir, self.trusted_peers_only, self.auto_db_checkpoints.clone(), self.dev, signal_handler.clone()).await,
             NodeType::BootstrapClient => Node::new_bootstrap_client(node_ip, account, *genesis.header(), self.dev).await,
@@ -1587,6 +1604,27 @@ mod tests {
 
         // The flag belongs to the REST server.
         assert!(Start::try_parse_from(["snarkos", "--norest", "--history-compat-mode"].iter()).is_err());
+    }
+
+    #[test]
+    fn proposal_spent_limit_multiplier_requires_validator() {
+        assert!(Start::try_parse_from(["snarkos", "--proposal-spent-limit-multiplier", "5"]).is_err());
+        assert!(Start::try_parse_from(["snarkos", "--client", "--proposal-spent-limit-multiplier", "5"]).is_err());
+        assert!(Start::try_parse_from(["snarkos", "--prover", "--proposal-spent-limit-multiplier", "5"]).is_err());
+        assert!(
+            Start::try_parse_from(["snarkos", "--bootstrap-client", "--proposal-spent-limit-multiplier", "5"]).is_err()
+        );
+        assert!(Start::try_parse_from(["snarkos", "--validator", "--proposal-spent-limit-multiplier", "0"]).is_err());
+
+        let config = Start::try_parse_from(["snarkos", "--client"]).unwrap();
+        assert_eq!(config.proposal_spent_limit_multiplier, 1);
+
+        let config = Start::try_parse_from(["snarkos", "--validator"]).unwrap();
+        assert_eq!(config.proposal_spent_limit_multiplier, 1);
+
+        let config =
+            Start::try_parse_from(["snarkos", "--validator", "--proposal-spent-limit-multiplier", "5"]).unwrap();
+        assert_eq!(config.proposal_spent_limit_multiplier, 5);
     }
 
     #[test]
