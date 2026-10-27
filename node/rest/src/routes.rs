@@ -122,8 +122,10 @@ fn check_block_retained(height: u32, latest_height: u32) -> Result<(), RestError
 /// Returns a `410 Gone` if the non-empty range `start..end` reaches below this node's authority
 /// retention window (see [`check_block_retained`]).
 fn check_range_retained(start: u32, end: u32, latest_height: u32) -> Result<(), RestError> {
-    let Some(earliest) = range_below_retention_window(start, end, latest_height) else { return Ok(()) };
-    let height = start.max(1);
+    if !range_below_retention_window(start, end, latest_height) {
+        return Ok(());
+    }
+    let (height, earliest) = (start.max(1), oldest_retained_authority_height(latest_height));
     Err(RestError::gone(anyhow!(
         "block {height} is below this node's authority retention window (earliest {earliest}); \
         use /block/{height}/header, /block/{height}/transactions, or an archival node"
