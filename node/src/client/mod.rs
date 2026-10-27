@@ -470,15 +470,10 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
                         }
                         // Check the deployment.
                         #[cfg(feature = "metrics")]
-                        let start = std::time::Instant::now();
+                        let timer = snarkos_node_metrics::TransactionCheckTimer::start("client_relay", &transaction);
                         let result = _node.ledger.check_transaction_basic(&transaction, None, &mut rand::rng());
                         #[cfg(feature = "metrics")]
-                        snarkos_node_metrics::record_transaction_check(
-                            "client_relay",
-                            snarkos_node_metrics::transaction_kind(&transaction),
-                            result.is_ok(),
-                            start.elapsed(),
-                        );
+                        timer.finish(&result);
                         match result {
                             Ok(_) => {
                                 // Propagate the `UnconfirmedTransaction`.
@@ -563,15 +558,10 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
                         }
                         // Check the execution.
                         #[cfg(feature = "metrics")]
-                        let start = std::time::Instant::now();
+                        let timer = snarkos_node_metrics::TransactionCheckTimer::start("client_relay", &transaction);
                         let result = _node.ledger.check_transaction_basic(&transaction, None, &mut rand::rng());
                         #[cfg(feature = "metrics")]
-                        snarkos_node_metrics::record_transaction_check(
-                            "client_relay",
-                            snarkos_node_metrics::transaction_kind(&transaction),
-                            result.is_ok(),
-                            start.elapsed(),
-                        );
+                        timer.finish(&result);
                         match result {
                             Ok(_) => {
                                 // Propagate the `UnconfirmedTransaction`.

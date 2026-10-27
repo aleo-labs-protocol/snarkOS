@@ -171,7 +171,8 @@ pub mod router {
     pub const RESTRICTED: &str = "snarkos_router_restricted_total";
     /// Router messages, labeled by `direction` (`inbound` or `outbound`) and `type`.
     pub const EVENTS: &str = "snarkos_router_events_total";
-    /// Inbound `UnconfirmedTransaction` messages that passed the per-peer message limit, labeled by
+    /// Inbound `UnconfirmedTransaction` messages that passed the router's limit on all inbound messages
+    /// per peer (`MESSAGE_LIMIT`; there is no transaction-specific limit), labeled by
     /// `outcome`: `syncing` (dropped while the node is behind), `seen` (dropped by the per-peer
     /// inbound cache) or `dispatched` (handed to the node-type handler).
     pub const UNCONFIRMED_TRANSACTIONS_INBOUND: &str = "snarkos_router_unconfirmed_transactions_inbound_total";
@@ -180,7 +181,8 @@ pub mod router {
     /// or `validator` (to the connected validators, after the memory pool returns `Ok`).
     /// One per call, not per peer; per-peer sends are in [`EVENTS`].
     pub const UNCONFIRMED_TRANSACTIONS_PROPAGATED: &str = "snarkos_router_unconfirmed_transactions_propagated_total";
-    /// Inbound `UnconfirmedSolution` messages that passed the per-peer limits, labeled by `outcome`
+    /// Inbound `UnconfirmedSolution` messages that passed the router's limit on all inbound messages per
+    /// peer (`MESSAGE_LIMIT`) and its per-peer solution limit, labeled by `outcome`
     /// (`syncing`, `seen` or `dispatched`).
     pub const UNCONFIRMED_SOLUTIONS_INBOUND: &str = "snarkos_router_unconfirmed_solutions_inbound_total";
     /// Calls that propagate an `UnconfirmedSolution`, labeled by `site` (`rest`, `client_verified` or

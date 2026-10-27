@@ -771,10 +771,10 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
 
                         // Check if the transaction is still valid.
                         #[cfg(feature = "metrics")]
-                        let (kind, start) = (metrics::transaction_kind(&transaction), std::time::Instant::now());
+                        let timer = metrics::TransactionCheckTimer::start("propose_batch", &transaction);
                         let result = self.ledger.check_transaction_basic(transaction_id, transaction).await;
                         #[cfg(feature = "metrics")]
-                        metrics::record_transaction_check("propose_batch", kind, result.is_ok(), start.elapsed());
+                        timer.finish(&result);
                         if let Err(e) = result {
                             trace!("Proposing - Skipping transaction '{}' - {e}", fmt_id(transaction_id));
                             continue;

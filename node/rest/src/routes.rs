@@ -1286,15 +1286,10 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
                 // Hold the slot until verification finishes, even if the client disconnects.
                 let _verification_slot = verification_slot;
                 #[cfg(feature = "metrics")]
-                let start = std::time::Instant::now();
+                let timer = metrics::TransactionCheckTimer::start("rest", &tx);
                 let result = ledger.check_transaction_basic(&tx, None, &mut rand::rng());
                 #[cfg(feature = "metrics")]
-                metrics::record_transaction_check(
-                    "rest",
-                    metrics::transaction_kind(&tx),
-                    result.is_ok(),
-                    start.elapsed(),
-                );
+                timer.finish(&result);
                 result.map(|()| tx)
             })
             .await

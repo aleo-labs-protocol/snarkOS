@@ -40,7 +40,7 @@ use std::{
         OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::Instant,
 };
 use time::OffsetDateTime;
 use tokio::task::JoinHandle;
@@ -285,11 +285,26 @@ pub fn transaction_kind<N: Network>(transaction: &Transaction<N>) -> &'static st
     }
 }
 
-/// Records the outcome and duration of a full transaction check at the given site.
-pub fn record_transaction_check(site: &'static str, kind: &'static str, is_ok: bool, elapsed: Duration) {
-    let outcome = if is_ok { "ok" } else { "err" };
-    increment_counter_3(verification::TRANSACTION_CHECKS, "site", site, "kind", kind, "outcome", outcome);
-    histogram_2(verification::TRANSACTION_CHECK_SECS, "site", site, "kind", kind, elapsed.as_secs_f64());
+/// Times a full transaction check at one site; `finish` records its outcome and duration.
+pub struct TransactionCheckTimer {
+    site: &'static str,
+    kind: &'static str,
+    start: Instant,
+}
+
+impl TransactionCheckTimer {
+    /// Starts timing a check of `transaction` at `site`.
+    pub fn start<N: Network>(site: &'static str, transaction: &Transaction<N>) -> Self {
+        Self { site, kind: transaction_kind(transaction), start: Instant::now() }
+    }
+
+    /// Records the check's outcome and the time since `start`.
+    pub fn finish<T, E>(self, result: &Result<T, E>) {
+        let Self { site, kind, start } = self;
+        let outcome = if result.is_ok() { "ok" } else { "err" };
+        increment_counter_3(verification::TRANSACTION_CHECKS, "site", site, "kind", kind, "outcome", outcome);
+        histogram_2(verification::TRANSACTION_CHECK_SECS, "site", site, "kind", kind, start.elapsed().as_secs_f64());
+    }
 }
 
 /// Records the outcome of a solution check at the given site.

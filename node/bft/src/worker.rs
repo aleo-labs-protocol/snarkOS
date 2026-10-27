@@ -414,10 +414,10 @@ impl<N: Network> Worker<N> {
                 let self_ = self.clone();
                 tokio::spawn(async move {
                     #[cfg(feature = "metrics")]
-                    let start = std::time::Instant::now();
+                    let timer = metrics::TransactionCheckTimer::start(site, &tx);
                     let _result = self_.ledger.check_transaction_basic(tx_id, tx).await;
                     #[cfg(feature = "metrics")]
-                    metrics::record_transaction_check(site, "execute", _result.is_ok(), start.elapsed());
+                    timer.finish(&_result);
                 });
             }
             trace!(
@@ -496,10 +496,10 @@ impl<N: Network> Worker<N> {
 
         // Check that the transaction is well-formed and unique.
         #[cfg(feature = "metrics")]
-        let (kind, start) = (metrics::transaction_kind(&transaction), std::time::Instant::now());
+        let timer = metrics::TransactionCheckTimer::start("worker", &transaction);
         let result = self.ledger.check_transaction_basic(transaction_id, transaction).await;
         #[cfg(feature = "metrics")]
-        metrics::record_transaction_check("worker", kind, result.is_ok(), start.elapsed());
+        timer.finish(&result);
         result?;
         // Adds the transaction to the ready queue.
         if self.ready.write().insert(transmission_id, transmission) {
