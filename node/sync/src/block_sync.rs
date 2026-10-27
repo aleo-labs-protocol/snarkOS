@@ -532,9 +532,9 @@ impl<N: Network> BlockSync<N> {
         BlockLocators::new(recents, checkpoints)
     }
 
-    /// Returns a random sample of up to `max_num_sync_ips` of `sync_peers` that are still connected
-    /// and assumed to serve `start_height`, or `None` if there are none. Call it while holding
-    /// `prepare_requests_lock`.
+    /// Returns a random sample of `max_num_sync_ips` of `sync_peers` (or all of them, if fewer) that
+    /// are still connected and assumed to serve `start_height`, or `None` if too few are. Call it
+    /// while holding `prepare_requests_lock`.
     fn select_sync_ips(
         &self,
         sync_peers: &IndexMap<SocketAddr, BlockLocators<N>>,
@@ -554,7 +554,7 @@ impl<N: Network> BlockSync<N> {
             .sample(&mut rand::rng(), max_num_sync_ips)
             .into_iter()
             .collect();
-        (!sync_ips.is_empty()).then_some(sync_ips)
+        (sync_ips.len() >= max_num_sync_ips.min(sync_peers.len())).then_some(sync_ips)
     }
 
     /// Send a batch of block requests.
@@ -2692,6 +2692,19 @@ mod tests {
         // The peer answers empty for an earlier request from the same height.
         empty_response_to(&sync, peer_ip, start_height);
         assert!(sync.select_sync_ips(&sync_peers, start_height, 1).is_none());
+    }
+
+    /// Tests that a prepared batch needing several peers is skipped when fewer can still serve it.
+    #[test]
+    fn test_prepared_batch_needs_enough_peers() {
+        let sync = sample_sync_at_height(1_000);
+        add_peers(&sync, 1, 3, 1_100);
+        let sync_peers: IndexMap<_, _> = (1..=3).map(|id| (sample_peer_ip(id), sample_block_locators(1_100))).collect();
+        assert_eq!(sync.select_sync_ips(&sync_peers, 1_001, 3).unwrap().len(), 3);
+
+        empty_response_to(&sync, sample_peer_ip(1), 1_001);
+        assert!(sync.select_sync_ips(&sync_peers, 1_001, 3).is_none());
+        assert_eq!(sync.select_sync_ips(&sync_peers, 1_001, 2).unwrap().len(), 2);
     }
 
     /// Tests that peers ahead whose learned floors are above the next block arm the stuck signal, or
