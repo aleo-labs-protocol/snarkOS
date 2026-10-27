@@ -64,8 +64,8 @@ pub fn initialize_metrics(ip: Option<SocketAddr>) {
     // Note: these are first-pass boundaries, not yet tuned against production data.
     const SECS_BUCKETS: &[f64] = &[0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 3.0, 5.0, 10.0];
     const COUNT_BUCKETS: &[f64] = &[1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 34.0, 55.0, 89.0];
-    // Verification buckets, for `verification::TRANSACTION_CHECK_SECS`. They span sub-millisecond
-    // checks, which skip proof verification, up to full checks that take seconds.
+    // Verification buckets, for `verification::TRANSACTION_CHECK_SECS`. They span checks that skip
+    // proof verification, up to full checks of deployments, which take seconds.
     const VERIFICATION_SECS_BUCKETS: &[f64] =
         &[0.0001, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0];
 
