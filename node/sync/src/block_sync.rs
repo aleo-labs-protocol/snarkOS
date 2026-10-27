@@ -316,6 +316,10 @@ pub struct BlockSync<N: Network> {
     /// The number of consecutive empty block responses from each peer for blocks it claims to hold.
     empty_responses: Mutex<HashMap<SocketAddr, u32>>,
 
+    /// Peers that sent an empty block response since their locators last changed. They are not sent
+    /// requests until then, so a peer that just pruned the range is not asked again from a stale tip.
+    answered_empty: Mutex<HashSet<SocketAddr>>,
+
     /// Whether the node only connects to trusted peers (see [`Self::sync_stuck_below_peer_floors`]).
     trusted_peers_only: bool,
 }
@@ -343,6 +347,7 @@ impl<N: Network> BlockSync<N> {
             stuck_since: Default::default(),
             last_pruned_peers_warning: Default::default(),
             empty_responses: Default::default(),
+            answered_empty: Default::default(),
             trusted_peers_only: false,
         }
     }
@@ -680,6 +685,7 @@ impl<N: Network> BlockSync<N> {
         // Attempt to insert the block responses, and break if we encounter an error.
         let result = 'outer: {
             let Some(last_height) = blocks.as_slice().last().map(|b| b.height()) else {
+                self.answered_empty.lock().insert(peer_ip);
                 break 'outer Err(self.count_empty_block_response(peer_ip));
             };
             self.empty_responses.lock().remove(&peer_ip);
@@ -944,6 +950,8 @@ impl<N: Network> BlockSync<N> {
                 e.insert(locators.clone());
             }
         }
+        // The peer's floor may have moved; its empty-response count is kept.
+        self.answered_empty.lock().remove(&peer_ip);
 
         // -- Second, compute the common ancestor with this node. --
         let new_local_ancestor = {
@@ -1040,6 +1048,7 @@ impl<N: Network> BlockSync<N> {
         // Drop the last-response timestamp so a reconnecting peer starts fresh.
         self.last_response_at.lock().remove(peer_ip);
         self.empty_responses.lock().remove(peer_ip);
+        self.answered_empty.lock().remove(peer_ip);
         // Remove all block requests to the peer.
         self.remove_block_requests_to_peer(peer_ip);
 
@@ -1651,7 +1660,8 @@ impl<N: Network> BlockSync<N> {
     ///
     /// Unlike [`Self::find_sync_peers`] this does not only return the latest locators height, but the full BlockLocators for each peer.
     /// Returns `None` if there are no peers to sync from. With `first_needed`, the first block to be
-    /// requested, peers assumed to have pruned it are excluded.
+    /// requested, peers assumed to have pruned it, or that answered empty since their locators last
+    /// changed, are excluded.
     ///
     /// # Locking
     /// This function will read-lock `common_ancestors`.
@@ -1666,13 +1676,16 @@ impl<N: Network> BlockSync<N> {
         // Pick a set of peers above the latest ledger height, and include their locators.
         // This will sort the peers by locator height in descending order.
         // Peers assumed to have pruned the authority data of the first needed block are excluded.
+        let answered_empty = self.answered_empty.lock().clone();
         let candidate_locators: IndexMap<_, _> = self
             .locators
             .read()
             .iter()
-            .filter(|(_, locators)| {
+            .filter(|(peer_ip, locators)| {
                 let peer_tip = locators.latest_locator_height();
-                peer_tip > current_height && first_needed.is_none_or(|height| peer_can_serve(peer_tip, height))
+                peer_tip > current_height
+                    && first_needed
+                        .is_none_or(|height| peer_can_serve(peer_tip, height) && !answered_empty.contains(*peer_ip))
             })
             .sorted_by(|(_, a), (_, b)| b.latest_locator_height().cmp(&a.latest_locator_height()))
             .take(NUM_SYNC_CANDIDATE_PEERS)
@@ -1975,6 +1988,7 @@ mod tests {
             stuck_since: Default::default(),
             last_pruned_peers_warning: Default::default(),
             empty_responses: Default::default(),
+            answered_empty: Default::default(),
             trusted_peers_only: false,
         }
     }
@@ -2531,6 +2545,28 @@ mod tests {
         let error = empty_response_to(&sync, peer_ip, 1);
         assert!(error.requires_disconnect());
         assert!(!error.is_benign());
+    }
+
+    /// Tests that an honest peer that just pruned the next block is not asked again from its stale
+    /// tip, and is not disconnected once its locators move its floor past the block.
+    #[test]
+    fn test_empty_block_response_at_window_edge_does_not_disconnect() {
+        let sync = sample_sync_at_height(1_000);
+        let peer_ip = sample_peer_ip(1);
+        sync.update_peer_locators(peer_ip, &sample_block_locators(1_000 + AUTHORITY_RETENTION_BLOCKS)).unwrap();
+        assert!(!sync.prepare_block_requests().is_empty());
+
+        // The peer pruned block 1,001 since its last ping.
+        assert!(empty_response_to(&sync, peer_ip, 1_001).is_benign());
+        sync.failed_requests.lock().clear();
+        assert!(sync.prepare_block_requests().is_empty(), "the peer is not asked again from its stale tip");
+
+        // Its next ping moves its floor past block 1,001, so later empty responses do not count.
+        sync.update_peer_locators(peer_ip, &sample_block_locators(1_010 + AUTHORITY_RETENTION_BLOCKS)).unwrap();
+        assert!(sync.prepare_block_requests().is_empty());
+        for _ in 0..MAX_CONSECUTIVE_EMPTY_BLOCK_RESPONSES {
+            assert!(empty_response_to(&sync, peer_ip, 1_001).is_benign());
+        }
     }
 
     /// Tests that empty responses for blocks below a peer's assumed floor are never counted.
