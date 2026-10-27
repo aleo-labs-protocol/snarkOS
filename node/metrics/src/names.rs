@@ -13,15 +13,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(super) const COUNTER_NAMES: [&str; 5] = [
+pub(super) const COUNTER_NAMES: [&str; 7] = [
     bft::LEADERS_ELECTED,
     bft::PEER_PROPOSALS_MALFORMED,
     consensus::STALE_UNCONFIRMED_TRANSACTIONS,
     consensus::STALE_UNCONFIRMED_SOLUTIONS,
     consensus::DROPPED_TRANSACTIONS,
+    consensus::UNCONFIRMED_SOLUTIONS,
+    consensus::UNCONFIRMED_TRANSACTIONS,
 ];
 
-pub(super) const GAUGE_NAMES: [&str; 33] = [
+pub(super) const GAUGE_NAMES: [&str; 31] = [
     bft::CONNECTED,
     bft::CONNECTED_STAKE,
     bft::CONNECTED_STAKE_WITH_MATCHING_SHA,
@@ -44,8 +46,6 @@ pub(super) const GAUGE_NAMES: [&str; 33] = [
     blocks::COINBASE_TARGET,
     blocks::CUMULATIVE_PROOF_TARGET,
     consensus::COMMITTED_CERTIFICATES,
-    consensus::UNCONFIRMED_SOLUTIONS,
-    consensus::UNCONFIRMED_TRANSACTIONS,
     consensus::DEPLOYMENTS_PRIORITY_QUEUE_SIZE,
     consensus::DEPLOYMENTS_ZERO_FEE_QUEUE_SIZE,
     consensus::EXECUTIONS_PRIORITY_QUEUE_SIZE,

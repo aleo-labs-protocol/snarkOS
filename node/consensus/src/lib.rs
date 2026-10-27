@@ -328,7 +328,7 @@ impl<N: Network> Consensus<N> {
             }
             #[cfg(feature = "metrics")]
             {
-                metrics::increment_gauge(metrics::consensus::UNCONFIRMED_SOLUTIONS, 1f64);
+                metrics::increment_counter(metrics::consensus::UNCONFIRMED_SOLUTIONS);
                 let timestamp = snarkos_node_bft::helpers::now();
                 self.transmissions_tracker.lock().insert(TransmissionID::Solution(solution_id, checksum), timestamp);
             }
@@ -439,7 +439,7 @@ impl<N: Network> Consensus<N> {
             // A duplicate was counted and tracked when its first copy was queued.
             #[cfg(feature = "metrics")]
             if matches!(insertion, Ok(QueueInsertion::Inserted | QueueInsertion::InsertedWithEviction)) {
-                metrics::increment_gauge(metrics::consensus::UNCONFIRMED_TRANSACTIONS, 1f64);
+                metrics::increment_counter(metrics::consensus::UNCONFIRMED_TRANSACTIONS);
                 let timestamp = snarkos_node_bft::helpers::now();
                 self.transmissions_tracker
                     .lock()
