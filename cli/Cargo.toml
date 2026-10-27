@@ -45,8 +45,8 @@ test_network = [
   "snarkvm/dev-committee",
   "snarkvm/dev-print",
   "snarkvm/dev_genesis_state_root",
-  "snarkvm/test_authority_retention",
 ]
+test_authority_retention = [ "test_network", "prune-authority-data", "snarkvm/test_authority_retention" ]
 serial = [
   "snarkvm/serial",
   "snarkos-node/serial",

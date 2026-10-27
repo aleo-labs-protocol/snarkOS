@@ -324,6 +324,8 @@ serial = [
 test_targets = [ "snarkos-cli/test_targets" ]
 test_consensus_heights = [ "snarkos-cli/test_consensus_heights" ]
 test_network = [ "snarkos-cli/test_network", "snarkos-node/test_network" ]
+# Prune authority data with snarkVM's 300-block devnet window.
+test_authority_retention = [ "snarkos-cli/test_authority_retention", "snarkos-node/test_authority_retention" ]
 tokio_console = [ "snarkos-cli/tokio_console" ]
 
 [dependencies.clap]

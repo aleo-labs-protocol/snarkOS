@@ -598,7 +598,7 @@ telemetry described in [Validator Telemetry Metrics](#321-validator-telemetry-me
 * **prune-authority-data** -
   Prunes the authority data (certificates) of blocks older than snarkVM's `AUTHORITY_RETENTION_BLOCKS`.
   Peers assume this retention window regardless of whether the feature is enabled, and fetch older blocks from the CDN.
-  **test_network** builds shrink the window to 300 blocks for devnet testing.
+  **test_authority_retention** enables it with a 300-block window (and **test_network**) for devnet testing.
 * **telemetry** -
   Deprecated alias for **metrics**, kept so that existing build commands keep working.
   Validator telemetry is part of **metrics**.

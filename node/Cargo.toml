@@ -62,12 +62,8 @@ serial = [
   "snarkos-node-bft/serial"
 ]
 test = []
-test_network = [
-  "snarkos-node-bft/test_network",
-  "snarkos-node-consensus/test_network",
-  "snarkos-utilities/test_network",
-  "snarkvm/test_authority_retention"
-]
+test_network = [ "snarkos-node-bft/test_network", "snarkos-node-consensus/test_network", "snarkos-utilities/test_network" ]
+test_authority_retention = [ "test_network", "prune-authority-data", "snarkvm/test_authority_retention" ]
 
 [dependencies.aleo-std]
 workspace = true
