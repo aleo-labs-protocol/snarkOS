@@ -519,11 +519,12 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
     fn initialize_stuck_sync_monitor(&self, cdn_fallback: CdnFallback) {
         let sync = self.sync.clone();
         let signal_handler = self.signal_handler.clone();
+        let trusted_peers_only = self.router().trusted_peers_only();
         self.spawn(async move {
             while !signal_handler.is_stopped() {
                 tokio::time::sleep(STUCK_SYNC_SHUTDOWN_THRESHOLD / 10).await;
 
-                if crate::shut_down_if_stuck_sync(&sync, &signal_handler, cdn_fallback) {
+                if crate::shut_down_if_stuck_sync(&sync, &signal_handler, cdn_fallback, trusted_peers_only) {
                     break;
                 }
             }

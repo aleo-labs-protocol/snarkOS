@@ -1268,15 +1268,16 @@ impl<N: Network> BlockSync<N> {
     /// Returns how long sync has made no progress because the peers have pruned the blocks this
     /// node needs, if that is currently the case.
     ///
-    /// The peers must corroborate it: at least `MINIMUM_NUMBER_OF_PEERS` peers have sent locators,
-    /// and a strict majority of them are ahead with an assumed floor above the next needed block.
-    /// A lone peer fabricating a far-ahead tip is a minority among honest peers at this height, so
-    /// it cannot trigger a shutdown. With fewer peers, a warning is logged instead.
+    /// The peers must corroborate it: a strict majority of the peers that sent locators are ahead with
+    /// an assumed floor above the next needed block, and, unless `trusted_peers_only` (the operator
+    /// chose the peers), at least `MINIMUM_NUMBER_OF_PEERS` peers sent locators. A lone peer
+    /// fabricating a far-ahead tip is a minority among honest peers at this height, so it cannot
+    /// trigger a shutdown. With fewer peers, a warning is logged instead.
     ///
     /// The condition is evaluated on every call, so a window armed earlier cannot outlive it. The
     /// window is armed when the condition first holds, restarted if the ledger height advances while
     /// it holds, and cleared when it stops holding.
-    pub fn sync_stuck_below_peer_floors(&self) -> Option<Duration> {
+    pub fn sync_stuck_below_peer_floors(&self, trusted_peers_only: bool) -> Option<Duration> {
         // The majority rule leaves no peer eligible for new requests, so only existing requests need
         // a separate check: one still awaiting a response, or one for the next block, means sync can
         // still progress. Answered requests above an unservable gap do not count.
@@ -1287,8 +1288,9 @@ impl<N: Network> BlockSync<N> {
         };
         let pruned = if can_progress { None } else { self.peers_ahead_all_pruned(height) };
         // A strict majority, written without division so it is exact.
-        let is_stuck = pruned
-            .is_some_and(|(num_ahead, num_peers)| num_peers >= MINIMUM_NUMBER_OF_PEERS && num_ahead * 2 > num_peers);
+        let is_stuck = pruned.is_some_and(|(num_ahead, num_peers)| {
+            (trusted_peers_only || num_peers >= MINIMUM_NUMBER_OF_PEERS) && num_ahead * 2 > num_peers
+        });
         self.warn_if_pruned_without_majority(pruned.is_some() && !is_stuck, height);
 
         let mut stuck_since = self.stuck_since.lock();
@@ -2546,7 +2548,7 @@ mod tests {
         sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(1_000 + AUTHORITY_RETENTION_BLOCKS))
             .unwrap();
         assert!(!sync.prepare_block_requests().is_empty());
-        assert!(sync.sync_stuck_below_peer_floors().is_none());
+        assert!(sync.sync_stuck_below_peer_floors(false).is_none());
 
         // A peer one block further ahead has an assumed floor one block higher: no longer eligible.
         let sync = sample_sync_at_height(1_000);
@@ -2622,7 +2624,11 @@ mod tests {
             add_peers(&sync, 1 + num_pruned as u16, num_level, HEIGHT);
 
             assert!(sync.prepare_block_requests().is_empty());
-            assert_eq!(sync.sync_stuck_below_peer_floors().is_some(), armed, "{num_pruned} pruned, {num_level} level");
+            assert_eq!(
+                sync.sync_stuck_below_peer_floors(false).is_some(),
+                armed,
+                "{num_pruned} pruned, {num_level} level"
+            );
         }
     }
 
@@ -2632,12 +2638,24 @@ mod tests {
     fn test_pruned_peers_without_majority_warn() {
         let sync = sample_sync_at_height(1_000);
         add_peers(&sync, 1, 1, 1_000 + 2 * AUTHORITY_RETENTION_BLOCKS);
-        assert!(sync.sync_stuck_below_peer_floors().is_none());
+        assert!(sync.sync_stuck_below_peer_floors(false).is_none());
         assert!(sync.last_pruned_peers_warning.lock().is_some());
 
         add_peers(&sync, 2, 1, 1_000 + AUTHORITY_RETENTION_BLOCKS);
-        assert!(sync.sync_stuck_below_peer_floors().is_none());
+        assert!(sync.sync_stuck_below_peer_floors(false).is_none());
         assert!(sync.last_pruned_peers_warning.lock().is_none());
+    }
+
+    /// Tests that under `trusted_peers_only` a lone peer, ahead and pruned, arms the stuck signal
+    /// without the warning, while otherwise it only warns.
+    #[test]
+    fn test_trusted_peers_only_drops_minimum_peers() {
+        for trusted_peers_only in [true, false] {
+            let sync = sample_sync_at_height(1_000);
+            add_peers(&sync, 1, 1, 1_000 + 2 * AUTHORITY_RETENTION_BLOCKS);
+            assert_eq!(sync.sync_stuck_below_peer_floors(trusted_peers_only).is_some(), trusted_peers_only);
+            assert_eq!(sync.last_pruned_peers_warning.lock().is_some(), !trusted_peers_only);
+        }
     }
 
     /// Tests that a sync height left behind the ledger (e.g. after CDN sync) does not make peers that
@@ -2650,7 +2668,7 @@ mod tests {
         add_peers(&sync, 1, MINIMUM_NUMBER_OF_PEERS, 1_000 + AUTHORITY_RETENTION_BLOCKS);
 
         assert!(!sync.prepare_block_requests().is_empty());
-        assert!(sync.sync_stuck_below_peer_floors().is_none());
+        assert!(sync.sync_stuck_below_peer_floors(false).is_none());
     }
 
     /// Tests that requests already answered, but waiting on an unservable gap below them, do not
@@ -2673,16 +2691,16 @@ mod tests {
 
         // An answered request above the gap.
         sync.requests.write().insert(6, request(IndexSet::new(), Some(genesis.clone())));
-        assert!(sync.sync_stuck_below_peer_floors().is_some());
+        assert!(sync.sync_stuck_below_peer_floors(false).is_some());
 
         // An answered request for the next block.
         sync.requests.write().insert(1, request(IndexSet::new(), Some(genesis)));
-        assert!(sync.sync_stuck_below_peer_floors().is_none());
+        assert!(sync.sync_stuck_below_peer_floors(false).is_none());
         sync.requests.write().remove(&1);
 
         // A request still awaiting a peer's response.
         sync.requests.write().insert(7, request([sample_peer_ip(1)].into_iter().collect(), None));
-        assert!(sync.sync_stuck_below_peer_floors().is_none());
+        assert!(sync.sync_stuck_below_peer_floors(false).is_none());
     }
 
     /// Tests the stuck-signal lifecycle: never set without peers; set once peers have pruned the
@@ -2693,31 +2711,31 @@ mod tests {
     fn test_stuck_signal_lifecycle() {
         let sync = sample_sync_at_height(0);
         assert!(sync.prepare_block_requests().is_empty());
-        assert!(sync.sync_stuck_below_peer_floors().is_none());
+        assert!(sync.sync_stuck_below_peer_floors(false).is_none());
 
         add_peers(&sync, 1, MINIMUM_NUMBER_OF_PEERS, 2 * AUTHORITY_RETENTION_BLOCKS);
-        assert!(sync.sync_stuck_below_peer_floors().is_some());
+        assert!(sync.sync_stuck_below_peer_floors(false).is_some());
         std::thread::sleep(Duration::from_millis(20));
-        let stuck_for = sync.sync_stuck_below_peer_floors().unwrap();
+        let stuck_for = sync.sync_stuck_below_peer_floors(false).unwrap();
         assert!(stuck_for >= Duration::from_millis(20), "the window kept its start");
 
         // Progress restarts the window.
         sync.set_sync_height(1);
-        assert!(sync.sync_stuck_below_peer_floors().unwrap() < stuck_for);
+        assert!(sync.sync_stuck_below_peer_floors(false).unwrap() < stuck_for);
 
         // A peer that retains the needed blocks clears the signal.
         let retaining_peer = sample_peer_ip(MINIMUM_NUMBER_OF_PEERS as u16 + 1);
         sync.update_peer_locators(retaining_peer, &sample_block_locators(AUTHORITY_RETENTION_BLOCKS / 10)).unwrap();
         assert!(!sync.prepare_block_requests().is_empty());
-        assert!(sync.sync_stuck_below_peer_floors().is_none());
+        assert!(sync.sync_stuck_below_peer_floors(false).is_none());
 
         // So does the pruned peers disconnecting.
         sync.remove_peer(&retaining_peer);
-        assert!(sync.sync_stuck_below_peer_floors().is_some());
+        assert!(sync.sync_stuck_below_peer_floors(false).is_some());
         for id in 1..=MINIMUM_NUMBER_OF_PEERS as u16 {
             sync.remove_peer(&sample_peer_ip(id));
         }
-        assert!(sync.sync_stuck_below_peer_floors().is_none());
+        assert!(sync.sync_stuck_below_peer_floors(false).is_none());
     }
 
     #[test]
