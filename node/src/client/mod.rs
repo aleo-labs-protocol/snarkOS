@@ -291,6 +291,7 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
     fn initialize_sync(&self, cdn_fallback: CdnFallback) {
         // Start the block request generation loop (outgoing).
         let self_ = self.clone();
+        let trusted_peers_only = self.router().trusted_peers_only();
         self.spawn(async move {
             while !self_.signal_handler.is_stopped() {
                 // Wait for peer updates or timeout
@@ -301,7 +302,6 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
 
                 // Shut down if no connected peer can serve the blocks this node needs; the missing
                 // range is then fetched from the CDN on restart, or restored from a snapshot.
-                let trusted_peers_only = self_.router().trusted_peers_only();
                 if crate::shut_down_if_stuck_sync(&self_.sync, &self_.signal_handler, cdn_fallback, trusted_peers_only)
                 {
                     break;

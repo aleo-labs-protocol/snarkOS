@@ -86,7 +86,7 @@ const EXTRA_REDUNDANCY_FACTOR: usize = REDUNDANCY_FACTOR * 3;
 const NUM_SYNC_CANDIDATE_PEERS: usize = REDUNDANCY_FACTOR * 5;
 
 /// The number of consecutive empty block responses, for blocks a peer claims to hold, after which the
-/// peer is treated as faulty. One is tolerated, as the peer may have pruned the range since its last ping.
+/// peer is treated as faulty. Fewer are tolerated, as the peer may have pruned the range since its last ping.
 const MAX_CONSECUTIVE_EMPTY_BLOCK_RESPONSES: u32 = 3;
 
 const BLOCK_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -129,7 +129,6 @@ pub fn blocks_or_empty<N: Network>(
         return DataBlocks(vec![]);
     }
     get_blocks().map(DataBlocks).unwrap_or_else(|error| {
-        // A range within this node's window should be readable, so a failure there is a storage problem.
         if end_height <= latest_height.saturating_add(1) {
             warn!("Failed to read blocks {start_height}..{end_height} for a block request - {}", flatten_error(&error));
         } else {
@@ -418,6 +417,11 @@ impl<N: Network> BlockSync<N> {
         self.requests.read().len()
     }
 
+    /// Returns the latest locator height of the given peer.
+    fn get_peer_height(&self, peer_ip: &SocketAddr) -> Option<u32> {
+        self.locators.read().get(peer_ip).map(|locators| locators.latest_locator_height())
+    }
+
     //// Returns the latest locator height for all known peers.
     pub fn get_peer_heights(&self) -> HashMap<SocketAddr, u32> {
         self.locators.read().iter().map(|(addr, locators)| (*addr, locators.latest_locator_height())).collect()
@@ -454,11 +458,6 @@ impl<N: Network> BlockSync<N> {
 // Helper functions needed for testing
 #[cfg(test)]
 impl<N: Network> BlockSync<N> {
-    /// Returns the latest block height of the given peer IP.
-    fn get_peer_height(&self, peer_ip: &SocketAddr) -> Option<u32> {
-        self.locators.read().get(peer_ip).map(|locators| locators.latest_locator_height())
-    }
-
     /// Returns the common ancestor for the given peer pair, if it exists.
     fn get_common_ancestor(&self, peer_a: SocketAddr, peer_b: SocketAddr) -> Option<u32> {
         self.common_ancestors.read().get(&PeerPair(peer_a, peer_b)).copied()
@@ -731,7 +730,7 @@ impl<N: Network> BlockSync<N> {
             .iter()
             .find(|(_, request)| request.response.is_none() && request.sync_ips().contains(&peer_ip))
             .map(|(height, _)| *height);
-        let peer_tip = self.locators.read().get(&peer_ip).map(|locators| locators.latest_locator_height());
+        let peer_tip = self.get_peer_height(&peer_ip);
         let Some((height, tip)) = lowest_request.zip(peer_tip) else {
             return InsertBlockResponseError::EmptyBlockResponse;
         };
@@ -743,7 +742,6 @@ impl<N: Network> BlockSync<N> {
         let count = empty_responses.entry(peer_ip).or_default();
         *count += 1;
         if *count >= MAX_CONSECUTIVE_EMPTY_BLOCK_RESPONSES {
-            empty_responses.remove(&peer_ip);
             InsertBlockResponseError::RepeatedEmptyBlockResponses
         } else {
             InsertBlockResponseError::EmptyBlockResponse
@@ -1320,11 +1318,11 @@ impl<N: Network> BlockSync<N> {
         self.metrics.count_request_completed();
     }
 
-    /// Warns, every `STUCK_SYNC_SHUTDOWN_THRESHOLD` while `pruned` holds, that every peer ahead has
+    /// Warns, every `STUCK_SYNC_SHUTDOWN_THRESHOLD` while `warn` holds, that every peer ahead has
     /// pruned the next needed block but too few peers corroborate it to shut down.
-    fn warn_if_pruned_without_majority(&self, pruned: bool, height: u32) {
+    fn warn_if_pruned_without_majority(&self, warn: bool, height: u32) {
         let mut last_warning = self.last_pruned_peers_warning.lock();
-        if !pruned {
+        if !warn {
             *last_warning = None;
         } else if last_warning.is_none_or(|at| at.elapsed() >= STUCK_SYNC_SHUTDOWN_THRESHOLD) {
             *last_warning = Some(Instant::now());
