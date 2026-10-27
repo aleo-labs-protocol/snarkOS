@@ -383,22 +383,17 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             return Ok(json_block);
         }
 
-        // Report a pruned block as gone. Only a pruning node needs the lookup; a hash it does not
-        // know falls through to the 404 below.
-        if is_hash_input && oldest_retained_authority_height(latest_height) > 1 {
-            let ledger = rest.ledger.clone();
-            let height = tokio::task::spawn_blocking(move || ledger.get_height(&hash))
-                .await
-                .map_err(|e| RestError::internal_server_error(anyhow!("tokio error: {e}")))?;
-            if let Ok(height) = height {
+        // Retrieve the block from the database. A pruning node first reports a pruned block as gone;
+        // a hash it does not know falls through to the 404 below.
+        let check_retention = is_hash_input && oldest_retained_authority_height(latest_height) > 1;
+        let block = tokio::task::spawn_blocking(move || {
+            if check_retention && let Ok(height) = rest.ledger.get_height(&hash) {
                 check_block_retained(height, latest_height)?;
             }
-        }
-
-        // Retrieve the block from the database.
-        let block = tokio::task::spawn_blocking(move || rest.ledger.try_get_block_by_hash(&hash))
-            .await
-            .map_err(|e| RestError::internal_server_error(anyhow!("tokio error: {e}")))?;
+            Ok::<_, RestError>(rest.ledger.try_get_block_by_hash(&hash))
+        })
+        .await
+        .map_err(|e| RestError::internal_server_error(anyhow!("tokio error: {e}")))??;
         match block {
             Ok(Some(block)) => Ok(ErasedJson::new(block)),
             Ok(None) => Err(RestError::not_found(anyhow!("Couldn't find block {height_or_hash}"))),
