@@ -85,6 +85,10 @@ pub const BLOCK_REQUEST_BATCH_DELAY: Duration = Duration::from_millis(10);
 const EXTRA_REDUNDANCY_FACTOR: usize = REDUNDANCY_FACTOR * 3;
 const NUM_SYNC_CANDIDATE_PEERS: usize = REDUNDANCY_FACTOR * 5;
 
+/// The number of consecutive empty block responses, for blocks a peer claims to hold, after which the
+/// peer is treated as faulty. One is tolerated, as the peer may have pruned the range since its last ping.
+const MAX_CONSECUTIVE_EMPTY_BLOCK_RESPONSES: u32 = 3;
+
 const BLOCK_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The maximum number of outstanding block requests.
@@ -173,6 +177,10 @@ pub struct BlockRequestsSummary {
 pub enum InsertBlockResponseError<N: Network> {
     #[error("Empty block response (this could indicate the peer cannot serve the requested blocks)")]
     EmptyBlockResponse,
+    #[error(
+        "{MAX_CONSECUTIVE_EMPTY_BLOCK_RESPONSES} consecutive empty block responses for blocks the peer claims to hold"
+    )]
+    RepeatedEmptyBlockResponses,
     #[error("The peer did not send a consensus version")]
     NoConsensusVersion,
     #[error(
@@ -205,6 +213,11 @@ impl<N: Network> InsertBlockResponseError<N> {
     /// Returns `true` if the error does not indicate malicious or faulty behavior.
     pub fn is_benign(&self) -> bool {
         matches!(self, Self::NoSuchRequest { .. } | Self::BlockSyncAlreadyAdvanced { .. } | Self::EmptyBlockResponse)
+    }
+
+    /// Returns `true` if the peer should be disconnected.
+    pub fn requires_disconnect(&self) -> bool {
+        matches!(self, Self::RepeatedEmptyBlockResponses)
     }
 
     // Returns true if the peer's consensus version is ahead of ours.
@@ -300,6 +313,9 @@ pub struct BlockSync<N: Network> {
     /// When the node last warned that every peer ahead has pruned the blocks it needs, while too few
     /// peers corroborate it for [`Self::sync_stuck_below_peer_floors`] to report sync as stuck.
     last_pruned_peers_warning: Mutex<Option<Instant>>,
+
+    /// The number of consecutive empty block responses from each peer for blocks it claims to hold.
+    empty_responses: Mutex<HashMap<SocketAddr, u32>>,
 }
 
 impl<N: Network> BlockSync<N> {
@@ -324,6 +340,7 @@ impl<N: Network> BlockSync<N> {
             last_response_at: Default::default(),
             stuck_since: Default::default(),
             last_pruned_peers_warning: Default::default(),
+            empty_responses: Default::default(),
         }
     }
 
@@ -655,8 +672,9 @@ impl<N: Network> BlockSync<N> {
         // Attempt to insert the block responses, and break if we encounter an error.
         let result = 'outer: {
             let Some(last_height) = blocks.as_slice().last().map(|b| b.height()) else {
-                break 'outer Err(InsertBlockResponseError::EmptyBlockResponse);
+                break 'outer Err(self.count_empty_block_response(peer_ip));
             };
+            self.empty_responses.lock().remove(&peer_ip);
 
             let expected_consensus_version =
                 N::CONSENSUS_VERSION(last_height).map_err(InsertBlockResponseError::Other)?;
@@ -702,6 +720,34 @@ impl<N: Network> BlockSync<N> {
 
         // Return the result.
         result
+    }
+
+    /// Counts an empty block response from `peer_ip` if the peer claims to hold its lowest outstanding
+    /// request (a lower bound on the response's range), and returns the error to report.
+    fn count_empty_block_response(&self, peer_ip: SocketAddr) -> InsertBlockResponseError<N> {
+        let lowest_request = self
+            .requests
+            .read()
+            .iter()
+            .find(|(_, request)| request.response.is_none() && request.sync_ips().contains(&peer_ip))
+            .map(|(height, _)| *height);
+        let peer_tip = self.locators.read().get(&peer_ip).map(|locators| locators.latest_locator_height());
+        let Some((height, tip)) = lowest_request.zip(peer_tip) else {
+            return InsertBlockResponseError::EmptyBlockResponse;
+        };
+        if !peer_can_serve(tip, height) {
+            return InsertBlockResponseError::EmptyBlockResponse;
+        }
+
+        let mut empty_responses = self.empty_responses.lock();
+        let count = empty_responses.entry(peer_ip).or_default();
+        *count += 1;
+        if *count >= MAX_CONSECUTIVE_EMPTY_BLOCK_RESPONSES {
+            empty_responses.remove(&peer_ip);
+            InsertBlockResponseError::RepeatedEmptyBlockResponses
+        } else {
+            InsertBlockResponseError::EmptyBlockResponse
+        }
     }
 
     /// Returns the next block for the given `next_height` if the request is complete,
@@ -986,6 +1032,7 @@ impl<N: Network> BlockSync<N> {
         self.common_ancestors.write().retain(|pair, _| !pair.contains(peer_ip));
         // Drop the last-response timestamp so a reconnecting peer starts fresh.
         self.last_response_at.lock().remove(peer_ip);
+        self.empty_responses.lock().remove(peer_ip);
         // Remove all block requests to the peer.
         self.remove_block_requests_to_peer(peer_ip);
 
@@ -1918,6 +1965,7 @@ mod tests {
             last_response_at: Default::default(),
             stuck_since: Default::default(),
             last_pruned_peers_warning: Default::default(),
+            empty_responses: Default::default(),
         }
     }
 
@@ -2432,6 +2480,60 @@ mod tests {
         // The requests to the peer were removed and marked for re-issue to other peers.
         assert!(sync.requests.read().is_empty());
         assert_eq!(sync.failed_requests.lock().len(), num_requests);
+    }
+
+    /// Sends an empty block response from `peer_ip` to a request for block `height` assigned to it.
+    fn empty_response_to(
+        sync: &BlockSync<CurrentNetwork>,
+        peer_ip: SocketAddr,
+        height: u32,
+    ) -> InsertBlockResponseError<CurrentNetwork> {
+        let request = OutstandingRequest {
+            request: (None, None, [peer_ip].into_iter().collect()),
+            timestamp: Instant::now(),
+            response: None,
+        };
+        sync.requests.write().insert(height, request);
+        sync.insert_block_responses(peer_ip, vec![], None).unwrap_err()
+    }
+
+    /// Tests that consecutive empty responses for blocks a peer claims to hold are tolerated until
+    /// the threshold, which requires a disconnect, and that a non-empty response resets the count.
+    #[test]
+    fn test_repeated_empty_block_responses_disconnect() {
+        let sync = sample_sync_at_height(0);
+        let peer_ip = sample_peer_ip(1);
+        sync.update_peer_locators(peer_ip, &sample_block_locators(10)).unwrap();
+
+        for _ in 1..MAX_CONSECUTIVE_EMPTY_BLOCK_RESPONSES {
+            assert!(empty_response_to(&sync, peer_ip, 1).is_benign());
+        }
+        // A non-empty response resets the count.
+        let genesis = {
+            use snarkvm::prelude::FromBytes;
+            Block::<CurrentNetwork>::from_bytes_le(CurrentNetwork::genesis_bytes()).unwrap()
+        };
+        let _ = sync.insert_block_responses(peer_ip, vec![genesis], None);
+        for _ in 1..MAX_CONSECUTIVE_EMPTY_BLOCK_RESPONSES {
+            assert!(empty_response_to(&sync, peer_ip, 1).is_benign());
+        }
+
+        let error = empty_response_to(&sync, peer_ip, 1);
+        assert!(error.requires_disconnect());
+        assert!(!error.is_benign());
+    }
+
+    /// Tests that empty responses for blocks below a peer's assumed floor are never counted.
+    #[test]
+    fn test_empty_block_responses_outside_peer_window_are_tolerated() {
+        let sync = sample_sync_at_height(1_000);
+        let peer_ip = sample_peer_ip(1);
+        sync.update_peer_locators(peer_ip, &sample_block_locators(1_000 + 2 * AUTHORITY_RETENTION_BLOCKS)).unwrap();
+
+        for _ in 0..2 * MAX_CONSECUTIVE_EMPTY_BLOCK_RESPONSES {
+            let error = empty_response_to(&sync, peer_ip, 1_001);
+            assert!(matches!(error, InsertBlockResponseError::EmptyBlockResponse));
+        }
     }
 
     /// Tests the boundary of the assumed peer floor: `peer_tip − (AUTHORITY_RETENTION_BLOCKS − 1)`
