@@ -25,7 +25,11 @@ use snarkos_node_sync_locators::{CHECKPOINT_INTERVAL, NUM_RECENT_BLOCKS};
 
 use snarkvm::{
     console::network::{ConsensusVersion, Network},
-    ledger::{Block, CheckBlockError, store::AUTHORITY_RETENTION_BLOCKS},
+    ledger::{
+        Block,
+        CheckBlockError,
+        store::{AUTHORITY_RETENTION_BLOCKS, oldest_retained_authority_height},
+    },
     utilities::flatten_error,
 };
 
@@ -44,7 +48,10 @@ use rand::seq::{IteratorRandom, SliceRandom};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque, hash_map},
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 #[cfg(not(feature = "locktick"))]
@@ -100,28 +107,34 @@ pub const STUCK_SYNC_SHUTDOWN_THRESHOLD: Duration = Duration::from_secs(5 * 60);
 /// implementor.
 const STUCK_SYNC_MINIMUM_PEERS: usize = 3;
 
-/// Returns the earliest block whose authority data a node at `tip` still retains: nodes prune
-/// authority data older than `AUTHORITY_RETENTION_BLOCKS` blocks, so a node at `tip` retains
-/// `tip - (AUTHORITY_RETENTION_BLOCKS - 1)..=tip`.
+/// Returns `true` if a peer at `peer_tip` is assumed to still serve block `height`: every node is
+/// assumed to prune authority data older than `AUTHORITY_RETENTION_BLOCKS` blocks, so a peer at
+/// `tip` serves `tip - (AUTHORITY_RETENTION_BLOCKS - 1)..=tip`.
 ///
 /// A peer's advertised tip is a snapshot, so the peer may have pruned a little more by the time a
 /// request arrives. No slack is applied: such a request gets an empty response and is re-issued.
-fn earliest_retained_height(tip: u32) -> u32 {
-    tip.saturating_sub(AUTHORITY_RETENTION_BLOCKS - 1)
+fn peer_can_serve(peer_tip: u32, height: u32) -> bool {
+    peer_tip.saturating_sub(AUTHORITY_RETENTION_BLOCKS - 1) <= height
 }
 
-/// Returns the blocks to answer a block request with: the requested blocks, or none if this node
-/// cannot serve the range (see [`DataBlocks::ensure_response_is_well_formed`]).
-pub fn blocks_or_empty<N: Network>(blocks: Result<Vec<Block<N>>>, start_height: u32, end_height: u32) -> DataBlocks<N> {
-    blocks.map(DataBlocks).unwrap_or_else(|error| {
+/// Returns the blocks to answer a block request for `start_height..end_height` with: the blocks
+/// from `get_blocks`, or none if this node cannot serve the range (see
+/// [`DataBlocks::ensure_response_is_well_formed`]). A range below this node's retention window is
+/// answered empty without reading storage.
+pub fn blocks_or_empty<N: Network>(
+    start_height: u32,
+    end_height: u32,
+    latest_height: u32,
+    get_blocks: impl FnOnce() -> Result<Vec<Block<N>>>,
+) -> DataBlocks<N> {
+    if start_height > 0 && start_height < oldest_retained_authority_height(latest_height) {
+        debug!("Cannot serve block request {start_height}..{end_height} - below the retention window");
+        return DataBlocks(vec![]);
+    }
+    get_blocks().map(DataBlocks).unwrap_or_else(|error| {
         debug!("Cannot serve block request {start_height}..{end_height} - {}", flatten_error(&error));
         DataBlocks(vec![])
     })
-}
-
-/// Returns `true` if a peer at `peer_tip` is assumed to still serve block `height`.
-fn peer_can_serve(peer_tip: u32, height: u32) -> bool {
-    earliest_retained_height(peer_tip) <= height
 }
 
 /// This is a dummy IP address that is used to represent the local node.
@@ -282,9 +295,13 @@ pub struct BlockSync<N: Network> {
     /// responding but cannot keep up with the request rate.
     last_response_at: Mutex<HashMap<SocketAddr, Instant>>,
 
-    /// Since when, and at which ledger height, sync has been stuck because the peers have pruned
-    /// the blocks this node needs (see [`Self::update_stuck_tracking`]).
+    /// Since when, and at which height, sync has been stuck because the peers have pruned the blocks
+    /// this node needs (see [`Self::sync_stuck_below_peer_floors`]).
     stuck_since: Mutex<Option<(Instant, u32)>>,
+
+    /// Whether the last request round found peers ahead but all assumed to have pruned the first
+    /// needed block; used to warn once rather than every round.
+    warned_all_peers_pruned: AtomicBool,
 }
 
 impl<N: Network> BlockSync<N> {
@@ -308,6 +325,7 @@ impl<N: Network> BlockSync<N> {
             failed_requests: Default::default(),
             last_response_at: Default::default(),
             stuck_since: Default::default(),
+            warned_all_peers_pruned: Default::default(),
         }
     }
 
@@ -1197,12 +1215,15 @@ impl<N: Network> BlockSync<N> {
     /// it cannot trigger a shutdown.
     fn needed_blocks_pruned_by_peer_majority(&self, height: u32) -> bool {
         let locators = self.locators.read();
-        let tips_ahead: Vec<u32> =
-            locators.values().map(|locators| locators.latest_locator_height()).filter(|&tip| tip > height).collect();
-        locators.len() >= STUCK_SYNC_MINIMUM_PEERS
-            // A strict majority of the peers that sent locators, written without division so it is exact.
-            && tips_ahead.len() * 2 > locators.len()
-            && tips_ahead.iter().all(|&tip| !peer_can_serve(tip, height.saturating_add(1)))
+        let mut num_ahead = 0;
+        for tip in locators.values().map(|locators| locators.latest_locator_height()).filter(|&tip| tip > height) {
+            if peer_can_serve(tip, height.saturating_add(1)) {
+                return false;
+            }
+            num_ahead += 1;
+        }
+        // A strict majority of the peers that sent locators, written without division so it is exact.
+        locators.len() >= STUCK_SYNC_MINIMUM_PEERS && num_ahead * 2 > locators.len()
     }
 
     /// Returns how long sync has made no progress because the peers have pruned the blocks this
@@ -1217,29 +1238,29 @@ impl<N: Network> BlockSync<N> {
         // still progress. Answered requests above an unservable gap do not count. The sync height is
         // what request generation starts from.
         let height = self.retention_height();
-        let can_progress =
-            self.num_outstanding_block_requests() > 0 || self.requests.read().contains_key(&height.saturating_add(1));
+        let can_progress = {
+            let requests = self.requests.read();
+            requests.contains_key(&height.saturating_add(1)) || requests.values().any(|r| !r.sync_ips().is_empty())
+        };
         let is_stuck = !can_progress && self.needed_blocks_pruned_by_peer_majority(height);
 
         let mut stuck_since = self.stuck_since.lock();
-        if !is_stuck {
-            *stuck_since = None;
-            return None;
-        }
-        let since = match *stuck_since {
-            Some((since, armed_height)) if height <= armed_height => since,
+        match *stuck_since {
+            _ if !is_stuck => {
+                *stuck_since = None;
+                None
+            }
+            Some((since, armed_height)) if height <= armed_height => Some(since.elapsed()),
             previous => {
                 if previous.is_none() {
                     warn!(
                         "The blocks this node needs are older than what the connected peers retain; block synchronization cannot progress"
                     );
                 }
-                let now = Instant::now();
-                *stuck_since = Some((now, height));
-                now
+                *stuck_since = Some((Instant::now(), height));
+                Some(Duration::ZERO)
             }
-        };
-        Some(since.elapsed())
+        }
     }
 
     /// Should only be called by validators when they successfully process a block request.
@@ -1572,18 +1593,32 @@ impl<N: Network> BlockSync<N> {
         // Pick a set of peers above the latest ledger height, and include their locators.
         // This will sort the peers by locator height in descending order.
         // Peers assumed to have pruned the authority data of the first needed block are excluded.
+        let mut num_pruned = 0;
         let candidate_locators: IndexMap<_, _> = self
             .locators
             .read()
             .iter()
             .filter(|(_, locators)| {
                 let peer_tip = locators.latest_locator_height();
-                peer_tip > current_height && first_needed.is_none_or(|height| peer_can_serve(peer_tip, height))
+                let can_serve = first_needed.is_none_or(|height| peer_can_serve(peer_tip, height));
+                num_pruned += usize::from(peer_tip > current_height && !can_serve);
+                peer_tip > current_height && can_serve
             })
             .sorted_by(|(_, a), (_, b)| b.latest_locator_height().cmp(&a.latest_locator_height()))
             .take(NUM_SYNC_CANDIDATE_PEERS)
             .map(|(peer_ip, locators)| (*peer_ip, locators.clone()))
             .collect();
+
+        // Warn once when every peer ahead is assumed to have pruned the first needed block.
+        let all_pruned = candidate_locators.is_empty() && num_pruned > 0;
+        if let Some(first_needed) = first_needed
+            && self.warned_all_peers_pruned.swap(all_pruned, Ordering::Relaxed) != all_pruned
+            && all_pruned
+        {
+            warn!(
+                "Every peer ahead of this node is assumed to have pruned block {first_needed}; block sync is waiting"
+            );
+        }
 
         // Case 0: If there are no candidate peers, return `None`.
         if candidate_locators.is_empty() {
@@ -1879,6 +1914,7 @@ mod tests {
             prepare_requests_lock: Default::default(),
             last_response_at: Default::default(),
             stuck_since: Default::default(),
+            warned_all_peers_pruned: Default::default(),
         }
     }
 
@@ -2414,12 +2450,32 @@ mod tests {
         assert!(sync.prepare_block_requests().is_empty());
     }
 
+    /// Tests that a range below this node's retention window is answered empty without reading
+    /// storage on a pruning node, and that a storage error is answered empty.
     #[test]
-    fn test_earliest_retained_height() {
-        assert_eq!(earliest_retained_height(0), 0);
-        assert_eq!(earliest_retained_height(AUTHORITY_RETENTION_BLOCKS - 1), 0);
-        assert_eq!(earliest_retained_height(AUTHORITY_RETENTION_BLOCKS), 1);
-        assert_eq!(earliest_retained_height(2 * AUTHORITY_RETENTION_BLOCKS), AUTHORITY_RETENTION_BLOCKS + 1);
+    fn test_blocks_or_empty() {
+        let latest = 2 * AUTHORITY_RETENTION_BLOCKS;
+        let read = std::cell::Cell::new(false);
+        let blocks = blocks_or_empty::<CurrentNetwork>(1, 3, latest, || {
+            read.set(true);
+            Ok(vec![])
+        });
+        assert!(blocks.0.is_empty());
+        // Without `prune-authority-data` in snarkVM, every block is retained and storage is read.
+        assert_eq!(read.get(), oldest_retained_authority_height(latest) == 0);
+
+        let blocks = blocks_or_empty::<CurrentNetwork>(latest, latest + 1, latest, || bail!("storage error"));
+        assert!(blocks.0.is_empty());
+    }
+
+    #[test]
+    fn test_peer_can_serve() {
+        const R: u32 = AUTHORITY_RETENTION_BLOCKS;
+        assert!(peer_can_serve(R - 1, 0));
+        assert!(peer_can_serve(R, 1));
+        assert!(!peer_can_serve(R, 0));
+        assert!(peer_can_serve(2 * R, R + 1));
+        assert!(!peer_can_serve(2 * R, R));
     }
 
     /// Tests that `find_sync_peers` reports peers that are far ahead even when they have pruned the

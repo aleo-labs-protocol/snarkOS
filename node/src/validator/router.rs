@@ -202,7 +202,9 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Validator<N, C> {
             }
         };
 
-        let blocks = blocks_or_empty(self.ledger.get_blocks(*start_height..*end_height), *start_height, *end_height);
+        let blocks = blocks_or_empty(*start_height, *end_height, self.ledger.latest_height(), || {
+            self.ledger.get_blocks(*start_height..*end_height)
+        });
         // Send the `BlockResponse` message to the peer.
         self.router()
             .send(peer_ip, Message::BlockResponse(BlockResponse::new(message, blocks, latest_consensus_version)));

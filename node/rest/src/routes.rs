@@ -361,16 +361,22 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
     ) -> Result<ErasedJson, RestError> {
         // Manually parse the height or the height of the hash, axum doesn't support different types
         // for the same path param.
-        let (hash, height) = if let Ok(height) = height_or_hash.parse::<u32>() {
-            check_block_retained(height, rest.ledger.latest_height())?;
-            let hash = rest
-                .ledger
+        let latest_height = rest.ledger.latest_height();
+        let hash = if let Ok(height) = height_or_hash.parse::<u32>() {
+            check_block_retained(height, latest_height)?;
+            rest.ledger
                 .get_hash(height)
                 .with_context(|| "Failed to get a block's hash")
-                .map_err(map_missing_resource_error)?;
-            (hash, Some(height))
+                .map_err(map_missing_resource_error)?
         } else if let Ok(hash) = height_or_hash.parse::<N::BlockHash>() {
-            (hash, None)
+            // Report a pruned block as gone, even if it is still cached. Only a pruning node needs the
+            // lookup; a hash it does not know falls through to the 404 below.
+            if oldest_retained_authority_height(latest_height) > 1
+                && let Ok(height) = rest.ledger.get_height(&hash)
+            {
+                check_block_retained(height, latest_height)?;
+            }
+            hash
         } else {
             return Err(RestError::bad_request(anyhow!("invalid input: neither a block height nor a block hash")));
         };
@@ -381,27 +387,18 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         }
 
         // Retrieve the block from the database.
-        tokio::task::spawn_blocking(move || {
-            // For a hash, report a pruned block as gone; a hash the node does not know falls through
-            // to the lookup, which reports it.
-            let latest_height = rest.ledger.latest_height();
-            if height.is_none()
-                && oldest_retained_authority_height(latest_height) > 1
-                && let Ok(height) = rest.ledger.get_height(&hash)
-            {
-                check_block_retained(height, latest_height)?;
-            }
-            match rest.ledger.try_get_block_by_hash(&hash) {
-                Ok(Some(block)) => Ok(ErasedJson::new(block)),
-                Ok(None) => Err(RestError::not_found(anyhow!("Couldn't find block {height_or_hash}"))),
-                Err(e) => {
+        let block = tokio::task::spawn_blocking(move || rest.ledger.try_get_block_by_hash(&hash))
+            .await
+            .map_err(|e| RestError::internal_server_error(anyhow!("tokio error: {e}")))?;
+        match block {
+            Ok(Some(block)) => Ok(ErasedJson::new(block)),
+            Ok(None) | Err(_) => {
+                if let Err(e) = block {
                     error!("Couldn't find a block: {e}");
-                    Err(RestError::not_found(anyhow!("Couldn't find block {height_or_hash}")))
                 }
+                Err(RestError::not_found(anyhow!("Couldn't find block {height_or_hash}")))
             }
-        })
-        .await
-        .map_err(|e| RestError::internal_server_error(anyhow!("tokio error: {e}")))?
+        }
     }
 
     /// GET /<network>/blocks?start={start_height}&end={end_height}

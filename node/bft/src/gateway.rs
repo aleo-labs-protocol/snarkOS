@@ -692,7 +692,10 @@ impl<N: Network> Gateway<N> {
 
                 let self_ = self.clone();
                 let blocks = match task::spawn_blocking(move || {
-                    blocks_or_empty(self_.ledger.get_blocks(start_height..end_height), start_height, end_height)
+                    let latest_height = self_.ledger.latest_block_height();
+                    blocks_or_empty(start_height, end_height, latest_height, || {
+                        self_.ledger.get_blocks(start_height..end_height)
+                    })
                 })
                 .await
                 {

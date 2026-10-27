@@ -74,7 +74,16 @@ fn update_block_metrics<N: Network>(height: u32) {
     );
 }
 
-pub type SyncResult = Result<u32, (u32, anyhow::Error)>;
+/// The outcome of the startup CDN sync.
+#[derive(Debug)]
+pub enum CdnSyncOutcome {
+    /// The ledger was synced up to the given height.
+    Synced(u32),
+    /// The CDN held no blocks past the node's ledger.
+    NothingNew,
+    /// The sync stopped at the given height with an error.
+    Failed(u32, anyhow::Error),
+}
 
 /// Manages the CDN sync task.
 ///
@@ -83,11 +92,9 @@ pub type SyncResult = Result<u32, (u32, anyhow::Error)>;
 pub struct CdnBlockSync {
     base_url: http::Uri,
     /// The background tasks that performs the sync operation.
-    task: Mutex<Option<JoinHandle<SyncResult>>>,
+    task: Mutex<Option<JoinHandle<CdnSyncOutcome>>>,
     /// This flag will be set to true once the sync task has been successfully awaited.
     done: AtomicBool,
-    /// The first block height the sync asks the CDN for.
-    start_height: u32,
 }
 
 impl CdnBlockSync {
@@ -97,20 +104,13 @@ impl CdnBlockSync {
         ledger: Ledger<N, C>,
         stoppable: Arc<SignalHandler>,
     ) -> Self {
-        let start_height = ledger.latest_height() + 1;
         let task = {
             let base_url = base_url.clone();
-            tokio::spawn(async move { Self::worker(base_url, ledger, start_height, stoppable).await })
+            tokio::spawn(async move { Self::worker(base_url, ledger, stoppable).await })
         };
 
         debug!("Started sync from CDN at {base_url}");
-        Self { done: AtomicBool::new(false), base_url, task: Mutex::new(Some(task)), start_height }
-    }
-
-    /// The first block height the sync asks the CDN for. A completed sync that reports a lower
-    /// height found nothing on the CDN past the node's own ledger.
-    pub fn start_height(&self) -> u32 {
-        self.start_height
+        Self { done: AtomicBool::new(false), base_url, task: Mutex::new(Some(task)) }
     }
 
     /// Did the CDN sync finish?
@@ -122,10 +122,8 @@ impl CdnBlockSync {
 
     /// Wait for CDN sync to finish. Can only be called once.
     ///
-    /// The outer error means the sync task could not be awaited. The inner result is the sync's
-    /// own outcome: the completed block height, or the last successful height (if any) with the
-    /// error that stopped the sync short of the CDN height.
-    pub async fn wait(&self) -> Result<SyncResult> {
+    /// The error means the sync task could not be awaited; otherwise, this returns the sync's outcome.
+    pub async fn wait(&self) -> Result<CdnSyncOutcome> {
         let Some(hdl) = self.task.lock().take() else {
             bail!("CDN task was already awaited");
         };
@@ -138,9 +136,10 @@ impl CdnBlockSync {
     async fn worker<N: Network, C: ConsensusStorage<N>>(
         base_url: http::Uri,
         ledger: Ledger<N, C>,
-        start_height: u32,
         stoppable: Arc<dyn Stoppable>,
-    ) -> SyncResult {
+    ) -> CdnSyncOutcome {
+        // Fetch the node height.
+        let start_height = ledger.latest_height() + 1;
         // Load the blocks from the CDN into the ledger.
         let ledger_clone = ledger.clone();
         let result = load_blocks(&base_url, start_height, None, stoppable, move |block: Block<N>| {
@@ -153,7 +152,9 @@ impl CdnBlockSync {
         // TODO (howardwu): Find a way to resolve integrity failures.
         // If the sync failed, check the integrity of the ledger.
         match result {
-            Ok(completed_height) => Ok(completed_height),
+            // `load_blocks` reports the height below the start when it loaded nothing.
+            Ok(completed_height) if completed_height < start_height => CdnSyncOutcome::NothingNew,
+            Ok(completed_height) => CdnSyncOutcome::Synced(completed_height),
             Err((completed_height, error)) => {
                 let error = error.context("Failed to sync block(s) from the CDN");
                 warn!("{}", flatten_error(&error));
@@ -166,19 +167,19 @@ impl CdnBlockSync {
                     let node_height = *ledger.vm().block_store().heights().max().unwrap_or_default();
                     // Check the integrity of the latest height.
                     if node_height != completed_height {
-                        return Err((
+                        return CdnSyncOutcome::Failed(
                             completed_height,
                             anyhow!("The ledger height does not match the last sync height"),
-                        ));
+                        );
                     }
 
                     // Fetch the latest block from the ledger.
                     if let Err(err) = ledger.get_block(node_height) {
-                        return Err((completed_height, err));
+                        return CdnSyncOutcome::Failed(completed_height, err);
                     }
                 }
 
-                Err((completed_height, error))
+                CdnSyncOutcome::Failed(completed_height, error)
             }
         }
     }

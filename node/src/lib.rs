@@ -50,7 +50,7 @@ pub use node::*;
 mod traits;
 pub use traits::*;
 
-use snarkos_node_cdn::CdnBlockSync;
+use snarkos_node_cdn::{CdnBlockSync, CdnSyncOutcome};
 use snarkos_node_sync::{BlockSync, STUCK_SYNC_SHUTDOWN_THRESHOLD};
 use snarkos_utilities::SignalHandler;
 use snarkvm::prelude::Network;
@@ -92,11 +92,11 @@ pub enum CdnFallback {
 /// Waits for the startup CDN sync, if any, and reports whether a restart could repeat it.
 pub async fn wait_for_cdn(cdn_sync: Option<Arc<CdnBlockSync>>) -> Result<CdnFallback> {
     let Some(cdn_sync) = cdn_sync else { return Ok(CdnFallback::Disabled) };
-    match cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN")? {
-        Ok(height) if height < cdn_sync.start_height() => Ok(CdnFallback::Behind),
-        Ok(_) => Ok(CdnFallback::Available),
-        Err(_) => Ok(CdnFallback::Failed),
-    }
+    Ok(match cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN")? {
+        CdnSyncOutcome::Synced(_) => CdnFallback::Available,
+        CdnSyncOutcome::NothingNew => CdnFallback::Behind,
+        CdnSyncOutcome::Failed(..) => CdnFallback::Failed,
+    })
 }
 
 /// Returns `true` if a node that has been stuck for `stuck_for` must shut down.
@@ -105,11 +105,10 @@ pub async fn wait_for_cdn(cdn_sync: Option<Arc<CdnBlockSync>>) -> Result<CdnFall
 /// the condition must persist for `STUCK_SYNC_SHUTDOWN_THRESHOLD`, so that a transient set of peers
 /// does not stop the node.
 fn is_stuck_sync_fatal(stuck_for: Option<Duration>, cdn_fallback: CdnFallback) -> bool {
-    match (stuck_for, cdn_fallback) {
-        (None, _) => false,
-        (Some(_), CdnFallback::Disabled | CdnFallback::Failed) => true,
-        (Some(stuck_for), CdnFallback::Available | CdnFallback::Behind) => stuck_for >= STUCK_SYNC_SHUTDOWN_THRESHOLD,
-    }
+    stuck_for.is_some_and(|stuck_for| {
+        matches!(cdn_fallback, CdnFallback::Disabled | CdnFallback::Failed)
+            || stuck_for >= STUCK_SYNC_SHUTDOWN_THRESHOLD
+    })
 }
 
 /// Shuts the node down, as failed, if no connected peer can serve the blocks it needs (see
