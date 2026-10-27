@@ -30,7 +30,7 @@ use locktick::parking_lot::Mutex;
 use parking_lot::Mutex;
 use snarkvm::{
     ledger::narwhal::TransmissionID,
-    prelude::{Block, Network, cfg_iter},
+    prelude::{Block, Network, Transaction, cfg_iter},
 };
 use std::{
     collections::HashMap,
@@ -40,6 +40,7 @@ use std::{
         OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Instant,
 };
 use time::OffsetDateTime;
 use tokio::task::JoinHandle;
@@ -63,6 +64,10 @@ pub fn initialize_metrics(ip: Option<SocketAddr>) {
     // Note: these are first-pass boundaries, not yet tuned against production data.
     const SECS_BUCKETS: &[f64] = &[0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 3.0, 5.0, 10.0];
     const COUNT_BUCKETS: &[f64] = &[1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 34.0, 55.0, 89.0];
+    // Verification buckets, for `verification::TRANSACTION_CHECK_SECS`. They span checks that skip
+    // proof verification, up to full checks of deployments, which take seconds.
+    const VERIFICATION_SECS_BUCKETS: &[f64] =
+        &[0.0001, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0];
 
     let builder = metrics_exporter_prometheus::PrometheusBuilder::new()
         .set_buckets_for_metric(metrics_exporter_prometheus::Matcher::Suffix("_secs".to_string()), SECS_BUCKETS)
@@ -72,6 +77,11 @@ pub fn initialize_metrics(ip: Option<SocketAddr>) {
             SECS_BUCKETS,
         )
         .expect("can't set the transmission latency histogram buckets")
+        .set_buckets_for_metric(
+            metrics_exporter_prometheus::Matcher::Full(verification::TRANSACTION_CHECK_SECS.to_string()),
+            VERIFICATION_SECS_BUCKETS,
+        )
+        .expect("can't set the verification histogram buckets")
         .set_buckets_for_metric(
             metrics_exporter_prometheus::Matcher::Prefix("snarkos_bft_subdag_".to_string()),
             COUNT_BUCKETS,
@@ -225,6 +235,14 @@ pub fn gauge_label<V: Into<f64>>(name: &'static str, label_key: &'static str, la
     ::metrics::gauge!(name, label_key => label_value).set(value.into());
 }
 
+pub fn increment_counter_1(name: &'static str, key: &'static str, value: impl Into<::metrics::SharedString>) {
+    ::metrics::counter!(name, key => value).increment(1);
+}
+
+pub fn counter_1(name: &'static str, key: &'static str, value: impl Into<::metrics::SharedString>, amount: u64) {
+    ::metrics::counter!(name, key => value).increment(amount);
+}
+
 pub fn increment_counter_2(
     name: &'static str,
     key_a: &'static str,
@@ -256,6 +274,48 @@ pub fn histogram_2<V: Into<f64>>(
     value: V,
 ) {
     ::metrics::histogram!(name, key_a => value_a, key_b => value_b).record(value.into());
+}
+
+/// Returns the `kind` label value for the given transaction.
+pub fn transaction_kind<N: Network>(transaction: &Transaction<N>) -> &'static str {
+    match transaction {
+        Transaction::Deploy(..) => "deploy",
+        Transaction::Execute(..) => "execute",
+        Transaction::Fee(..) => "fee",
+    }
+}
+
+/// Times a full transaction check at one site; `finish` records its outcome and duration.
+pub struct TransactionCheckTimer {
+    site: &'static str,
+    kind: &'static str,
+    start: Instant,
+}
+
+impl TransactionCheckTimer {
+    /// Starts timing a check of `transaction` at `site`.
+    pub fn start<N: Network>(site: &'static str, transaction: &Transaction<N>) -> Self {
+        Self { site, kind: transaction_kind(transaction), start: Instant::now() }
+    }
+
+    /// Records the check's outcome and the time since `start`.
+    pub fn finish<T, E>(self, result: &Result<T, E>) {
+        let Self { site, kind, start } = self;
+        let outcome = if result.is_ok() { "ok" } else { "err" };
+        increment_counter_3(verification::TRANSACTION_CHECKS, "site", site, "kind", kind, "outcome", outcome);
+        histogram_2(verification::TRANSACTION_CHECK_SECS, "site", site, "kind", kind, start.elapsed().as_secs_f64());
+    }
+}
+
+/// Records the outcome of a solution check at the given site.
+pub fn record_solution_check(site: &'static str, is_ok: bool) {
+    let outcome = if is_ok { "ok" } else { "err" };
+    increment_counter_2(verification::SOLUTION_CHECKS, "site", site, "outcome", outcome);
+}
+
+/// Records the outcome of offering a transaction to the memory pool.
+pub fn record_mempool_transaction(kind: &'static str, outcome: &'static str) {
+    increment_counter_2(consensus::MEMPOOL_TRANSACTIONS, "kind", kind, "outcome", outcome);
 }
 
 // Include the generated build information

@@ -378,6 +378,8 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
                             let proof_target = _node.ledger.latest_block().header().proof_target();
                             // Ensure that the solution is valid for the given epoch.
                             let is_valid = _node.puzzle.check_solution(&solution, epoch_hash, proof_target);
+                            #[cfg(feature = "metrics")]
+                            snarkos_node_metrics::record_solution_check("client_relay", is_valid.is_ok());
 
                             match is_valid {
                                 // If the solution is valid, propagate the `UnconfirmedSolution`.
@@ -385,6 +387,12 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
                                     let message = Message::UnconfirmedSolution(serialized);
                                     // Propagate the "UnconfirmedSolution".
                                     _node.propagate(message, &[peer_ip]);
+                                    #[cfg(feature = "metrics")]
+                                    snarkos_node_metrics::increment_counter_1(
+                                        snarkos_node_metrics::router::UNCONFIRMED_SOLUTIONS_PROPAGATED,
+                                        "site",
+                                        "client_verified",
+                                    );
                                 }
                                 // If error occurs after the first 10 blocks of the epoch, log it as a warning, otherwise ignore.
                                 Err(error) => {
@@ -450,15 +458,32 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
                             debug!("Failed to find global state root for deployment from peer_ip {peer_ip}, propagating anyway");
                             // Propagate the `UnconfirmedTransaction`.
                             _node.propagate(Message::UnconfirmedTransaction(serialized), &[peer_ip]);
+                            #[cfg(feature = "metrics")]
+                            snarkos_node_metrics::increment_counter_1(
+                                snarkos_node_metrics::router::UNCONFIRMED_TRANSACTIONS_PROPAGATED,
+                                "site",
+                                "client_unverified",
+                            );
                             _node.num_verifying_deploys.fetch_sub(1, Relaxed);
                             return;
                             // Also skip the `check_transaction_basic` call if it is already propagated.
                         }
                         // Check the deployment.
-                        match _node.ledger.check_transaction_basic(&transaction, None, &mut rand::rng()) {
+                        #[cfg(feature = "metrics")]
+                        let timer = snarkos_node_metrics::TransactionCheckTimer::start("client_relay", &transaction);
+                        let result = _node.ledger.check_transaction_basic(&transaction, None, &mut rand::rng());
+                        #[cfg(feature = "metrics")]
+                        timer.finish(&result);
+                        match result {
                             Ok(_) => {
                                 // Propagate the `UnconfirmedTransaction`.
                                 _node.propagate(Message::UnconfirmedTransaction(serialized), &[peer_ip]);
+                                #[cfg(feature = "metrics")]
+                                snarkos_node_metrics::increment_counter_1(
+                                    snarkos_node_metrics::router::UNCONFIRMED_TRANSACTIONS_PROPAGATED,
+                                    "site",
+                                    "client_verified",
+                                );
                             }
                             Err(error) => {
                                 debug!("Failed to verify the deployment from peer_ip {peer_ip} - {error}");
@@ -520,16 +545,33 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
                                 debug!("Failed to find global state root for execution from peer_ip {peer_ip}, propagating anyway");
                                 // Propagate the `UnconfirmedTransaction`.
                                 _node.propagate(Message::UnconfirmedTransaction(serialized), &[peer_ip]);
+                                #[cfg(feature = "metrics")]
+                                snarkos_node_metrics::increment_counter_1(
+                                    snarkos_node_metrics::router::UNCONFIRMED_TRANSACTIONS_PROPAGATED,
+                                    "site",
+                                    "client_unverified",
+                                );
                                 _node.num_verifying_executions.fetch_sub(1, Relaxed);
                                 return;
                                 // Also skip the `check_transaction_basic` call if it is already propagated.
                             }
                         }
                         // Check the execution.
-                        match _node.ledger.check_transaction_basic(&transaction, None, &mut rand::rng()) {
+                        #[cfg(feature = "metrics")]
+                        let timer = snarkos_node_metrics::TransactionCheckTimer::start("client_relay", &transaction);
+                        let result = _node.ledger.check_transaction_basic(&transaction, None, &mut rand::rng());
+                        #[cfg(feature = "metrics")]
+                        timer.finish(&result);
+                        match result {
                             Ok(_) => {
                                 // Propagate the `UnconfirmedTransaction`.
                                 _node.propagate(Message::UnconfirmedTransaction(serialized), &[peer_ip]);
+                                #[cfg(feature = "metrics")]
+                                snarkos_node_metrics::increment_counter_1(
+                                    snarkos_node_metrics::router::UNCONFIRMED_TRANSACTIONS_PROPAGATED,
+                                    "site",
+                                    "client_verified",
+                                );
                             }
                             Err(error) => {
                                 debug!("Failed to verify the execution from peer_ip {peer_ip} - {error}");

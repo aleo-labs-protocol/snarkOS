@@ -13,14 +13,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(super) const COUNTER_NAMES: [&str; 4] = [
+pub(super) const COUNTER_NAMES: [&str; 7] = [
     bft::LEADERS_ELECTED,
+    bft::PEER_PROPOSALS_MALFORMED,
     consensus::STALE_UNCONFIRMED_TRANSACTIONS,
     consensus::STALE_UNCONFIRMED_SOLUTIONS,
     consensus::DROPPED_TRANSACTIONS,
+    consensus::UNCONFIRMED_SOLUTIONS,
+    consensus::UNCONFIRMED_TRANSACTIONS,
 ];
 
-pub(super) const GAUGE_NAMES: [&str; 33] = [
+pub(super) const GAUGE_NAMES: [&str; 31] = [
     bft::CONNECTED,
     bft::CONNECTED_STAKE,
     bft::CONNECTED_STAKE_WITH_MATCHING_SHA,
@@ -43,8 +46,6 @@ pub(super) const GAUGE_NAMES: [&str; 33] = [
     blocks::COINBASE_TARGET,
     blocks::CUMULATIVE_PROOF_TARGET,
     consensus::COMMITTED_CERTIFICATES,
-    consensus::UNCONFIRMED_SOLUTIONS,
-    consensus::UNCONFIRMED_TRANSACTIONS,
     consensus::DEPLOYMENTS_PRIORITY_QUEUE_SIZE,
     consensus::DEPLOYMENTS_ZERO_FEE_QUEUE_SIZE,
     consensus::EXECUTIONS_PRIORITY_QUEUE_SIZE,
@@ -96,6 +97,15 @@ pub mod bft {
     pub const SUBDAG_CERTIFICATE_PREVIOUS_REFS: &str = "snarkos_bft_subdag_certificate_previous_refs";
     /// The number of rounds spanned by a committed subdag (one observation per committed block).
     pub const SUBDAG_ROUNDS_PER_BLOCK: &str = "snarkos_bft_subdag_rounds_per_block";
+    /// The transmissions of a peer's batch proposal that were not in storage, and were taken from a
+    /// worker or fetched from the proposer, labeled by `type` (`transaction` or `solution`).
+    pub const PEER_PROPOSAL_TRANSMISSIONS: &str = "snarkos_bft_peer_proposal_transmissions_total";
+    /// The peer batch proposals that were not signed because a transmission was not well-formed.
+    /// Counted once per proposal.
+    pub const PEER_PROPOSALS_MALFORMED: &str = "snarkos_bft_peer_proposals_malformed_total";
+    /// The transmission responses for a pending request, labeled by `outcome`
+    /// (`well_formed` or `malformed`).
+    pub const TRANSMISSION_RESPONSES: &str = "snarkos_bft_transmission_responses_total";
 }
 
 pub mod blocks {
@@ -146,6 +156,13 @@ pub mod consensus {
     pub const VALIDATOR_PARTICIPATION_GC_ROUND: &str = "snarkos_consensus_validator_participation_gc_round";
     /// The number of telemetry updates dropped because the worker queue was full.
     pub const VALIDATOR_PARTICIPATION_DROPPED: &str = "snarkos_consensus_validator_participation_dropped_total";
+    /// The transactions offered to the memory pool, labeled by `kind` (`execute`, `deploy` or `fee`)
+    /// and `outcome`: `accepted`, `recently_seen` (returns `Ok` without queuing), `in_ledger`,
+    /// `already_queued`, `rejected_pool_full` or `rejected_fee_transaction`.
+    pub const MEMPOOL_TRANSACTIONS: &str = "snarkos_consensus_mempool_transactions_total";
+    /// The memory-pool entries evicted to make room for a transaction with a higher priority fee,
+    /// labeled by `kind` (`execute` or `deploy`).
+    pub const MEMPOOL_EVICTED: &str = "snarkos_consensus_mempool_evicted_total";
 }
 
 pub mod router {
@@ -154,6 +171,39 @@ pub mod router {
     pub const RESTRICTED: &str = "snarkos_router_restricted_total";
     /// Router messages, labeled by `direction` (`inbound` or `outbound`) and `type`.
     pub const EVENTS: &str = "snarkos_router_events_total";
+    /// Inbound `UnconfirmedTransaction` messages that passed the router's limit on all inbound messages
+    /// per peer (`MESSAGE_LIMIT`; there is no transaction-specific limit), labeled by
+    /// `outcome`: `syncing` (dropped while the node is behind), `seen` (dropped by the per-peer
+    /// inbound cache) or `dispatched` (handed to the node-type handler).
+    pub const UNCONFIRMED_TRANSACTIONS_INBOUND: &str = "snarkos_router_unconfirmed_transactions_inbound_total";
+    /// Calls that propagate an `UnconfirmedTransaction`, labeled by `site`: `rest`, `client_unverified`
+    /// (the client relays without verification because a state root is unknown), `client_verified`,
+    /// or `validator` (to the connected validators, after the memory pool returns `Ok`).
+    /// One per call, not per peer; per-peer sends are in [`EVENTS`].
+    pub const UNCONFIRMED_TRANSACTIONS_PROPAGATED: &str = "snarkos_router_unconfirmed_transactions_propagated_total";
+    /// Inbound `UnconfirmedSolution` messages that passed the router's limit on all inbound messages per
+    /// peer (`MESSAGE_LIMIT`) and its per-peer solution limit, labeled by `outcome`
+    /// (`syncing`, `seen` or `dispatched`).
+    pub const UNCONFIRMED_SOLUTIONS_INBOUND: &str = "snarkos_router_unconfirmed_solutions_inbound_total";
+    /// Calls that propagate an `UnconfirmedSolution`, labeled by `site` (`rest`, `client_verified` or
+    /// `validator`). One per call, not per peer; per-peer sends are in [`EVENTS`].
+    pub const UNCONFIRMED_SOLUTIONS_PROPAGATED: &str = "snarkos_router_unconfirmed_solutions_propagated_total";
+}
+
+pub mod verification {
+    /// Full transaction checks (`check_transaction_basic`), labeled by `site`, `kind` (`execute`,
+    /// `deploy` or `fee`) and `outcome` (`ok` or `err`). The sites are `rest` (broadcast with
+    /// `check_transaction=true`), `client_relay`, `worker` (unconfirmed transactions from the memory
+    /// pool, including reinserted ones), `propose_batch`, and the background check on executions
+    /// fetched from a peer: `peer_proposal` (for a batch proposal) or `worker_ping` (after a ping).
+    pub const TRANSACTION_CHECKS: &str = "snarkos_verification_transaction_checks_total";
+    /// The wall-clock duration of a full transaction check, labeled by `site` and `kind`.
+    /// At `worker`, `propose_batch`, `peer_proposal` and `worker_ping`, this includes the wait for a
+    /// blocking thread.
+    pub const TRANSACTION_CHECK_SECS: &str = "snarkos_verification_transaction_check_secs";
+    /// Solution checks, labeled by `site` (`rest`, `client_relay`, `worker` or `propose_batch`) and
+    /// `outcome` (`ok` or `err`).
+    pub const SOLUTION_CHECKS: &str = "snarkos_verification_solution_checks_total";
 }
 
 pub mod gateway {

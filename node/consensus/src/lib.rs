@@ -16,6 +16,8 @@
 #![forbid(unsafe_code)]
 
 mod transactions_queue;
+#[cfg(feature = "metrics")]
+use transactions_queue::QueueInsertion;
 use transactions_queue::TransactionsQueue;
 
 #[macro_use]
@@ -326,7 +328,7 @@ impl<N: Network> Consensus<N> {
             }
             #[cfg(feature = "metrics")]
             {
-                metrics::increment_gauge(metrics::consensus::UNCONFIRMED_SOLUTIONS, 1f64);
+                metrics::increment_counter(metrics::consensus::UNCONFIRMED_SOLUTIONS);
                 let timestamp = snarkos_node_bft::helpers::now();
                 self.transmissions_tracker.lock().insert(TransmissionID::Solution(solution_id, checksum), timestamp);
             }
@@ -393,38 +395,57 @@ impl<N: Network> Consensus<N> {
     pub async fn add_unconfirmed_transaction(&self, transaction: Transaction<N>) -> Result<()> {
         // Calculate the transmission checksum.
         let checksum = Data::<Transaction<N>>::Buffer(transaction.to_bytes_le()?.into()).to_checksum::<N>()?;
+        #[cfg(feature = "metrics")]
+        let kind = metrics::transaction_kind(&transaction);
         // Queue the unconfirmed transaction.
         {
             let transaction_id = transaction.id();
 
             // Check that the transaction is not a fee transaction.
             if transaction.is_fee() {
+                #[cfg(feature = "metrics")]
+                metrics::record_mempool_transaction(kind, "rejected_fee_transaction");
                 bail!("Transaction '{}' is a fee transaction (skipping)", fmt_id(transaction_id));
             }
             // Check if the transaction was recently seen.
             if self.seen_transactions.lock().put(transaction_id, ()).is_some() {
+                #[cfg(feature = "metrics")]
+                metrics::record_mempool_transaction(kind, "recently_seen");
                 // If the transaction was recently seen, return early.
                 return Ok(());
             }
             // Check if the transaction already exists in the ledger.
             if self.ledger.contains_transmission(&TransmissionID::Transaction(transaction_id, checksum))? {
+                #[cfg(feature = "metrics")]
+                metrics::record_mempool_transaction(kind, "in_ledger");
                 bail!("Transaction '{}' exists in the ledger (skipping)", fmt_id(transaction_id));
             }
             // Check that the transaction is not in the mempool.
             if self.contains_transaction(&transaction_id) {
+                #[cfg(feature = "metrics")]
+                metrics::record_mempool_transaction(kind, "already_queued");
                 bail!("Transaction '{}' exists in the memory pool", fmt_id(transaction_id));
             }
             // Add the transaction to the memory pool.
             let priority_fee = transaction.priority_fee_amount()?;
-            self.transactions_queue.write().insert(transaction_id, transaction, priority_fee)?;
+            let insertion = self.transactions_queue.write().insert(transaction_id, transaction, priority_fee);
             #[cfg(feature = "metrics")]
-            {
-                metrics::increment_gauge(metrics::consensus::UNCONFIRMED_TRANSACTIONS, 1f64);
+            metrics::record_mempool_transaction(kind, match insertion {
+                Ok(QueueInsertion::Inserted | QueueInsertion::InsertedWithEviction) => "accepted",
+                Ok(QueueInsertion::Duplicate) => "already_queued",
+                // The queue returns an error only when it is full.
+                Err(_) => "rejected_pool_full",
+            });
+            // A duplicate was counted and tracked when its first copy was queued.
+            #[cfg(feature = "metrics")]
+            if matches!(insertion, Ok(QueueInsertion::Inserted | QueueInsertion::InsertedWithEviction)) {
+                metrics::increment_counter(metrics::consensus::UNCONFIRMED_TRANSACTIONS);
                 let timestamp = snarkos_node_bft::helpers::now();
                 self.transmissions_tracker
                     .lock()
                     .insert(TransmissionID::Transaction(transaction_id, checksum), timestamp);
             }
+            insertion?;
             trace!("Received unconfirmed transaction '{}' in the queue", fmt_id(transaction_id));
         }
 
