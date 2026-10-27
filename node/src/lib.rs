@@ -92,7 +92,7 @@ pub enum CdnFallback {
 pub async fn wait_for_cdn(cdn_sync: Option<Arc<CdnBlockSync>>) -> Result<CdnFallback> {
     let Some(cdn_sync) = cdn_sync else { return Ok(CdnFallback::Disabled) };
     Ok(match cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN")? {
-        CdnSyncOutcome::Synced(_) => CdnFallback::Available,
+        CdnSyncOutcome::Synced => CdnFallback::Available,
         CdnSyncOutcome::Failed(height, error) => {
             warn!("{}", flatten_error(error.context(format!("The startup CDN sync stopped at block {height}"))));
             CdnFallback::Failed
