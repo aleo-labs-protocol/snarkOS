@@ -25,6 +25,17 @@ use snarkvm::{ledger::Transaction, prelude::*};
 
 use crate::{CAPACITY_FOR_DEPLOYMENTS, CAPACITY_FOR_EXECUTIONS};
 
+/// The result of a successful insertion into the transactions queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueueInsertion {
+    /// The transaction was added to the queue.
+    Inserted,
+    /// The transaction was added to the queue, and a lower-priority transaction was evicted.
+    InsertedWithEviction,
+    /// The transaction was already in the queue; nothing changed.
+    Duplicate,
+}
+
 pub struct TransactionsQueue<N: Network> {
     pub deployments: TransactionsQueueInner<N>,
     pub executions: TransactionsQueueInner<N>,
@@ -49,8 +60,9 @@ impl<N: Network> TransactionsQueue<N> {
         transaction_id: N::TransactionID,
         transaction: Transaction<N>,
         priority_fee: U64<N>,
-    ) -> Result<()> {
-        let result = if transaction.is_execute() {
+    ) -> Result<QueueInsertion> {
+        let is_execute = transaction.is_execute();
+        let result = if is_execute {
             self.executions.insert(transaction_id, transaction, priority_fee)
         } else {
             self.deployments.insert(transaction_id, transaction, priority_fee)
@@ -58,6 +70,10 @@ impl<N: Network> TransactionsQueue<N> {
 
         #[cfg(feature = "metrics")]
         {
+            if let Ok(QueueInsertion::InsertedWithEviction) = result {
+                let kind = if is_execute { "execute" } else { "deploy" };
+                metrics::increment_counter_1(metrics::consensus::MEMPOOL_EVICTED, "kind", kind);
+            }
             metrics::gauge(metrics::consensus::DEPLOYMENTS_PRIORITY_QUEUE_SIZE, self.deployments.priority_len() as f64);
             metrics::gauge(metrics::consensus::DEPLOYMENTS_ZERO_FEE_QUEUE_SIZE, self.deployments.zero_fee_len() as f64);
             metrics::gauge(metrics::consensus::EXECUTIONS_PRIORITY_QUEUE_SIZE, self.executions.priority_len() as f64);
@@ -119,13 +135,13 @@ impl<N: Network> TransactionsQueueInner<N> {
         transaction_id: N::TransactionID,
         transaction: Transaction<N>,
         priority_fee: U64<N>,
-    ) -> Result<()> {
+    ) -> Result<QueueInsertion> {
         // Duplicates are a no-op: they must not evict anything or refresh recency.
         // Note: the transaction ID is the root of the transaction tree, which includes a leaf for the fee
         // transition. A transaction with the same ID therefore always has the same priority fee, and a
         // resubmission with a higher fee has a different ID, so there is nothing to replace here.
         if self.contains(&transaction_id) {
-            return Ok(());
+            return Ok(QueueInsertion::Duplicate);
         }
 
         // If the queue is not full, insert in the appropriate queue.
@@ -137,10 +153,10 @@ impl<N: Network> TransactionsQueueInner<N> {
             }
 
             debug_assert!(self.len() <= self.capacity, "The mempool exceeded its capacity");
-            return Ok(());
+            return Ok(QueueInsertion::Inserted);
         }
 
-        match (self.priority_queue.len() < self.capacity, *priority_fee) {
+        let insertion = match (self.priority_queue.len() < self.capacity, *priority_fee) {
             (_, 0) => {
                 #[cfg(feature = "metrics")]
                 metrics::increment_counter(metrics::consensus::DROPPED_TRANSACTIONS);
@@ -156,12 +172,14 @@ impl<N: Network> TransactionsQueueInner<N> {
                 );
 
                 // Remove an entry from the low-priority queue to make room for the high-priority transaction.
-                if self.fifo_queue.pop_lru().is_some() {
+                let evicted = self.fifo_queue.pop_lru().is_some();
+                if evicted {
                     #[cfg(feature = "metrics")]
                     metrics::increment_counter(metrics::consensus::DROPPED_TRANSACTIONS);
                 }
 
-                self.priority_queue.insert(transaction_id, transaction, priority_fee)
+                self.priority_queue.insert(transaction_id, transaction, priority_fee);
+                if evicted { QueueInsertion::InsertedWithEviction } else { QueueInsertion::Inserted }
             }
             // Invariant: if the queue is at capacity but the priority queue is
             // equal to the capacity, the low-priority queue must be empty.
@@ -171,12 +189,13 @@ impl<N: Network> TransactionsQueueInner<N> {
                     "The low-priority queue must be empty when the priority queue is full"
                 );
 
-                self.priority_queue.compare_insert(transaction_id, transaction, priority_fee)?
+                self.priority_queue.compare_insert(transaction_id, transaction, priority_fee)?;
+                QueueInsertion::InsertedWithEviction
             }
-        }
+        };
 
         debug_assert!(self.len() <= self.capacity, "The mempool exceeded its capacity");
-        Ok(())
+        Ok(insertion)
     }
 
     pub fn pop(&mut self) -> Option<(N::TransactionID, Transaction<N>)> {
@@ -414,6 +433,34 @@ mod tests {
         assert_eq!(executions_queue.len(), 1);
         assert_eq!(executions_queue.fifo_queue.len(), 1);
         assert_eq!(executions_queue.priority_queue.len(), 0);
+    }
+
+    #[test]
+    fn insert_reports_queue_insertion() {
+        let mut rng = TestRng::default();
+
+        let executions: Vec<_> = (0..5)
+            .map(|_| {
+                let execution_transaction = sample_execution_transaction_with_fee(false, &mut rng, 0);
+                (execution_transaction.id(), execution_transaction)
+            })
+            .collect();
+
+        let mut executions_queue = TransactionsQueueInner::new(2);
+        let mut insert =
+            |i: usize, fee: u64| executions_queue.insert(executions[i].0, executions[i].1.clone(), U64::new(fee));
+
+        assert_eq!(insert(0, 0).unwrap(), QueueInsertion::Inserted);
+        assert_eq!(insert(0, 0).unwrap(), QueueInsertion::Duplicate);
+        assert_eq!(insert(1, 100).unwrap(), QueueInsertion::Inserted);
+        // A full queue rejects a zero-fee transaction.
+        assert!(insert(2, 0).is_err());
+        // A priority transaction evicts the zero-fee transaction.
+        assert_eq!(insert(3, 200).unwrap(), QueueInsertion::InsertedWithEviction);
+        // A full priority queue evicts its lowest fee for a fee at least as high.
+        assert_eq!(insert(4, 100).unwrap(), QueueInsertion::InsertedWithEviction);
+        // A full priority queue rejects a lower fee.
+        assert!(insert(2, 50).is_err());
     }
 
     #[test]
