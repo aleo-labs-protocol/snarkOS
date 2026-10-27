@@ -19,7 +19,7 @@ use crate::{
 };
 use snarkos_node_bft_ledger_service::{BeginLedgerUpdateError, LedgerService};
 use snarkos_node_network::ConnectionMode;
-use snarkos_node_router::messages::DataBlocks;
+use snarkos_node_router::{MINIMUM_NUMBER_OF_PEERS, messages::DataBlocks};
 use snarkos_node_sync_communication_service::CommunicationService;
 use snarkos_node_sync_locators::{CHECKPOINT_INTERVAL, NUM_RECENT_BLOCKS};
 
@@ -100,12 +100,6 @@ pub const MAX_BLOCKS_BEHIND: u32 = 1; // blocks
 /// The duration after which a node that cannot request its needed blocks from any peer
 /// (see [`BlockSync::sync_stuck_below_peer_floors`]) should give up and shut down.
 pub const STUCK_SYNC_SHUTDOWN_THRESHOLD: Duration = Duration::from_secs(5 * 60);
-
-/// The number of peers that must have sent locators before their majority can declare the blocks
-/// this node needs pruned (see [`BlockSync::sync_stuck_below_peer_floors`]). Equal to the router's
-/// `Heartbeat::MINIMUM_NUMBER_OF_PEERS`, which is a trait constant this crate cannot name without an
-/// implementor.
-const STUCK_SYNC_MINIMUM_PEERS: usize = 3;
 
 /// Returns `true` if a peer at `peer_tip` is assumed to still serve block `height`: every node is
 /// assumed to prune authority data older than `AUTHORITY_RETENTION_BLOCKS` blocks, so a peer at
@@ -1212,7 +1206,7 @@ impl<N: Network> BlockSync<N> {
     }
 
     /// Returns `true` if the peers corroborate that the blocks this node needs (from `height + 1`)
-    /// have been pruned network-wide: at least `STUCK_SYNC_MINIMUM_PEERS` peers have sent locators,
+    /// have been pruned network-wide: at least `MINIMUM_NUMBER_OF_PEERS` peers have sent locators,
     /// a strict majority of them are ahead of `height`, and every one of those has an assumed
     /// pruning floor above `height + 1`.
     ///
@@ -1228,7 +1222,7 @@ impl<N: Network> BlockSync<N> {
             num_ahead += 1;
         }
         // A strict majority of the peers that sent locators, written without division so it is exact.
-        locators.len() >= STUCK_SYNC_MINIMUM_PEERS && num_ahead * 2 > locators.len()
+        locators.len() >= MINIMUM_NUMBER_OF_PEERS && num_ahead * 2 > locators.len()
     }
 
     /// Returns how long sync has made no progress because the peers have pruned the blocks this
@@ -2493,10 +2487,10 @@ mod tests {
     #[test]
     fn test_find_sync_peers_ignores_retention_floor() {
         let sync = sample_sync_at_height(0);
-        add_peers(&sync, 1, STUCK_SYNC_MINIMUM_PEERS, 2 * AUTHORITY_RETENTION_BLOCKS);
+        add_peers(&sync, 1, MINIMUM_NUMBER_OF_PEERS, 2 * AUTHORITY_RETENTION_BLOCKS);
 
         let (sync_peers, _) = sync.find_sync_peers().expect("far-ahead peers are sync peers");
-        assert_eq!(sync_peers.len(), STUCK_SYNC_MINIMUM_PEERS);
+        assert_eq!(sync_peers.len(), MINIMUM_NUMBER_OF_PEERS);
         assert!(sync.prepare_block_requests().is_empty());
     }
 
@@ -2508,7 +2502,7 @@ mod tests {
     }
 
     /// Tests when peers that have pruned the needed blocks arm the stuck signal: only at least
-    /// `STUCK_SYNC_MINIMUM_PEERS` peers with locators, of which a strict majority have pruned them.
+    /// `MINIMUM_NUMBER_OF_PEERS` peers with locators, of which a strict majority have pruned them.
     #[test]
     fn test_stuck_signal_requires_pruned_peer_majority() {
         const HEIGHT: u32 = 1_000;
@@ -2537,7 +2531,7 @@ mod tests {
         let sync = BlockSync::<CurrentNetwork>::new(Arc::new(sample_ledger_service(0)), ConnectionMode::Router);
         let sync = BlockSync { ledger: Arc::new(sample_ledger_service(1_000)), ..sync };
         assert_eq!(sync.get_sync_height(), 0);
-        add_peers(&sync, 1, STUCK_SYNC_MINIMUM_PEERS, 1_000 + AUTHORITY_RETENTION_BLOCKS);
+        add_peers(&sync, 1, MINIMUM_NUMBER_OF_PEERS, 1_000 + AUTHORITY_RETENTION_BLOCKS);
 
         assert!(!sync.prepare_block_requests().is_empty());
         assert!(sync.sync_stuck_below_peer_floors().is_none());
@@ -2549,7 +2543,7 @@ mod tests {
     #[test]
     fn test_answered_requests_do_not_block_stuck_signal() {
         let sync = sample_sync_at_height(0);
-        add_peers(&sync, 1, STUCK_SYNC_MINIMUM_PEERS, 2 * AUTHORITY_RETENTION_BLOCKS);
+        add_peers(&sync, 1, MINIMUM_NUMBER_OF_PEERS, 2 * AUTHORITY_RETENTION_BLOCKS);
 
         let genesis = {
             use snarkvm::prelude::FromBytes;
@@ -2585,7 +2579,7 @@ mod tests {
         assert!(sync.prepare_block_requests().is_empty());
         assert!(sync.sync_stuck_below_peer_floors().is_none());
 
-        add_peers(&sync, 1, STUCK_SYNC_MINIMUM_PEERS, 2 * AUTHORITY_RETENTION_BLOCKS);
+        add_peers(&sync, 1, MINIMUM_NUMBER_OF_PEERS, 2 * AUTHORITY_RETENTION_BLOCKS);
         assert!(sync.sync_stuck_below_peer_floors().is_some());
         std::thread::sleep(Duration::from_millis(20));
         let stuck_for = sync.sync_stuck_below_peer_floors().unwrap();
@@ -2596,7 +2590,7 @@ mod tests {
         assert!(sync.sync_stuck_below_peer_floors().unwrap() < stuck_for);
 
         // A peer that retains the needed blocks clears the signal.
-        let retaining_peer = sample_peer_ip(STUCK_SYNC_MINIMUM_PEERS as u16 + 1);
+        let retaining_peer = sample_peer_ip(MINIMUM_NUMBER_OF_PEERS as u16 + 1);
         sync.update_peer_locators(retaining_peer, &sample_block_locators(AUTHORITY_RETENTION_BLOCKS / 10)).unwrap();
         assert!(!sync.prepare_block_requests().is_empty());
         assert!(sync.sync_stuck_below_peer_floors().is_none());
@@ -2604,7 +2598,7 @@ mod tests {
         // So does the pruned peers disconnecting.
         sync.remove_peer(&retaining_peer);
         assert!(sync.sync_stuck_below_peer_floors().is_some());
-        for id in 1..=STUCK_SYNC_MINIMUM_PEERS as u16 {
+        for id in 1..=MINIMUM_NUMBER_OF_PEERS as u16 {
             sync.remove_peer(&sample_peer_ip(id));
         }
         assert!(sync.sync_stuck_below_peer_floors().is_none());
