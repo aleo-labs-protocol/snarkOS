@@ -59,6 +59,25 @@ use aleo_std::StorageMode;
 use anyhow::{Context, Result};
 use std::{sync::Arc, time::Duration};
 
+/// snarkVM's advice on every failed ledger open.
+const CLEAN_ADVICE: &str = " (run 'snarkos clean' and try again)";
+
+/// snarkVM's refusals to open a store that another build can open: a pruned store in a build
+/// without `prune-authority-data`, and a store with a newer schema.
+const REFUSALS: [&str; 2] =
+    ["only a build with the `prune-authority-data` feature", "written by a newer version of snarkVM"];
+
+/// Removes snarkVM's `snarkos clean` advice from a ledger load error that is one of its refusals,
+/// since following it would destroy a ledger that the right build can still open.
+pub(crate) fn drop_clean_advice_on_refusal(error: anyhow::Error) -> anyhow::Error {
+    let message = format!("{error:#}");
+    if message.contains(CLEAN_ADVICE) && REFUSALS.iter().any(|refusal| message.contains(refusal)) {
+        anyhow::anyhow!(message.replacen(CLEAN_ADVICE, "", 1))
+    } else {
+        error
+    }
+}
+
 /// A helper to log instructions to recover.
 pub fn log_clean_error(storage_mode: &StorageMode) {
     match storage_mode {
@@ -235,5 +254,23 @@ mod tests {
             assert!(!is_stuck_sync_fatal(below_threshold, cdn_fallback), "{cdn_fallback:?}");
             assert!(is_stuck_sync_fatal(at_threshold, cdn_fallback), "{cdn_fallback:?}");
         }
+    }
+
+    #[test]
+    fn test_drop_clean_advice_on_refusal() {
+        let load_error = |cause: &str| {
+            drop_clean_advice_on_refusal(anyhow::anyhow!(
+                "Failed to load ledger (run 'snarkos clean' and try again)\n\n{cause}\n"
+            ))
+            .to_string()
+        };
+        for refusal in [
+            "This ledger has had authority data pruned, which only a build with the `prune-authority-data` feature can open",
+            "This ledger was written by a newer version of snarkVM (storage schema v2; this build understands v1). \
+             Upgrade snarkVM, or resync from genesis.",
+        ] {
+            assert_eq!(load_error(refusal), format!("Failed to load ledger\n\n{refusal}\n"));
+        }
+        assert!(load_error("Corruption: bad block").contains("snarkos clean"));
     }
 }
