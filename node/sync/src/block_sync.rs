@@ -1706,8 +1706,7 @@ impl<N: Network> BlockSync<N> {
     ///
     /// Unlike [`Self::find_sync_peers`] this does not only return the latest locators height, but the full BlockLocators for each peer.
     /// Returns `None` if there are no peers to sync from. With `first_needed`, the first block to be
-    /// requested, peers assumed to have pruned it, or that answered empty since their locators last
-    /// changed, are excluded.
+    /// requested, peers assumed to have pruned it, by their tip or their learned floor, are excluded.
     ///
     /// # Locking
     /// This function will read-lock `common_ancestors`.
