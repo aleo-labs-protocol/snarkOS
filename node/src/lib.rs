@@ -57,7 +57,7 @@ use snarkvm::prelude::Network;
 
 use aleo_std::StorageMode;
 use anyhow::{Context, Result};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 /// A helper to log instructions to recover.
 pub fn log_clean_error(storage_mode: &StorageMode) {
@@ -99,23 +99,27 @@ pub async fn wait_for_cdn(cdn_sync: Option<Arc<CdnBlockSync>>) -> Result<CdnFall
     }
 }
 
-/// Shuts the node down, as failed, if no connected peer can serve the blocks it needs (see
-/// `BlockSync::sync_stuck_below_peer_floors`), and returns whether it did.
+/// Returns `true` if a node that has been stuck for `stuck_for` must shut down.
 ///
-/// With the CDN to fall back to, the condition must persist for `STUCK_SYNC_SHUTDOWN_THRESHOLD`
-/// first, so that a transient set of peers does not restart the node. Without it, waiting changes
-/// nothing, so the node fails at once.
+/// With CDN sync disabled or failed, waiting changes nothing, so the node fails at once. Otherwise
+/// the condition must persist for `STUCK_SYNC_SHUTDOWN_THRESHOLD`, so that a transient set of peers
+/// does not stop the node.
+fn is_stuck_sync_fatal(stuck_for: Option<Duration>, cdn_fallback: CdnFallback) -> bool {
+    match (stuck_for, cdn_fallback) {
+        (None, _) => false,
+        (Some(_), CdnFallback::Disabled | CdnFallback::Failed) => true,
+        (Some(stuck_for), CdnFallback::Available | CdnFallback::Behind) => stuck_for >= STUCK_SYNC_SHUTDOWN_THRESHOLD,
+    }
+}
+
+/// Shuts the node down, as failed, if no connected peer can serve the blocks it needs (see
+/// `BlockSync::sync_stuck_below_peer_floors` and [`is_stuck_sync_fatal`]), and returns whether it did.
 pub fn shut_down_if_stuck_sync<N: Network>(
     sync: &BlockSync<N>,
     signal_handler: &SignalHandler,
     cdn_fallback: CdnFallback,
 ) -> bool {
-    let is_fatal = match sync.sync_stuck_below_peer_floors() {
-        None => false,
-        Some(_) if cdn_fallback != CdnFallback::Available => true,
-        Some(stuck_for) => stuck_for >= STUCK_SYNC_SHUTDOWN_THRESHOLD,
-    };
-    if !is_fatal {
+    if !is_stuck_sync_fatal(sync.sync_stuck_below_peer_floors(), cdn_fallback) {
         return false;
     }
 
@@ -208,4 +212,26 @@ pub fn notification_message() -> String {
     .bold();
 
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stuck_sync_is_fatal_at_once_only_without_a_cdn_to_wait_for() {
+        let just_stuck = Some(Duration::ZERO);
+        let below_threshold = Some(STUCK_SYNC_SHUTDOWN_THRESHOLD - Duration::from_secs(1));
+        let at_threshold = Some(STUCK_SYNC_SHUTDOWN_THRESHOLD);
+
+        for cdn_fallback in [CdnFallback::Disabled, CdnFallback::Failed] {
+            assert!(!is_stuck_sync_fatal(None, cdn_fallback));
+            assert!(is_stuck_sync_fatal(just_stuck, cdn_fallback));
+        }
+        for cdn_fallback in [CdnFallback::Available, CdnFallback::Behind] {
+            assert!(!is_stuck_sync_fatal(None, cdn_fallback));
+            assert!(!is_stuck_sync_fatal(below_threshold, cdn_fallback), "{cdn_fallback:?}");
+            assert!(is_stuck_sync_fatal(at_threshold, cdn_fallback), "{cdn_fallback:?}");
+        }
+    }
 }
