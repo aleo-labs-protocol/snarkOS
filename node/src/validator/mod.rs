@@ -223,7 +223,13 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         };
         // Blocks added by CDN sync do not pass through block sync, so record and advertise them.
         node.sync.set_sync_height(ledger.latest_height());
-        node.ping.update_block_locators(node.sync.get_block_locators()?);
+        match node.sync.get_block_locators() {
+            Ok(locators) => node.ping.update_block_locators(locators),
+            Err(error) => {
+                node.shut_down().await;
+                return Err(error);
+            }
+        }
 
         // Start the BFT and consensus handlers now that CDN sync is complete. This ensures that
         // committed subdags are only processed after the initial sync from the CDN has finished.
