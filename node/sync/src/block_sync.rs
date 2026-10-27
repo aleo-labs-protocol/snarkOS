@@ -815,15 +815,16 @@ impl<N: Network> BlockSync<N> {
     /// This function returns peers that are consistent with each other, and have a block height
     /// that is greater than the ledger height of this node.
     ///
+    /// Peers are not filtered by their retention floor: callers use this for the network tip (BFT
+    /// sync mode, prover puzzle requests), which does not depend on which blocks a peer still serves.
+    ///
     /// # Locking
     /// This will read-lock `common_ancestors` and `sync_state`, but not at the same time.
     pub fn find_sync_peers(&self) -> Option<(IndexMap<SocketAddr, u32>, u32)> {
         // Retrieve the current sync height.
         let current_height = self.get_sync_height();
 
-        if let Some((sync_peers, min_common_ancestor)) =
-            self.find_sync_peers_inner(current_height, current_height.saturating_add(1))
-        {
+        if let Some((sync_peers, min_common_ancestor)) = self.find_sync_peers_inner(current_height, None) {
             // Map the locators into the latest height.
             let sync_peers =
                 sync_peers.into_iter().map(|(ip, locators)| (ip, locators.latest_locator_height())).collect();
@@ -1073,7 +1074,8 @@ impl<N: Network> BlockSync<N> {
                 // Set the maximum number of blocks, so that they do not exceed the end height.
                 let max_new_blocks_to_request = end_height - start_height;
 
-                let Some((sync_peers, min_common_ancestor)) = self.find_sync_peers_inner(start_height, start_height)
+                let Some((sync_peers, min_common_ancestor)) =
+                    self.find_sync_peers_inner(start_height, Some(start_height))
                 else {
                     // This generally shouldn't happen, because there cannot be outstanding requests when no peers are connected.
                     warn!("Cannot re-request blocks because no or not enough peers are connected");
@@ -1136,7 +1138,7 @@ impl<N: Network> BlockSync<N> {
             print_requests();
             vec![]
         } else if let Some((sync_peers, min_common_ancestor)) =
-            self.find_sync_peers_inner(current_height, current_height.saturating_add(1))
+            self.find_sync_peers_inner(current_height, Some(current_height.saturating_add(1)))
         {
             // Retrieve the greatest block height of any connected peer.
             // We do not need to update the sync state here, as that already happens when the block locators are received.
@@ -1529,15 +1531,15 @@ impl<N: Network> BlockSync<N> {
     /// Finds the peers to sync from and the shared common ancestor, starting at the give height.
     ///
     /// Unlike [`Self::find_sync_peers`] this does not only return the latest locators height, but the full BlockLocators for each peer.
-    /// Returns `None` if there are no peers to sync from. Peers assumed to have pruned `first_needed`,
-    /// the first block to be requested, are excluded.
+    /// Returns `None` if there are no peers to sync from. With `first_needed`, the first block to be
+    /// requested, peers assumed to have pruned it are excluded.
     ///
     /// # Locking
     /// This function will read-lock `common_ancestors`.
     fn find_sync_peers_inner(
         &self,
         current_height: u32,
-        first_needed: u32,
+        first_needed: Option<u32>,
     ) -> Option<(IndexMap<SocketAddr, BlockLocators<N>>, u32)> {
         // Retrieve the latest ledger height.
         let latest_ledger_height = self.ledger.latest_block_height();
@@ -1551,7 +1553,7 @@ impl<N: Network> BlockSync<N> {
             .iter()
             .filter(|(_, locators)| {
                 let peer_tip = locators.latest_locator_height();
-                peer_tip > current_height && peer_can_serve(peer_tip, first_needed)
+                peer_tip > current_height && first_needed.is_none_or(|height| peer_can_serve(peer_tip, height))
             })
             .sorted_by(|(_, a), (_, b)| b.latest_locator_height().cmp(&a.latest_locator_height()))
             .take(NUM_SYNC_CANDIDATE_PEERS)
@@ -2407,6 +2409,19 @@ mod tests {
 
         assert!(sync.prepare_block_requests().is_empty());
         assert!(sync.sync_stuck_below_peer_floors().is_none());
+    }
+
+    /// Tests that `find_sync_peers` reports peers that are far ahead even when they have pruned the
+    /// blocks this node needs, since its callers use it for the network tip, while request building
+    /// still excludes them.
+    #[test]
+    fn test_find_sync_peers_ignores_retention_floor() {
+        let sync = sample_sync_at_height(0);
+        add_pruned_peers(&sync, 0, STUCK_SYNC_MINIMUM_PEERS as u16);
+
+        let (sync_peers, _) = sync.find_sync_peers().expect("far-ahead peers are sync peers");
+        assert_eq!(sync_peers.len(), STUCK_SYNC_MINIMUM_PEERS);
+        assert!(sync.prepare_block_requests().is_empty());
     }
 
     /// Adds `num_peers` peers whose tip is two retention windows ahead of `height`, so that none of
