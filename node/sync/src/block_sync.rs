@@ -688,7 +688,6 @@ impl<N: Network> BlockSync<N> {
                 self.answered_empty.lock().insert(peer_ip);
                 break 'outer Err(self.count_empty_block_response(peer_ip));
             };
-            self.empty_responses.lock().remove(&peer_ip);
 
             let expected_consensus_version =
                 N::CONSENSUS_VERSION(last_height).map_err(InsertBlockResponseError::Other)?;
@@ -724,6 +723,7 @@ impl<N: Network> BlockSync<N> {
                 }
             }
 
+            self.empty_responses.lock().remove(&peer_ip);
             Ok(())
         };
 
@@ -2522,22 +2522,40 @@ mod tests {
     }
 
     /// Tests that consecutive empty responses for blocks a peer claims to hold are tolerated until
-    /// the threshold, which requires a disconnect, and that a non-empty response resets the count.
+    /// the threshold, which requires a disconnect, and that only a successfully inserted response
+    /// resets the count.
     #[test]
     fn test_repeated_empty_block_responses_disconnect() {
-        let sync = sample_sync_at_height(0);
+        // An empty ledger, so that genesis can be inserted as a response.
+        let sync = BlockSync::new(Arc::new(MockLedgerService::new(sample_committee())), ConnectionMode::Router);
         let peer_ip = sample_peer_ip(1);
         sync.update_peer_locators(peer_ip, &sample_block_locators(10)).unwrap();
-
-        for _ in 1..MAX_CONSECUTIVE_EMPTY_BLOCK_RESPONSES {
-            assert!(empty_response_to(&sync, peer_ip, 1).is_benign());
-        }
-        // A non-empty response resets the count.
         let genesis = {
             use snarkvm::prelude::FromBytes;
             Block::<CurrentNetwork>::from_bytes_le(CurrentNetwork::genesis_bytes()).unwrap()
         };
-        let _ = sync.insert_block_responses(peer_ip, vec![genesis], None);
+
+        for _ in 1..MAX_CONSECUTIVE_EMPTY_BLOCK_RESPONSES {
+            assert!(empty_response_to(&sync, peer_ip, 1).is_benign());
+        }
+        // A rejected response does not reset the count.
+        assert!(sync.insert_block_responses(peer_ip, vec![genesis.clone()], None).is_err());
+        assert!(empty_response_to(&sync, peer_ip, 1).requires_disconnect());
+        // Disconnecting clears the count.
+        sync.remove_peer(&peer_ip);
+        sync.update_peer_locators(peer_ip, &sample_block_locators(10)).unwrap();
+
+        // An inserted response resets it.
+        for _ in 1..MAX_CONSECUTIVE_EMPTY_BLOCK_RESPONSES {
+            assert!(empty_response_to(&sync, peer_ip, 1).is_benign());
+        }
+        let request = OutstandingRequest {
+            request: (None, None, [peer_ip].into_iter().collect()),
+            timestamp: Instant::now(),
+            response: None,
+        };
+        sync.requests.write().insert(0, request);
+        sync.insert_block_responses(peer_ip, vec![genesis], None).unwrap();
         for _ in 1..MAX_CONSECUTIVE_EMPTY_BLOCK_RESPONSES {
             assert!(empty_response_to(&sync, peer_ip, 1).is_benign());
         }
