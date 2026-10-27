@@ -155,7 +155,11 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
 
                 // Process the block response.
                 let node = self.clone();
-                match spawn_blocking(move || node.block_response(peer_ip, blocks.0, latest_consensus_version)).await? {
+                match spawn_blocking(move || {
+                    node.block_response(peer_ip, request.start_height, blocks.0, latest_consensus_version)
+                })
+                .await?
+                {
                     true => Ok(true),
                     false => bail!("Peer '{peer_ip}' sent an invalid block response"),
                 }
@@ -320,6 +324,7 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
     fn block_response(
         &self,
         peer_ip: SocketAddr,
+        start_height: u32,
         blocks: Vec<Block<N>>,
         latest_consensus_version: Option<ConsensusVersion>,
     ) -> bool;

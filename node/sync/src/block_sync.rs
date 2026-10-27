@@ -708,17 +708,19 @@ impl<N: Network> BlockSync<N> {
     ///
     /// Note, that this only queues the response. After this, you most likely want to call `Self::try_advancing_block_synchronization`.
     ///
+    /// `start_height` is the first height of the request that the response answers.
     #[inline]
     pub fn insert_block_responses(
         &self,
         peer_ip: SocketAddr,
+        start_height: u32,
         blocks: Vec<Block<N>>,
         latest_consensus_version: Option<ConsensusVersion>,
     ) -> Result<(), InsertBlockResponseError<N>> {
         // Attempt to insert the block responses, and break if we encounter an error.
         let result = 'outer: {
             let Some(last_height) = blocks.as_slice().last().map(|b| b.height()) else {
-                break 'outer Err(self.record_empty_block_response(peer_ip));
+                break 'outer Err(self.record_empty_block_response(peer_ip, start_height));
             };
 
             let expected_consensus_version =
@@ -770,22 +772,14 @@ impl<N: Network> BlockSync<N> {
         result
     }
 
-    /// Records an empty block response from `peer_ip`, and returns the error to report.
+    /// Records an empty response from `peer_ip` to a request from `start_height`, and returns the
+    /// error to report.
     ///
-    /// The response's range starts at or above the peer's lowest outstanding request `h`, so the peer
-    /// lacks `h` and its learned floor rises above it. If `h` was at or above the peer's floor, the
-    /// response contradicts what the peer claims to hold, and counts as a strike.
-    fn record_empty_block_response(&self, peer_ip: SocketAddr) -> InsertBlockResponseError<N> {
-        let lowest_request = self
-            .requests
-            .read()
-            .iter()
-            .find(|(_, request)| request.response.is_none() && request.sync_ips().contains(&peer_ip))
-            .map(|(height, _)| *height);
-        let Some(height) = lowest_request else {
-            return InsertBlockResponseError::EmptyBlockResponse;
-        };
-
+    /// The peer lacks `start_height`, and peers only prune from below, so its learned floor rises
+    /// above it. If `start_height` was at or above the peer's floor, the response contradicts what the
+    /// peer claims to hold, and counts as a strike.
+    fn record_empty_block_response(&self, peer_ip: SocketAddr, start_height: u32) -> InsertBlockResponseError<N> {
+        let height = start_height;
         let _prepare_requests_lock = self.prepare_requests_lock.lock();
         let Some(tip) = self.get_peer_height(&peer_ip) else {
             return InsertBlockResponseError::EmptyBlockResponse;
@@ -2543,7 +2537,7 @@ mod tests {
         assert_eq!(num_requests, requests.len());
 
         // The peer responds with an empty block response, indicating it cannot serve the range.
-        let error = sync.insert_block_responses(peer_ip, vec![], None).unwrap_err();
+        let error = sync.insert_block_responses(peer_ip, 1, vec![], None).unwrap_err();
         assert!(matches!(error, InsertBlockResponseError::EmptyBlockResponse));
         // An explicit "cannot serve" is not a protocol violation.
         assert!(error.is_benign());
@@ -2565,7 +2559,7 @@ mod tests {
             response: None,
         };
         sync.requests.write().insert(height, request);
-        sync.insert_block_responses(peer_ip, vec![], None).unwrap_err()
+        sync.insert_block_responses(peer_ip, height, vec![], None).unwrap_err()
     }
 
     /// Returns the strikes and learned floor recorded for `peer_ip`.
@@ -2591,7 +2585,7 @@ mod tests {
             assert!(empty_response_to(&sync, peer_ip, height).is_benign());
         }
         // A rejected response does not reset the strikes.
-        assert!(sync.insert_block_responses(peer_ip, vec![genesis.clone()], None).is_err());
+        assert!(sync.insert_block_responses(peer_ip, 0, vec![genesis.clone()], None).is_err());
         let error = empty_response_to(&sync, peer_ip, MAX);
         assert!(error.requires_disconnect());
         assert!(!error.is_benign());
@@ -2611,7 +2605,7 @@ mod tests {
             response: None,
         };
         sync.requests.write().insert(0, request);
-        sync.insert_block_responses(peer_ip, vec![genesis], None).unwrap();
+        sync.insert_block_responses(peer_ip, 0, vec![genesis], None).unwrap();
         assert_eq!(pruning_of(&sync, peer_ip), (0, MAX));
         for height in MAX..2 * MAX - 1 {
             assert!(empty_response_to(&sync, peer_ip, height).is_benign());
@@ -2639,6 +2633,36 @@ mod tests {
             assert!(empty_response_to(&sync, peer_ip, 1_001).is_benign());
         }
         assert_eq!(pruning_of(&sync, peer_ip), (1, 1_002));
+    }
+
+    /// Tests that an empty response raises the peer's learned floor just above the request it answers,
+    /// even when that request was already answered by another peer, or dropped, and a later batch
+    /// still lists the peer.
+    #[test]
+    fn test_empty_block_response_floor_follows_answered_request() {
+        let sync = sample_sync_at_height(0);
+        let (peer_a, peer_b) = (sample_peer_ip(1), sample_peer_ip(2));
+        add_peers(&sync, 1, 2, 10);
+        let genesis = {
+            use snarkvm::prelude::FromBytes;
+            Block::<CurrentNetwork>::from_bytes_le(CurrentNetwork::genesis_bytes()).unwrap()
+        };
+        let request = |sync_ips: &[SocketAddr], response| OutstandingRequest {
+            request: (None, None, sync_ips.iter().copied().collect()),
+            timestamp: Instant::now(),
+            response,
+        };
+        // Block 1 was requested from both peers and answered by A; a later batch lists B.
+        sync.requests.write().insert(1, request(&[peer_b], Some(genesis)));
+        sync.requests.write().insert(6, request(&[peer_a, peer_b], None));
+
+        assert!(sync.insert_block_responses(peer_b, 1, vec![], None).unwrap_err().is_benign());
+        assert_eq!(pruning_of(&sync, peer_b), (1, 2));
+        assert!(sync.find_sync_peers_inner(1, Some(2)).unwrap().0.contains_key(&peer_b));
+
+        // A response to a dropped request does not raise the floor past it either.
+        assert!(sync.insert_block_responses(peer_a, 1, vec![], None).unwrap_err().is_benign());
+        assert_eq!(pruning_of(&sync, peer_a), (1, 2));
     }
 
     /// Tests that a peer stays eligible for blocks at or above its learned floor.

@@ -737,7 +737,10 @@ impl<N: Network> Gateway<N> {
                     // Ensure the block response is well-formed.
                     blocks.ensure_response_is_well_formed(peer_ip, request.start_height, request.end_height)?;
                     // Send the blocks to the sync module.
-                    match sync_sender.insert_block_response(peer_ip, blocks.0, latest_consensus_version).await {
+                    match sync_sender
+                        .insert_block_response(peer_ip, request.start_height, blocks.0, latest_consensus_version)
+                        .await
+                    {
                         Ok(_) => Ok(true),
                         Err(err) if err.is_benign() => {
                             let err: anyhow::Error = err.into();
