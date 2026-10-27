@@ -118,21 +118,25 @@ fn map_missing_resource_error(err: anyhow::Error) -> RestError {
 fn check_block_retained(height: u32, latest_height: u32) -> Result<(), RestError> {
     let earliest = oldest_retained_authority_height(latest_height);
     if height > 0 && height < earliest {
-        return Err(RestError::gone(anyhow!(
-            "block {height} is below this node's authority retention window (earliest {earliest}); \
-            use /block/{height}/header, /block/{height}/transactions, or an archival node"
-        )));
+        return Err(block_gone(height, earliest));
     }
     Ok(())
+}
+
+/// The `410 Gone` for block `height`, below the retention window that starts at `earliest`.
+fn block_gone(height: u32, earliest: u32) -> RestError {
+    RestError::gone(anyhow!(
+        "block {height} is below this node's authority retention window (earliest {earliest}); \
+        use /block/{height}/header, /block/{height}/transactions, or an archival node"
+    ))
 }
 
 /// Returns a `410 Gone` if the non-empty range `start..end` reaches below this node's authority
 /// retention window (see [`check_block_retained`]).
 fn check_range_retained(start: u32, end: u32, latest_height: u32) -> Result<(), RestError> {
-    if range_below_retention_window(start, end, latest_height) {
-        check_block_retained(start.max(1), latest_height)
-    } else {
-        Ok(())
+    match range_below_retention_window(start, end, latest_height) {
+        Some(earliest) => Err(block_gone(start.max(1), earliest)),
+        None => Ok(()),
     }
 }
 

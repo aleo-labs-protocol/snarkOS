@@ -127,11 +127,12 @@ fn can_serve(peer_tip: u32, pruning: Option<&PeerPruning>, height: u32) -> bool 
     peer_can_serve(peer_tip, height) && pruning.is_none_or(|pruning| pruning.learned_floor <= height)
 }
 
-/// Returns `true` if the range `start_height..end_height` reaches below this node's authority
-/// retention window when its tip is `latest_height`. Genesis is never pruned.
-pub fn range_below_retention_window(start_height: u32, end_height: u32, latest_height: u32) -> bool {
+/// Returns the oldest retained height if the range `start_height..end_height` reaches below this
+/// node's authority retention window when its tip is `latest_height`. Genesis is never pruned.
+pub fn range_below_retention_window(start_height: u32, end_height: u32, latest_height: u32) -> Option<u32> {
     let first_prunable = start_height.max(1);
-    end_height > first_prunable && first_prunable < oldest_retained_authority_height(latest_height)
+    let earliest = oldest_retained_authority_height(latest_height);
+    (end_height > first_prunable && first_prunable < earliest).then_some(earliest)
 }
 
 /// Returns the blocks to answer a block request for `start_height..end_height` with: the blocks
@@ -144,7 +145,7 @@ pub fn blocks_or_empty<N: Network>(
     latest_height: u32,
     get_blocks: impl FnOnce() -> Result<Vec<Block<N>>>,
 ) -> DataBlocks<N> {
-    if range_below_retention_window(start_height, end_height, latest_height) {
+    if range_below_retention_window(start_height, end_height, latest_height).is_some() {
         debug!("Cannot serve block request {start_height}..{end_height} - below the retention window");
         return DataBlocks(vec![]);
     }
