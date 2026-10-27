@@ -157,7 +157,6 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
 
             spawn_blocking!(Ledger::<N, C>::load(genesis, storage_mode))
         }
-        .map_err(crate::drop_clean_advice_on_refusal)
         .with_context(|| "Failed to initialize the ledger")?;
 
         // Later blocks finalized by this node are written as JSON beside the ledger.
