@@ -214,7 +214,14 @@ pub async fn load_blocks<N: Network>(
                 Ok(cdn_height) => break cdn_height,
                 Err(error) if attempts < MAXIMUM_HEIGHT_REQUEST_ATTEMPTS && !stoppable.is_stopped() => {
                     warn!("{error} - retrying ({attempts} attempt(s) so far)");
-                    tokio::time::sleep(Duration::from_secs(attempts as u64 * 2)).await;
+                    // Sleep in short steps, so that a stop interrupts the backoff.
+                    let deadline = Instant::now() + Duration::from_secs(attempts as u64 * 2);
+                    while Instant::now() < deadline && !stoppable.is_stopped() {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    if stoppable.is_stopped() {
+                        return Err((start_height, error));
+                    }
                 }
                 Err(error) => return Err((start_height, error)),
             }
