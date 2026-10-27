@@ -113,7 +113,8 @@ fn map_missing_resource_error(err: anyhow::Error) -> RestError {
 
 /// Returns a `410 Gone` if the block at `height` is below this node's authority retention window,
 /// so that the node can no longer assemble it. Genesis is never pruned, and without
-/// `prune-authority-data` every block is retained.
+/// `prune-authority-data` every block is retained. As with other errors, the status is only visible
+/// on `/v2`: the default and `/v1` prefixes turn it into a 500.
 fn check_block_retained(height: u32, latest_height: u32) -> Result<(), RestError> {
     let earliest = oldest_retained_authority_height(latest_height);
     if height > 0 && height < earliest {

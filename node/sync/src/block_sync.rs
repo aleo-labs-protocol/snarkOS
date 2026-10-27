@@ -1212,10 +1212,11 @@ impl<N: Network> BlockSync<N> {
     /// window is armed when the condition first holds, restarted if the ledger height advances while
     /// it holds, and cleared when it stops holding.
     pub fn sync_stuck_below_peer_floors(&self) -> Option<Duration> {
-        // The majority rule leaves no peer eligible for new requests, so only outstanding requests
-        // need a separate check. The sync height is what request generation starts from.
+        // The majority rule leaves no peer eligible for new requests, so only requests still awaiting
+        // a response need a separate check; answered ones waiting on an unservable gap below them do
+        // not count. The sync height is what request generation starts from.
         let height = self.get_sync_height();
-        let no_outstanding_requests = self.requests.read().is_empty();
+        let no_outstanding_requests = self.num_outstanding_block_requests() == 0;
         let is_stuck = no_outstanding_requests && self.needed_blocks_pruned_by_peer_majority(height);
 
         let mut stuck_since = self.stuck_since.lock();
@@ -2453,6 +2454,32 @@ mod tests {
             assert!(sync.prepare_block_requests().is_empty());
             assert_eq!(sync.sync_stuck_below_peer_floors().is_some(), armed, "{num_pruned} pruned, {num_level} level");
         }
+    }
+
+    /// Tests that requests already answered, but waiting on an unservable gap below them, do not
+    /// keep the stuck signal from arming, while a request still awaiting a response does.
+    #[test]
+    fn test_answered_requests_do_not_block_stuck_signal() {
+        let sync = sample_sync_at_height(0);
+        add_peers(&sync, 1, STUCK_SYNC_MINIMUM_PEERS, 2 * AUTHORITY_RETENTION_BLOCKS);
+
+        let genesis = {
+            use snarkvm::prelude::FromBytes;
+            Block::<CurrentNetwork>::from_bytes_le(CurrentNetwork::genesis_bytes()).unwrap()
+        };
+        let request = |sync_ips: IndexSet<SocketAddr>, response| OutstandingRequest {
+            request: (None, None, sync_ips),
+            timestamp: Instant::now(),
+            response,
+        };
+
+        // An answered request above the gap.
+        sync.requests.write().insert(6, request(IndexSet::new(), Some(genesis)));
+        assert!(sync.sync_stuck_below_peer_floors().is_some());
+
+        // A request still awaiting a peer's response.
+        sync.requests.write().insert(7, request([sample_peer_ip(1)].into_iter().collect(), None));
+        assert!(sync.sync_stuck_below_peer_floors().is_none());
     }
 
     /// Tests the stuck-signal lifecycle: never set without peers; set once peers have pruned the

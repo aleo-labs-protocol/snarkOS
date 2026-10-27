@@ -251,9 +251,9 @@ pub async fn load_blocks<N: Network>(
     let cdn_start = start_height - (start_height % BLOCKS_PER_FILE);
     // Set the CDN end height to the given end height.
     let cdn_end = end_height;
-    // If the CDN range is empty, return.
+    // If the CDN range is empty, nothing is loaded.
     if cdn_start >= cdn_end {
-        return Ok(cdn_end);
+        return Ok(start_height.saturating_sub(1));
     }
 
     // A collection of downloaded blocks pending insertion into the ledger.
