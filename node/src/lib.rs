@@ -118,9 +118,8 @@ pub fn shut_down_if_stuck_sync<N: Network>(
     sync: &BlockSync<N>,
     signal_handler: &SignalHandler,
     cdn_fallback: CdnFallback,
-    trusted_peers_only: bool,
 ) -> bool {
-    if !is_stuck_sync_fatal(sync.sync_stuck_below_peer_floors(trusted_peers_only), cdn_fallback) {
+    if !is_stuck_sync_fatal(sync.sync_stuck_below_peer_floors(), cdn_fallback) {
         return false;
     }
 
