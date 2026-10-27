@@ -384,10 +384,12 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         tokio::task::spawn_blocking(move || {
             // For a hash, report a pruned block as gone; a hash the node does not know falls through
             // to the lookup, which reports it.
+            let latest_height = rest.ledger.latest_height();
             if height.is_none()
+                && oldest_retained_authority_height(latest_height) > 1
                 && let Ok(height) = rest.ledger.get_height(&hash)
             {
-                check_block_retained(height, rest.ledger.latest_height())?;
+                check_block_retained(height, latest_height)?;
             }
             match rest.ledger.try_get_block_by_hash(&hash) {
                 Ok(Some(block)) => Ok(ErasedJson::new(block)),

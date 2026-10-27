@@ -61,6 +61,19 @@ macro_rules! test_block_request_handling {
                     // The node remains connected to the peer.
                     assert_eq!(node.router().number_of_connected_peers(), 1);
                 }
+
+                /// Tests that a malformed block request (empty range) still disconnects the requester.
+                #[tokio::test]
+                async fn [<$node_type _disconnects_on_malformed_block_request>]() {
+                    let node = $crate::common::node::$node_type().await;
+                    let (peer, node_addr) = connect_test_peer(node.router()).await;
+
+                    let request = BlockRequest { start_height: 3, end_height: 3 };
+                    assert!(peer.unicast(node_addr, Message::BlockRequest(request)).is_ok());
+
+                    let node_clone = node.clone();
+                    deadline!(Duration::from_secs(5), move || node_clone.router().number_of_connected_peers() == 0);
+                }
             }
         )*
     };
