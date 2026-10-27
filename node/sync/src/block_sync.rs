@@ -1300,7 +1300,8 @@ impl<N: Network> BlockSync<N> {
         let height = self.retention_height();
         let can_progress = {
             let requests = self.requests.read();
-            requests.contains_key(&height.saturating_add(1)) || requests.values().any(|r| !r.sync_ips().is_empty())
+            requests.contains_key(&height.saturating_add(1))
+                || requests.values().any(|r| r.response.is_none() && !r.sync_ips().is_empty())
         };
         let pruned = if can_progress { None } else { self.peers_ahead_all_pruned(height) };
         // A strict majority, written without division so it is exact.
@@ -2750,8 +2751,8 @@ mod tests {
             response,
         };
 
-        // An answered request above the gap.
-        sync.requests.write().insert(6, request(IndexSet::new(), Some(genesis.clone())));
+        // An answered request above the gap, even with a redundant peer yet to respond.
+        sync.requests.write().insert(6, request([sample_peer_ip(1)].into_iter().collect(), Some(genesis.clone())));
         assert!(sync.sync_stuck_below_peer_floors().is_some());
 
         // An answered request for the next block.
