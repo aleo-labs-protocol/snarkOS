@@ -276,6 +276,12 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Validator<N, C> {
         let message = Message::UnconfirmedSolution(serialized);
         // Propagate the "UnconfirmedSolution" to the connected validators.
         self.propagate_to_validators(message, &[peer_ip]);
+        #[cfg(feature = "metrics")]
+        snarkos_node_metrics::increment_counter_1(
+            snarkos_node_metrics::router::UNCONFIRMED_SOLUTIONS_PROPAGATED,
+            "site",
+            "validator",
+        );
         true
     }
 
@@ -294,6 +300,12 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Validator<N, C> {
         let message = Message::UnconfirmedTransaction(serialized);
         // Propagate the "UnconfirmedTransaction" to the connected validators.
         self.propagate_to_validators(message, &[peer_ip]);
+        #[cfg(feature = "metrics")]
+        snarkos_node_metrics::increment_counter_1(
+            snarkos_node_metrics::router::UNCONFIRMED_TRANSACTIONS_PROPAGATED,
+            "site",
+            "validator",
+        );
         true
     }
 }

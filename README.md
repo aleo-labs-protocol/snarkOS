@@ -216,6 +216,27 @@ cargo install --locked --path .
 
 Telemetry is included by default when running `./scripts/run-validator.sh`.
 
+### 3.2.2 Required Consensus Upgrades
+
+During the handshake, each validator shares the consensus version schedule of its build. Your validator needs an upgrade when validators that hold at least a third of the stake schedule a consensus version that your build does not run at that height. Your validator learns this as soon as those validators connect, which is usually long before the activation height.
+
+When an upgrade is required, your validator:
+
+1. Exports the metric `snarkos_consensus_needs_upgrade` with the value `1`. The metrics `snarkos_consensus_required_upgrade_height` and `snarkos_consensus_required_upgrade_version` give the activation height and the version.
+2. Logs an error every 10 minutes, with the version and the activation height.
+3. Keeps building blocks until 100 blocks before the activation height. There it stops and exits with an error, instead of forking.
+
+If you run a validator, start it with `--metrics`, and alert when `snarkos_consensus_needs_upgrade` is greater than `0`. Then upgrade snarkOS at least 100 blocks before the height in `snarkos_consensus_required_upgrade_height`. For example, as a Prometheus alerting rule:
+
+```yaml
+- alert: SnarkOSNeedsUpgrade
+  expr: snarkos_consensus_needs_upgrade > 0
+  annotations:
+    summary: "{{ $labels.instance }} must be upgraded 100 blocks before the height in snarkos_consensus_required_upgrade_height"
+```
+
+A validator that exits with this error needs an upgrade, not a restart. It writes the requirement to `required-consensus-upgrade` in its node data directory, and a restart with the same build exits again. An upgraded build removes the file.
+
 ## 3.3 Run an Aleo Prover
 
 Start by following the instructions in the [Build Guide](#2-build-guide).

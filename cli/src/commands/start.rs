@@ -1012,9 +1012,9 @@ impl Start {
 
         node.wait_for_signals(&signal_handler).await;
 
-        // Exit with an error if the node shut itself down due to a fatal error.
-        if signal_handler.is_failed() {
-            bail!("The node shut down due to a fatal error (see the logs above for details)");
+        // Exit with an error, so that the node is not mistaken for one that was stopped on purpose.
+        if let Some(error) = signal_handler.error() {
+            bail!(error);
         }
         Ok(())
     }

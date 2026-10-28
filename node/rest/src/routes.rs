@@ -1318,7 +1318,12 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             match tokio::task::spawn_blocking(move || {
                 // Hold the slot until verification finishes, even if the client disconnects.
                 let _verification_slot = verification_slot;
-                ledger.check_transaction_basic(&tx, None, &mut rand::rng()).map(|()| tx)
+                #[cfg(feature = "metrics")]
+                let timer = metrics::TransactionCheckTimer::start("rest", &tx);
+                let result = ledger.check_transaction_basic(&tx, None, &mut rand::rng());
+                #[cfg(feature = "metrics")]
+                timer.finish(&result);
+                result.map(|()| tx)
             })
             .await
             {
@@ -1347,6 +1352,8 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
 
         // Broadcast the transaction.
         rest.routing.propagate(message, &[]);
+        #[cfg(feature = "metrics")]
+        metrics::increment_counter_1(metrics::router::UNCONFIRMED_TRANSACTIONS_PROPAGATED, "site", "rest");
 
         // Determine if the node is synced and if the transaction was checked.
         match !is_within_sync_leniency && check_transaction {
@@ -1414,7 +1421,10 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             let res: Result<(), anyhow::Error> = match tokio::task::spawn_blocking(move || {
                 // Hold the slot until verification finishes, even if the client disconnects.
                 let _verification_slot = verification_slot;
-                puzzle.check_solution(&solution, epoch_hash, proof_target)
+                let result = puzzle.check_solution(&solution, epoch_hash, proof_target);
+                #[cfg(feature = "metrics")]
+                metrics::record_solution_check("rest", result.is_ok());
+                result
             })
             .await
             {
@@ -1453,6 +1463,8 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
 
         // Broadcast the unconfirmed solution message.
         rest.routing.propagate(message, &[]);
+        #[cfg(feature = "metrics")]
+        metrics::increment_counter_1(metrics::router::UNCONFIRMED_SOLUTIONS_PROPAGATED, "site", "rest");
 
         // Determine if the node is synced and if the solution was checked.
         match !is_within_sync_leniency && check_solution {

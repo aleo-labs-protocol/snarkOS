@@ -142,7 +142,8 @@ pub fn shut_down_if_stuck_sync<N: Network>(
         "No connected peer can serve the blocks this node needs; they have likely been pruned network-wide. \
         Shutting down. {recovery}"
     );
-    signal_handler.stop_with_failure();
+    signal_handler
+        .stop_with_error("No connected peer can serve the blocks this node needs (see the logs above)".to_string());
     true
 }
 

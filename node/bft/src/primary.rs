@@ -735,7 +735,10 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
                             continue;
                         }
                         // Check if the solution is still valid.
-                        if let Err(e) = self.ledger.check_solution_basic(solution_id, solution).await {
+                        let result = self.ledger.check_solution_basic(solution_id, solution).await;
+                        #[cfg(feature = "metrics")]
+                        metrics::record_solution_check("propose_batch", result.is_ok());
+                        if let Err(e) = result {
                             trace!("Proposing - Skipping solution '{}' - {e}", fmt_id(solution_id));
                             continue;
                         }
@@ -767,7 +770,12 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
                         };
 
                         // Check if the transaction is still valid.
-                        if let Err(e) = self.ledger.check_transaction_basic(transaction_id, transaction).await {
+                        #[cfg(feature = "metrics")]
+                        let timer = metrics::TransactionCheckTimer::start("propose_batch", &transaction);
+                        let result = self.ledger.check_transaction_basic(transaction_id, transaction).await;
+                        #[cfg(feature = "metrics")]
+                        timer.finish(&result);
+                        if let Err(e) = result {
                             trace!("Proposing - Skipping transaction '{}' - {e}", fmt_id(transaction_id));
                             continue;
                         }
@@ -999,11 +1007,27 @@ impl<N: Network> Primary<N> {
         // If the peer is ahead, use the batch header to sync up to the peer.
         let mut missing_transmissions = self.sync_with_batch_header_from_peer::<true>(peer_ip, &batch_header).await?;
 
+        #[cfg(feature = "metrics")]
+        {
+            let num_solutions =
+                missing_transmissions.keys().filter(|id| matches!(id, TransmissionID::Solution(..))).count();
+            let num_transactions = missing_transmissions.len().saturating_sub(num_solutions);
+            metrics::counter_1(metrics::bft::PEER_PROPOSAL_TRANSMISSIONS, "type", "solution", num_solutions as u64);
+            metrics::counter_1(
+                metrics::bft::PEER_PROPOSAL_TRANSMISSIONS,
+                "type",
+                "transaction",
+                num_transactions as u64,
+            );
+        }
+
         // Check that the transmission ids match and are not fee transactions.
         if let Err(err) = cfg_iter_mut!(&mut missing_transmissions).try_for_each(|(transmission_id, transmission)| {
             // If the transmission is not well-formed, then return early.
             self.ledger.ensure_transmission_is_well_formed(*transmission_id, transmission)
         }) {
+            #[cfg(feature = "metrics")]
+            metrics::increment_counter(metrics::bft::PEER_PROPOSALS_MALFORMED);
             let err = err.context(format!(
                 "Batch propose at round {batch_round} from '{peer_ip}' contains an invalid transmission"
             ));

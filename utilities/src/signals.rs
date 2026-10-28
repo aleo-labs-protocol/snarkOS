@@ -72,8 +72,8 @@ pub struct SignalHandler {
     /// This receiver is used to wait for the node to be stopped.
     stopped_receiver: Mutex<Option<oneshot::Receiver<()>>>,
 
-    /// Whether the stop was caused by a fatal error, so the process can exit with a non-zero code.
-    failed: AtomicBool,
+    /// The reason the node was stopped with, if the process should exit with an error.
+    error: Mutex<Option<String>>,
 
     /// An optional tokio runtime handle.
     pub handle: Option<Handle>,
@@ -86,7 +86,7 @@ impl SignalHandler {
         let obj = Arc::new(Self {
             stopped_sender: RwLock::new(Some(stopped_sender)),
             stopped_receiver: Mutex::new(Some(stopped_receiver)),
-            failed: AtomicBool::new(false),
+            error: Default::default(),
             handle,
         });
 
@@ -137,15 +137,17 @@ impl SignalHandler {
         self.stop();
     }
 
-    /// Initiates shutdown of the node due to a fatal error, so the process exits with a non-zero code.
-    pub fn stop_with_failure(&self) {
-        self.failed.store(true, Ordering::SeqCst);
+    /// Stops the node, and records `error` as the reason for the process to exit with an error.
+    ///
+    /// Only the first error is kept.
+    pub fn stop_with_error(&self, error: String) {
+        self.error.lock().get_or_insert(error);
         self.stop();
     }
 
-    /// Returns `true` if the node was stopped due to a fatal error.
-    pub fn is_failed(&self) -> bool {
-        self.failed.load(Ordering::SeqCst)
+    /// Returns the error the node was stopped with, if any.
+    pub fn error(&self) -> Option<String> {
+        self.error.lock().clone()
     }
 
     /// Waits until the signal handler was invoked or the stopped flag was set some other way.
@@ -199,6 +201,18 @@ mod tests {
         // The manual path, used when the node hits a fatal error rather than a Ctrl+C.
         handler.stop();
         assert!(handler.is_stopped());
+    }
+
+    #[tokio::test]
+    async fn a_signal_handler_keeps_the_first_error_it_was_stopped_with() {
+        let handler = SignalHandler::new(None);
+        assert_eq!(handler.error(), None);
+
+        handler.stop_with_error("first".to_string());
+        handler.stop_with_error("second".to_string());
+
+        assert!(handler.is_stopped());
+        assert_eq!(handler.error().as_deref(), Some("first"));
     }
 
     #[tokio::test]
