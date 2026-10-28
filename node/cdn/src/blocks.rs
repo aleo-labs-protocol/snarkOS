@@ -156,7 +156,7 @@ impl CdnBlockSync {
                 warn!("{}", flatten_error(&error));
 
                 // If the sync made any progress, then check the integrity of the ledger.
-                if completed_height != start_height {
+                if completed_height >= start_height {
                     debug!("Synced the ledger up to block {completed_height}");
 
                     // Retrieve the latest height, according to the ledger.
