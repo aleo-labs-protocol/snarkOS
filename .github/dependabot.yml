@@ -29,8 +29,12 @@ updates:
       - dependency-name: "snarkvm*"
       # `metrics` must match the version snarkVM's metrics crate uses, and a
       # bump past 0.22 also requires moving node/metrics to a matching
-      # metrics-exporter-prometheus. Bump it by hand together with snarkVM.
+      # metrics-exporter-prometheus. Bump both by hand together with snarkVM.
+      # An exporter built on a different `metrics` installs its recorder for
+      # that version, and every metric snarkVM records is silently dropped.
       - dependency-name: "metrics"
+        update-types: [ "version-update:semver-minor" ]
+      - dependency-name: "metrics-exporter-prometheus"
         update-types: [ "version-update:semver-minor" ]
 
   - package-ecosystem: "github-actions"
