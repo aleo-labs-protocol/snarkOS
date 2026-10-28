@@ -5485,8 +5485,6 @@ dependencies = [
  "hyper-util",
  "num_cpus",
  "object_store",
- "rayon",
- "reqwest",
  "s3s",
  "s3s-fs",
  "serde",

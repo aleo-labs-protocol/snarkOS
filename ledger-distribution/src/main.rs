@@ -18,7 +18,7 @@
 #[macro_use]
 extern crate tracing;
 
-use snarkos_ledger_distribution::{Beacon, BlocksBucket, Bucket, initialize_rest_server, sync_with_beacon};
+use snarkos_ledger_distribution::{BlocksBucket, Bucket, LedgerReader, initialize_rest_server, sync_with_ledger};
 use snarkvm::{ledger::block::Block, prelude::*};
 
 use anyhow::Result;
@@ -34,9 +34,13 @@ use std::{
     time::Duration,
 };
 
-/// The base URL of the node REST API that blocks are fetched from, read from `EXPLORER_URL`.
-fn explorer_url() -> String {
-    env::var("EXPLORER_URL").expect("EXPLORER_URL must be set")
+/// Opens the node's ledger read-only: the ledger directory at `LEDGER_PATH`, with the read-only
+/// instance's own files in `LEDGER_SECONDARY_PATH`.
+fn open_ledger<N: Network>() -> Result<LedgerReader<N>> {
+    let ledger_path = env::var("LEDGER_PATH").expect("LEDGER_PATH must be set");
+    let secondary_path = env::var("LEDGER_SECONDARY_PATH").expect("LEDGER_SECONDARY_PATH must be set");
+    info!("Reading the ledger at '{ledger_path}'");
+    LedgerReader::open(ledger_path, secondary_path)
 }
 
 /// The genesis block the bucket must start with: the block in the file at `GENESIS_PATH` if it
@@ -115,7 +119,7 @@ async fn main() -> Result<()> {
 async fn run_fast_sync<N: Network>(bucket: Bucket, dry_run: bool) -> Result<()> {
     // Initialize the blocks bucket.
     let blocks_bucket = BlocksBucket::<N>::new(bucket);
-    let beacon = Beacon::<N>::new(explorer_url());
+    let ledger = open_ledger::<N>()?;
     let genesis = genesis_block::<N>()?;
 
     let (_rest_runtime, _rest_handle) = initialize_rest_server(blocks_bucket.clone()).unwrap();
@@ -126,11 +130,11 @@ async fn run_fast_sync<N: Network>(bucket: Bucket, dry_run: bool) -> Result<()> 
     handle_ctrl_c(shutdown_started.clone());
 
     loop {
-        // Sync with the beacon.
+        // Sync with the ledger.
         if let Err(err) =
-            sync_with_beacon::<N>(&blocks_bucket, &beacon, &genesis, shutdown_started.clone(), dry_run).await
+            sync_with_ledger::<N>(&blocks_bucket, &ledger, &genesis, shutdown_started.clone(), dry_run).await
         {
-            error!("Failed to sync with the beacon: {}", err);
+            error!("Failed to sync with the ledger: {}", err);
         }
 
         // Shut down the script if the shutdown signal has been received.
