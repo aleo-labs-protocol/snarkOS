@@ -98,7 +98,10 @@ pub async fn wait_for_cdn(cdn_sync: Option<Arc<CdnBlockSync>>) -> Result<CdnFall
     Ok(match cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN")? {
         CdnSyncOutcome::Synced => CdnFallback::Available,
         CdnSyncOutcome::Failed(height, error) => {
-            warn!("{}", flatten_error(error.context(format!("The startup CDN sync stopped at block {height}"))));
+            warn!(
+                "{}",
+                flatten_error(error.context(format!("The startup CDN sync failed at or before block {height}")))
+            );
             CdnFallback::Failed
         }
     })
