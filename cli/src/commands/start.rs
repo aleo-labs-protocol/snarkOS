@@ -1249,7 +1249,7 @@ fn load_or_compute_genesis<N: Network>(
     };
 
     // Cached dev genesis blocks live in ~/.aleo/dev-genesis, named by this preimage hash.
-    // CircleCI restores and saves that directory; see restore_dev_genesis_cache in .circleci/config.yml.
+    // The CI fleet keeps that directory between runs, keyed by Cargo.lock and this file; see .github/actions/job-home.
     let cache_dir = aleo_dir().join("dev-genesis");
     let file_path = cache_dir.join(&hash);
     // Check if the genesis block exists.
