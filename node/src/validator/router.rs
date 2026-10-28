@@ -300,10 +300,16 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Validator<N, C> {
         transaction: Transaction<N>,
     ) -> bool {
         // Add the unconfirmed transaction to the memory pool.
-        if let Err(error) = self.consensus.add_unconfirmed_transaction(transaction).await {
-            trace!("[UnconfirmedTransaction] {error}");
-            return true; // Maintain the connection.
-        }
+        #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
+        let checksum = match self.consensus.add_unconfirmed_transaction(transaction, true).await {
+            Ok(checksum) => checksum,
+            Err(error) => {
+                trace!("[UnconfirmedTransaction] {error}");
+                return true; // Maintain the connection.
+            }
+        };
+        #[cfg(feature = "metrics")]
+        snarkos_node_metrics::tx_events::emit_gossiped::<N>("validator", &serialized.transaction_id, Some(checksum));
         let message = Message::UnconfirmedTransaction(serialized);
         // Propagate the "UnconfirmedTransaction" to the connected validators.
         self.propagate_to_validators(message, &[peer_ip]);

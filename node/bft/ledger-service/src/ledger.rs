@@ -132,6 +132,8 @@ impl<'a, N: Network, C: ConsensusStorage<N>> LedgerUpdateService<N> for LedgerUp
             metrics::increment_gauge(metrics::blocks::SOLUTIONS, num_sol as f64);
             metrics::increment_gauge(metrics::blocks::TRANSACTIONS, num_tx as f64);
             metrics::update_block_metrics(block);
+            metrics::tx_events::set_height(block.height());
+            metrics::tx_events::emit_block_outcomes("in_block", block);
         }
 
         tracing::info!("Advanced to block {} at round {} - {}\n", block.height(), block.round(), block.hash());
@@ -147,6 +149,7 @@ impl<N: Network, C: ConsensusStorage<N>> CoreLedgerService<N, C> {
         {
             let height = ledger.latest_block().height();
             metrics::gauge(metrics::bft::HEIGHT, height as f64);
+            metrics::tx_events::set_height(height);
             metrics::gauge(
                 metrics::consensus::VERSION,
                 N::CONSENSUS_VERSION(height).map_or(0.0, |version| version as u16 as f64),

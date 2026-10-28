@@ -1273,7 +1273,8 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         // Determine if we need to check the transaction.
         let check_transaction = check_transaction.check_transaction.unwrap_or(false);
 
-        let tx = if check_transaction {
+        #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
+        let (tx, check_elapsed) = if check_transaction {
             let verification_slot = if tx.is_execute() {
                 rest.verification_slots.executions.acquire().await?
             } else {
@@ -1285,16 +1286,17 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             match tokio::task::spawn_blocking(move || {
                 // Hold the slot until verification finishes, even if the client disconnects.
                 let _verification_slot = verification_slot;
+                let started = std::time::Instant::now();
                 #[cfg(feature = "metrics")]
                 let timer = metrics::TransactionCheckTimer::start("rest", &tx);
                 let result = ledger.check_transaction_basic(&tx, None, &mut rand::rng());
                 #[cfg(feature = "metrics")]
                 timer.finish(&result);
-                result.map(|()| tx)
+                result.map(|()| (tx, Some(started.elapsed())))
             })
             .await
             {
-                Ok(Ok(tx)) => tx,
+                Ok(Ok(checked)) => checked,
                 Ok(Err(err)) => {
                     return match is_within_sync_leniency {
                         // The transaction failed to verify.
@@ -1308,19 +1310,35 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
                 Err(err) => return Err(RestError::internal_server_error(anyhow!(err).context("Tokio error"))),
             }
         } else {
-            tx
+            (tx, None)
         };
 
         // If the consensus module is enabled, add the unconfirmed transaction to the memory pool.
-        if let Some(consensus) = rest.consensus {
+        #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
+        let checksum = match rest.consensus {
             // Add the unconfirmed transaction to the memory pool.
-            consensus.add_unconfirmed_transaction(tx.clone()).await?;
-        }
+            Some(consensus) => Some(consensus.add_unconfirmed_transaction(tx.clone(), false).await?),
+            None => None,
+        };
 
         // Broadcast the transaction.
         rest.routing.propagate(message, &[]);
         #[cfg(feature = "metrics")]
         metrics::increment_counter_1(metrics::router::UNCONFIRMED_TRANSACTIONS_PROPAGATED, "site", "rest");
+        #[cfg(feature = "metrics")]
+        if let Some(events) = metrics::tx_events::get() {
+            use metrics::tx_events::{TxEvent, json};
+            let checksum = checksum.or_else(|| metrics::tx_events::transaction_checksum(&tx));
+            let kind = metrics::transaction_kind(&tx);
+            let checked = check_elapsed
+                .map(|elapsed| TxEvent::checked::<N, (), &str>("rest", kind, &tx_id, checksum, &Ok(()), elapsed));
+            let kind = Some(kind);
+            let received =
+                TxEvent { kind, extra: json!({ "via": "rest" }), ..TxEvent::new::<N>("received", &tx_id, checksum) };
+            let gossiped =
+                TxEvent { kind, extra: json!({ "site": "rest" }), ..TxEvent::new::<N>("gossiped", &tx_id, checksum) };
+            events.emit_all(checked.into_iter().chain([received, gossiped]));
+        }
 
         // Determine if the node is synced and if the transaction was checked.
         match !is_within_sync_leniency && check_transaction {

@@ -454,13 +454,22 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         #[cfg(feature = "metrics")]
         let routes = routes.route_layer(middleware::from_fn(record_rest_request));
 
-        routes
+        let routes = routes
             // Pass in `Rest` to make things convenient.
             .with_state(self.clone())
             // JSON encodings of transactions can exceed the binary size, so this is 2x
             // `LATEST_MAX_TRANSACTION_SIZE`.
             .layer(DefaultBodyLimit::max(2 * N::LATEST_MAX_TRANSACTION_SIZE()))
-            .layer(governor_layer)
+            .layer(governor_layer);
+
+        // Outside the rate limiter, so that rejected requests are counted too.
+        #[cfg(feature = "metrics")]
+        let routes = match metrics::tx_events::get() {
+            Some(_) => routes.layer(middleware::from_fn(count_transaction_broadcast_errors)),
+            None => routes,
+        };
+
+        routes
             // Enable CORS.
             .layer(cors)
             // Enable tower-http tracing.
@@ -545,6 +554,21 @@ async fn record_rest_request(request: Request<Body>, next: middleware::Next) -> 
         endpoint,
         started.elapsed().as_secs_f64(),
     );
+    response
+}
+
+/// Counts the error statuses of transaction broadcasts, for the transaction events heartbeat.
+#[cfg(feature = "metrics")]
+async fn count_transaction_broadcast_errors(request: Request<Body>, next: middleware::Next) -> Response {
+    let is_broadcast = request.uri().path() == "/transaction/broadcast";
+    let response = next.run(request).await;
+    let status = response.status();
+    if is_broadcast
+        && (status.is_client_error() || status.is_server_error())
+        && let Some(events) = metrics::tx_events::get()
+    {
+        events.count_rest_status(status.as_u16());
+    }
     response
 }
 
