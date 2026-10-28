@@ -121,8 +121,6 @@ struct PeerPruning {
     learned_floor: u32,
     /// Consecutive empty responses for blocks at or above the peer's floor.
     strikes: u32,
-    /// When the peer last sent an empty response. Requests sent before then were pipelined behind it.
-    last_empty_at: Option<Instant>,
 }
 
 /// Returns `true` if a peer at `peer_tip`, with what was learned about it, is assumed to serve `height`.
@@ -565,10 +563,25 @@ impl<N: Network> BlockSync<N> {
             .sample(&mut rand::rng(), max_num_sync_ips)
             .into_iter()
             .collect();
-        (sync_ips.len() >= max_num_sync_ips.min(num_connected)).then_some(sync_ips)
+        (sync_ips.len() >= max_num_sync_ips.min(num_connected).max(1)).then_some(sync_ips)
     }
 
-    /// Send a batch of block requests.
+    /// Queues prepared block requests that were not sent for re-issue, except heights that are
+    /// already requested.
+    fn requeue_requests(&self, requests: &[(u32, PrepareSyncRequest<N>)]) {
+        let outstanding: Vec<u32> = {
+            let outstanding = self.requests.read();
+            requests.iter().map(|(height, _)| *height).filter(|height| outstanding.contains_key(height)).collect()
+        };
+        let mut failed_requests = self.failed_requests.lock();
+        for (height, (hash, previous_hash, _)) in requests {
+            if !outstanding.contains(height) {
+                failed_requests.insert(*height, (*hash, *previous_hash));
+            }
+        }
+    }
+
+    /// Send a batch of block requests. A chunk that is not sent is queued for re-issue.
     pub async fn send_block_requests<C: CommunicationService>(
         &self,
         communication: &C,
@@ -595,20 +608,23 @@ impl<N: Network> BlockSync<N> {
                     "Skipping block request batch for heights {start_height}-{inclusive_end}: too few prepared peers can still serve it",
                     inclusive_end = end_height.saturating_sub(1)
                 );
-                // Queue the batch for re-issue, as it may have come from the failed requests.
-                let mut failed_requests = self.failed_requests.lock();
-                for (height, (hash, previous_hash, _)) in requests {
-                    failed_requests.insert(*height, (*hash, *previous_hash));
-                }
+                self.requeue_requests(requests);
                 return false;
             };
 
             // Insert the chunk of block requests (still holding lock so remove_peer cannot run).
-            for (height, (hash, previous_hash, _)) in requests.iter() {
+            for (i, (height, (hash, previous_hash, _))) in requests.iter().enumerate() {
                 // Insert the block request into the sync pool using the sync IPs from the last block request in the chunk.
                 if let Err(err) = self.insert_block_request(*height, (*hash, *previous_hash, sync_ips.clone())) {
                     let err = err.context(format!("Failed to insert block request for height {height}"));
                     warn!("{}", flatten_error(&err));
+                    // Undo the requests inserted for this chunk, which will not be sent.
+                    let mut outstanding = self.requests.write();
+                    for (height, _) in &requests[..i] {
+                        outstanding.remove(height);
+                    }
+                    drop(outstanding);
+                    self.requeue_requests(requests);
                     return false;
                 }
             }
@@ -660,10 +676,13 @@ impl<N: Network> BlockSync<N> {
             // If sending fails for any peer, remove the block request from the sync pool.
             if !success {
                 // Remove the entire block request from the sync pool.
-                let mut requests = self.requests.write();
-                for height in start_height..end_height {
-                    requests.remove(&height);
+                {
+                    let mut outstanding = self.requests.write();
+                    for height in start_height..end_height {
+                        outstanding.remove(&height);
+                    }
                 }
+                self.requeue_requests(requests);
                 // Break out of the loop.
                 return false;
             }
@@ -707,8 +726,11 @@ impl<N: Network> BlockSync<N> {
             }
         } else {
             for (block_requests, sync_peers) in batches {
-                for requests in block_requests.chunks(DataBlocks::<N>::MAXIMUM_NUMBER_OF_BLOCKS as usize) {
+                let mut chunks = block_requests.chunks(DataBlocks::<N>::MAXIMUM_NUMBER_OF_BLOCKS as usize);
+                while let Some(requests) = chunks.next() {
                     if !self.send_block_requests(communication, &sync_peers, requests).await {
+                        // Queue the rest of the batch for re-issue.
+                        chunks.for_each(|requests| self.requeue_requests(requests));
                         break;
                     }
                     tokio::time::sleep(BLOCK_REQUEST_BATCH_DELAY).await;
@@ -736,13 +758,7 @@ impl<N: Network> BlockSync<N> {
         // Attempt to insert the block responses, and break if we encounter an error.
         let result = 'outer: {
             let Some(last_height) = blocks.as_slice().last().map(|b| b.height()) else {
-                let (error, learned_floor) = self.record_empty_block_response(peer_ip, start_height);
-                if error.requires_disconnect() {
-                    break 'outer Err(error);
-                }
-                // Requests at or above the peer's floor may still be answered.
-                self.remove_block_requests_to_peer_below(&peer_ip, learned_floor);
-                return Err(error);
+                break 'outer Err(self.record_empty_block_response(peer_ip, start_height));
             };
 
             let expected_consensus_version =
@@ -798,42 +814,29 @@ impl<N: Network> BlockSync<N> {
     /// error to report.
     ///
     /// The peer's learned floor rises above `start_height`. The response counts as a strike if the
-    /// peer is still assigned the request at `start_height`, `start_height` was at or above its floor,
-    /// and the request was sent after the peer's previous empty response. Requests pipelined behind an
-    /// earlier empty response, or that the peer is no longer assigned, give no strike.
-    ///
-    /// Also returns the peer's learned floor.
-    fn record_empty_block_response(
-        &self,
-        peer_ip: SocketAddr,
-        start_height: u32,
-    ) -> (InsertBlockResponseError<N>, u32) {
-        let sent_at = self
-            .requests
-            .read()
-            .get(&start_height)
-            .filter(|request| request.sync_ips().contains(&peer_ip))
-            .map(|request| request.timestamp);
+    /// peer is still assigned the request at `start_height` and `start_height` was at or above its
+    /// floor. An empty response removes the peer from all its requests, so responses pipelined behind
+    /// it give no strike.
+    fn record_empty_block_response(&self, peer_ip: SocketAddr, start_height: u32) -> InsertBlockResponseError<N> {
+        let is_assigned =
+            self.requests.read().get(&start_height).is_some_and(|request| request.sync_ips().contains(&peer_ip));
         // Holding `locators` keeps a concurrent `remove_peer` from leaving this peer's entry behind.
         let locators = self.locators.read();
         let Some(tip) = locators.get(&peer_ip).map(|locators| locators.latest_locator_height()) else {
-            return (InsertBlockResponseError::EmptyBlockResponse, start_height.saturating_add(1));
+            return InsertBlockResponseError::EmptyBlockResponse;
         };
         let mut peer_pruning = self.peer_pruning.lock();
         let pruning = peer_pruning.entry(peer_ip).or_default();
-        let is_strike = sent_at.is_some_and(|sent_at| pruning.last_empty_at.is_none_or(|last| sent_at > last))
-            && can_serve(tip, Some(pruning), start_height);
+        let is_strike = is_assigned && can_serve(tip, Some(pruning), start_height);
         pruning.learned_floor = pruning.learned_floor.max(start_height.saturating_add(1));
-        pruning.last_empty_at = Some(Instant::now());
         if is_strike {
             pruning.strikes += 1;
         }
-        let error = if pruning.strikes >= MAX_CONSECUTIVE_EMPTY_BLOCK_RESPONSES {
+        if pruning.strikes >= MAX_CONSECUTIVE_EMPTY_BLOCK_RESPONSES {
             InsertBlockResponseError::RepeatedEmptyBlockResponses
         } else {
             InsertBlockResponseError::EmptyBlockResponse
-        };
-        (error, pruning.learned_floor)
+        }
     }
 
     /// Returns the next block for the given `next_height` if the request is complete,
@@ -1260,9 +1263,9 @@ impl<N: Network> BlockSync<N> {
                     greatest_peer_height,
                 );
 
-                // Only remove from failed_requests the heights we actually re-issued; `send_block_requests`
-                // puts back a batch it skips. (If construct_requests returned empty we must not drop
-                // these failed requests.)
+                // Only remove from failed_requests the heights we actually re-issued; a prepared range
+                // that is not sent is put back (see `requeue_requests`). (If construct_requests
+                // returned empty we must not drop these failed requests.)
                 for (height, _) in &requests {
                     failed_requests.remove(height);
                 }
@@ -1580,22 +1583,13 @@ impl<N: Network> BlockSync<N> {
     ///
     /// This is used when disconnecting from a peer or when a peer sends invalid block responses.
     fn remove_block_requests_to_peer(&self, peer_ip: &SocketAddr) {
-        self.remove_block_requests_to_peer_below(peer_ip, u32::MAX);
-    }
-
-    /// Removes the block requests to the given peer below `end_height`, as in
-    /// [`Self::remove_block_requests_to_peer`].
-    fn remove_block_requests_to_peer_below(&self, peer_ip: &SocketAddr, end_height: u32) {
-        trace!("Block sync is removing block requests below {end_height} to peer {peer_ip}...");
+        trace!("Block sync is removing all block requests to peer {peer_ip}...");
         let mut heights = vec![];
         let mut removed_requests = vec![];
 
         // Remove the peer IP from the requests map. If any request entry is now empty,
         // and its corresponding response entry is also empty, then remove that request entry altogether.
         self.requests.write().retain(|height, e| {
-            if *height >= end_height {
-                return true;
-            }
             let had_peer = e.sync_ips_mut().swap_remove(peer_ip);
 
             if had_peer && e.response.is_none() {
@@ -2562,7 +2556,7 @@ mod tests {
     }
 
     /// Tests that an empty block response, the peer's explicit "cannot serve this range" signal,
-    /// is treated as benign and re-issues the peer's outstanding requests below its new floor.
+    /// is treated as benign and re-issues the peer's outstanding requests.
     #[test]
     fn test_empty_block_response_is_benign_and_reissues_requests() {
         let rng = &mut TestRng::default();
@@ -2588,10 +2582,9 @@ mod tests {
         // An explicit "cannot serve" is not a protocol violation.
         assert!(error.is_benign());
 
-        // The request for block 1 was removed and marked for re-issue; the peer keeps the others.
-        assert!(!sync.requests.read().contains_key(&1));
-        assert_eq!(sync.requests.read().len(), num_requests - 1);
-        assert_eq!(sync.failed_requests.lock().keys().copied().collect::<Vec<_>>(), vec![1]);
+        // The requests to the peer were removed and marked for re-issue to other peers.
+        assert!(sync.requests.read().is_empty());
+        assert_eq!(sync.failed_requests.lock().len(), num_requests);
     }
 
     /// Sends an empty block response from `peer_ip` to a request for block `height` assigned to it.
@@ -2683,8 +2676,7 @@ mod tests {
     }
 
     /// Tests that an empty response raises the peer's learned floor just above the request it answers,
-    /// that it strikes only a peer still assigned that request, and that the peer keeps its requests
-    /// at or above the new floor.
+    /// and that it strikes only a peer still assigned that request.
     #[test]
     fn test_empty_block_response_floor_follows_answered_request() {
         let sync = sample_sync_at_height(0);
@@ -2705,7 +2697,6 @@ mod tests {
 
         assert!(sync.insert_block_responses(peer_b, 0, vec![], None).unwrap_err().is_benign());
         assert_eq!(pruning_of(&sync, peer_b), (1, 1));
-        assert!(sync.requests.read()[&6].sync_ips().contains(&peer_b), "B keeps its request above its floor");
         assert!(sync.find_sync_peers_inner(0, Some(1)).unwrap().0.contains_key(&peer_b));
 
         // A is no longer assigned block 0: its floor rises, but it gets no strike.
@@ -2778,6 +2769,22 @@ mod tests {
         // A disconnected peer does not count towards the peers the batch needs.
         sync.remove_peer(&sample_peer_ip(1));
         assert_eq!(sync.select_sync_ips(&sync_peers, 1_001, 3).unwrap().len(), 2);
+        // With no connected peer, the batch is skipped.
+        sync.remove_peer(&sample_peer_ip(2));
+        sync.remove_peer(&sample_peer_ip(3));
+        assert!(sync.select_sync_ips(&sync_peers, 1_001, 3).is_none());
+    }
+
+    /// Tests that requests that were prepared but not sent are queued for re-issue, except heights
+    /// already requested.
+    #[test]
+    fn test_requeue_requests() {
+        let sync = sample_sync_at_height(0);
+        let peer_ip = sample_peer_ip(1);
+        sync.insert_block_request(2, (None, None, [peer_ip].into_iter().collect())).unwrap();
+        let requests: Vec<_> = (1..=3).map(|height| (height, (None, None, 1))).collect();
+        sync.requeue_requests(&requests);
+        assert_eq!(sync.failed_requests.lock().keys().copied().collect::<Vec<_>>(), vec![1, 3]);
     }
 
     /// Tests that peers ahead whose learned floors are above the next block arm the stuck signal, or
