@@ -519,9 +519,9 @@ impl<N: Network> BlockSync<N> {
         BlockLocators::new(recents, checkpoints)
     }
 
-    /// Returns a random sample of `max_num_sync_ips` of `sync_peers` (or all still connected, if
-    /// fewer) that are still connected and assumed to serve `start_height`, or `None` if too few are. Call it
-    /// while holding `prepare_requests_lock`.
+    /// Returns up to `max_num_sync_ips` of `sync_peers`, randomly sampled, that are still connected
+    /// and assumed to serve `start_height`, or `None` if none qualify or fewer than
+    /// min(`max_num_sync_ips`, still connected) do. Call it while holding `prepare_requests_lock`.
     fn select_sync_ips(
         &self,
         sync_peers: &IndexMap<SocketAddr, BlockLocators<N>>,
