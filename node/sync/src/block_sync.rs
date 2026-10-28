@@ -1247,8 +1247,9 @@ impl<N: Network> BlockSync<N> {
         let max_new_blocks_to_request =
             max_outstanding_block_requests.saturating_sub(self.num_outstanding_block_requests() as u32);
 
-        // The first height to request: not in the ledger and not already requested.
-        let start_height = self.first_unrequested_height(current_height + 1);
+        // The first height to request: the next one this node needs, or the first above it not
+        // already requested.
+        let start_height = self.first_unrequested_height(self.retention_height().saturating_add(1));
 
         // Prepare the block requests and sync peers, or returns an empty result if there is nothing to request.
         if self.num_total_block_requests() >= max_total_requests as usize {
