@@ -698,7 +698,9 @@ impl<N: Network> Gateway<N> {
                         || self_.ledger.latest_block_height(),
                         || self_.ledger.get_blocks(start_height..end_height),
                     )
-                    .map_err(|error| anyhow!("Missing blocks {start_height} to {end_height} from ledger - {error}"))
+                    .map_err(|error| {
+                        error.context(format!("Missing blocks {start_height} to {end_height} from ledger"))
+                    })
                 })
                 .await
                 {

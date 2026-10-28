@@ -51,9 +51,13 @@ mod traits;
 pub use traits::*;
 
 use snarkos_node_cdn::{CdnBlockSync, CdnSyncOutcome};
-use snarkos_node_sync::{BlockSync, STUCK_SYNC_SHUTDOWN_THRESHOLD};
+use snarkos_node_router::messages::DataBlocks;
+use snarkos_node_sync::{BlockSync, STUCK_SYNC_SHUTDOWN_THRESHOLD, blocks_or_empty};
 use snarkos_utilities::SignalHandler;
-use snarkvm::{prelude::Network, utilities::flatten_error};
+use snarkvm::{
+    prelude::{Ledger, Network, store::ConsensusStorage},
+    utilities::flatten_error,
+};
 
 use aleo_std::StorageMode;
 use anyhow::{Context, Result};
@@ -140,6 +144,25 @@ pub fn shut_down_if_stuck_sync<N: Network>(
     );
     signal_handler.stop_with_failure();
     true
+}
+
+/// Returns the blocks to answer a block request for `start_height..end_height` with (see
+/// [`blocks_or_empty`]), or `None` after logging the error if the ledger fails to read them.
+pub(crate) fn blocks_for_request<N: Network, C: ConsensusStorage<N>>(
+    ledger: &Ledger<N, C>,
+    start_height: u32,
+    end_height: u32,
+) -> Option<DataBlocks<N>> {
+    let latest_height = || ledger.latest_height();
+    match blocks_or_empty(start_height, end_height, latest_height, || ledger.get_blocks(start_height..end_height)) {
+        Ok(blocks) => Some(blocks),
+        Err(error) => {
+            let err =
+                error.context(format!("Failed to retrieve blocks {start_height} to {end_height} from the ledger"));
+            error!("{}", flatten_error(&err));
+            None
+        }
+    }
 }
 
 /// Starts the notification message loop.

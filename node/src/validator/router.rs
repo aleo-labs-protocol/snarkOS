@@ -26,7 +26,6 @@ use snarkos_node_router::messages::{
     Pong,
     UnconfirmedTransaction,
 };
-use snarkos_node_sync::blocks_or_empty;
 use snarkos_node_tcp::{ConnectError, Connection, ConnectionSide, Tcp, connections::DisconnectOrigin};
 use snarkvm::{
     console::network::{ConsensusVersion, Network},
@@ -202,19 +201,8 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Validator<N, C> {
             }
         };
 
-        let blocks = match blocks_or_empty(
-            *start_height,
-            *end_height,
-            || self.ledger.latest_height(),
-            || self.ledger.get_blocks(*start_height..*end_height),
-        ) {
-            Ok(blocks) => blocks,
-            Err(err) => {
-                let err =
-                    err.context(format!("Failed to retrieve blocks {start_height} to {end_height} from the ledger"));
-                error!("{}", flatten_error(err));
-                return false;
-            }
+        let Some(blocks) = crate::blocks_for_request(&self.ledger, *start_height, *end_height) else {
+            return false;
         };
         // Send the `BlockResponse` message to the peer.
         self.router()

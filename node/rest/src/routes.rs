@@ -125,7 +125,8 @@ fn check_range_retained(start: u32, end: u32, latest_height: u32) -> Result<(), 
     if !range_below_retention_window(start, end, latest_height) {
         return Ok(());
     }
-    let (height, earliest) = (start.max(1), oldest_retained_authority_height(latest_height));
+    let height = start.max(1);
+    let earliest = oldest_retained_authority_height(latest_height);
     Err(RestError::gone(anyhow!(
         "block {height} is below this node's authority retention window (earliest {earliest}); \
         use /block/{height}/header, /block/{height}/transactions, or an archival node"
