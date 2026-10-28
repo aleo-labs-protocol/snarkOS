@@ -115,8 +115,9 @@ fn peer_can_serve(peer_tip: u32, height: u32) -> bool {
 /// What block sync has learned about a peer's pruning from its empty block responses.
 #[derive(Default)]
 struct PeerPruning {
-    /// The lowest height the peer may still serve. An empty response to a request from `h` proves
-    /// the peer lacks `h`, and peers only prune from below, so this only rises.
+    /// The lowest height the peer may still serve. An empty response to a request from `h` means `h`
+    /// is below the peer's floor or past its tip; peers only prune from below, so this only rises. A
+    /// peer behind its advertised locators may thus be excluded until it reconnects (accepted).
     learned_floor: u32,
     /// Consecutive empty responses for blocks at or above the peer's floor.
     strikes: u32,
