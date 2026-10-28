@@ -22,7 +22,18 @@ use crate::common::{sample_account, sample_genesis_block};
 use snarkos_account::Account;
 use snarkos_node::{
     BootstrapClient,
-    bft::events::{DisconnectReason, Event, HANDSHAKE_DOMAIN, HandshakeHint, InitiatorInfo, PeerInfo, ResponderProof},
+    bft::events::{
+        ConsensusSchedule,
+        DisconnectReason,
+        Event,
+        HANDSHAKE_DOMAIN,
+        HandshakeHint,
+        HandshakeTrailer,
+        InitiatorInfo,
+        PeerInfo,
+        ResponderInfo,
+        ResponderProof,
+    },
     network::{
         PeerPoolHandling,
         noise::{NoiseSession, Role, binding_message, write_noise_magic},
@@ -70,13 +81,20 @@ async fn handshake_with(
     let Ok(peer_info) = noise.recv().await else {
         return Ok(None);
     };
-    let peer_info = PeerInfo::<CurrentNetwork>::from_bytes_le(&peer_info).unwrap();
+    let ResponderInfo { info: peer_info, trailer } =
+        ResponderInfo::<CurrentNetwork>::from_bytes_le(&peer_info).unwrap();
+    // A validator at the current event version rejects a client that does not disclose its schedule.
+    assert_eq!(trailer.schedule, Some(ConsensusSchedule::of::<CurrentNetwork>()));
 
     // Message 3: our metadata and the proof of our identity.
     let binding = binding_message(HANDSHAKE_DOMAIN, Role::Initiator, &noise.handshake_hash()?);
     let signature = account.sign_bytes(&binding, &mut rand::rng()).unwrap();
     let our_info = PeerInfo::new(5000, account.address(), peer_info.restrictions_id, None);
-    let our_message = InitiatorInfo { info: our_info, signature: Data::Object(signature) };
+    let our_message = InitiatorInfo {
+        info: our_info,
+        signature: Data::Object(signature),
+        trailer: HandshakeTrailer::of::<CurrentNetwork>(),
+    };
     noise.send(&our_message.to_bytes_le().unwrap()).await?;
 
     // Message 4: the verdict.
@@ -145,7 +163,11 @@ async fn a_bootstrap_client_rejects_an_unprovable_identity() {
     let binding = binding_message(HANDSHAKE_DOMAIN, Role::Initiator, &noise.handshake_hash().unwrap());
     let signature = impostor.sign_bytes(&binding, &mut rand::rng()).unwrap();
     let our_info = PeerInfo::new(5001, validator.address(), peer_info.restrictions_id, None);
-    let our_message = InitiatorInfo { info: our_info, signature: Data::Object(signature) };
+    let our_message = InitiatorInfo {
+        info: our_info,
+        signature: Data::Object(signature),
+        trailer: HandshakeTrailer::of::<CurrentNetwork>(),
+    };
     noise.send(&our_message.to_bytes_le().unwrap()).await.unwrap();
 
     let mut noise = noise.into_transport_mode().unwrap();

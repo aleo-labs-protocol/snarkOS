@@ -20,8 +20,10 @@ use crate::{
         Event,
         HANDSHAKE_DOMAIN,
         HandshakeHint,
+        HandshakeTrailer,
         InitiatorInfo,
         PeerInfo,
+        ResponderInfo,
         ResponderProof,
         decode_payload,
         encode_payload,
@@ -222,13 +224,13 @@ impl<N: Network> BootstrapClient<N> {
         let mut noise = pending.into_session()?;
         // The bootstrap client does not track the block height, so it discloses no commit hash.
         let our_info = PeerInfo::new(self.local_ip().port(), self.account.address(), self.restrictions_id, None);
-        noise.send(&encode_payload(&our_info)?).await?;
+        noise.send(&encode_payload(&ResponderInfo { info: our_info, trailer: HandshakeTrailer::of::<N>() })?).await?;
 
         let peer_binding = binding_message(HANDSHAKE_DOMAIN, Role::Initiator, &noise.handshake_hash()?);
 
         /* Message 3: the peer's authenticated metadata and its proof of identity. */
 
-        let InitiatorInfo { info: peer_info, signature: peer_signature } =
+        let InitiatorInfo { info: peer_info, signature: peer_signature, .. } =
             decode_payload::<InitiatorInfo<N>>(peer_addr, &noise.recv().await?)?;
 
         let binding = binding_message(HANDSHAKE_DOMAIN, Role::Responder, &noise.handshake_hash()?);
@@ -299,7 +301,7 @@ impl<N: Network> BootstrapClient<N> {
         version: u32,
         address: Address<N>,
     ) -> Result<Option<DisconnectReason>, ConnectError> {
-        if version < Event::<N>::VERSION {
+        if version < Event::<N>::MINIMUM_VERSION {
             warn!("{} Dropping '{peer_addr}' on version {version} (outdated)", Self::OWNER);
             return Ok(Some(DisconnectReason::OutdatedClientVersion));
         }

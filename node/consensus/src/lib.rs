@@ -705,6 +705,11 @@ impl<N: Network> Consensus<N> {
 
         let block_height = block.height();
 
+        // Build no block while validators may run a consensus version this build lacks. The BFT
+        // retries the subdag with its next commit. A subdag that the ledger already passed has
+        // returned `Ok(false)` above, which lets the BFT mark it as committed.
+        self.bft.primary().gateway().ensure_block_may_be_built(block_height)?;
+
         // Advance to the next block.
         let advance_instant = std::time::Instant::now();
         ledger_update.advance_to_next_block(&block)?;
