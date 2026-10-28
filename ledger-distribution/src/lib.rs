@@ -24,6 +24,9 @@ pub use blocks_bucket::*;
 mod bucket;
 pub use bucket::*;
 
+mod ledger;
+pub use ledger::*;
+
 mod rest;
 pub use rest::*;
 

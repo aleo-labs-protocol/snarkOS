@@ -21,6 +21,10 @@ publish = false
 name = "ledger-distribution"
 path = "src/main.rs"
 
+[dependencies.aleo-std]
+workspace = true
+features = [ "storage" ]
+
 [dependencies.anyhow]
 workspace = true
 
@@ -43,13 +47,6 @@ workspace = true
 version = "0.14"
 features = [ "aws", "gcp" ]
 
-[dependencies.rayon]
-workspace = true
-
-[dependencies.reqwest]
-workspace = true
-features = [ "rustls" ]
-
 [dependencies.serde]
 workspace = true
 
@@ -63,7 +60,7 @@ default-features = false
 
 [dependencies.snarkvm]
 workspace = true
-features = [ "console", "ledger", "utilities" ]
+features = [ "console", "ledger", "rocks", "utilities" ]
 
 [dependencies.tokio]
 workspace = true
@@ -79,10 +76,6 @@ workspace = true
 [dependencies.tracing-subscriber]
 workspace = true
 features = [ "env-filter", "parking_lot" ]
-
-[dev-dependencies.aleo-std]
-workspace = true
-features = [ "storage" ]
 
 [dev-dependencies.async-trait]
 workspace = true
