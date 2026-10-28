@@ -450,16 +450,18 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
                 info!("Finished request in {:?}", latency);
             });
 
-        #[cfg(feature = "metrics")]
-        let routes = routes.route_layer(middleware::from_fn(record_rest_request));
-
-        routes
+        let routes = routes
             // Pass in `Rest` to make things convenient.
             .with_state(self.clone())
             // JSON encodings of transactions can exceed the binary size, so this is 2x
             // `LATEST_MAX_TRANSACTION_SIZE`.
             .layer(DefaultBodyLimit::max(2 * N::LATEST_MAX_TRANSACTION_SIZE()))
-            .layer(governor_layer)
+            .layer(governor_layer);
+
+        #[cfg(feature = "metrics")]
+        let routes = routes.route_layer(middleware::from_fn(record_rest_request));
+
+        routes
             // Enable CORS.
             .layer(cors)
             // Enable tower-http tracing.
@@ -1051,6 +1053,37 @@ mod route_tests {
 
         let response = rest.build_versioned_router(TEST_RPS).oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[cfg(feature = "metrics")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn rest_metrics_count_rate_limited_requests() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let rest = sample_rest().await;
+        let router = rest.build_versioned_router(1);
+        let recorder = DebuggingRecorder::new();
+        let _guard = metrics_recorder::set_default_local_recorder(&recorder);
+
+        let (status, _) = send(&router, "/v2/mainnet/block/0/header").await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(&router, "/v2/mainnet/block/1/header").await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+        let snapshot = recorder.snapshotter().snapshot().into_vec();
+        let counters: Vec<_> =
+            snapshot.iter().filter(|(key, ..)| key.key().name() == metrics::rest::REQUESTS).collect();
+        assert_eq!(counters.len(), 2, "successful and throttled requests need separate counters");
+        for status in ["200", "429"] {
+            let expected = metrics_recorder::Key::from_parts(metrics::rest::REQUESTS, &[
+                ("method", "GET"),
+                ("endpoint", "/v2/mainnet/block/{height_or_hash}/header"),
+                ("status", status),
+            ]);
+            let (_, _, _, value) =
+                counters.iter().find(|(key, ..)| key.key() == &expected).expect("missing request counter");
+            assert_eq!(value, &DebugValue::Counter(1));
+        }
     }
 
     #[tokio::test]
