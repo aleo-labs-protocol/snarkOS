@@ -13,12 +13,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{Bucket, permissions::Permission};
+use crate::Bucket;
 use snarkvm::{ledger::block::Block, prelude::*};
 
-use colored::Colorize;
 use core::marker::PhantomData;
-use futures::StreamExt;
 use sha2::{Digest, Sha256};
 use std::time::Instant;
 
@@ -101,13 +99,13 @@ impl<N: Network> BlocksBucket<N> {
         let json_object = serde_json::to_string(&latest_state)?;
         let json_bytes = bincode::serialize(&json_object)?;
 
-        if self.bucket.exists(&latest_state_file_path).await {
+        if self.bucket.exists(&latest_state_file_path).await? {
             info!("Updating {latest_state_file_path} to the bucket.");
         } else {
             info!("Inserting {latest_state_file_path} to the bucket.");
         }
 
-        self.bucket.insert_or_update(&latest_state_file_path, &json_bytes, true).await
+        self.bucket.insert_or_update(&latest_state_file_path, &json_bytes).await
     }
 
     /// Fetch the latest state of the bucket.
@@ -124,7 +122,7 @@ impl<N: Network> BlocksBucket<N> {
     }
 
     /// Returns `true` if the given block height exists in the bucket.
-    pub async fn contains_block(&self, height: u32) -> bool {
+    pub async fn contains_block(&self, height: u32) -> Result<bool> {
         let height_start = height - height % NUM_BLOCKS_PER_CHUNK;
         let height_end = height_start + NUM_BLOCKS_PER_CHUNK;
 
@@ -225,10 +223,10 @@ impl<N: Network> BlocksBucket<N> {
         // Upload the blocks.
         info!("Inserting {blocks_file_path} to the bucket.");
         let timer = Instant::now();
-        self.bucket.insert(&blocks_file_path, &block_bytes, true).await?;
+        self.bucket.insert(&blocks_file_path, &block_bytes).await?;
         // Upload the blocks_checksum.
         info!("Inserting {blocks_checksum_file_path} to the bucket.");
-        if let Err(err) = self.bucket.insert_or_update(&blocks_checksum_file_path, &checksum, true).await {
+        if let Err(err) = self.bucket.insert_or_update(&blocks_checksum_file_path, &checksum).await {
             warn!("Error uploading {blocks_checksum_file_path}. Removing {blocks_file_path} from the bucket...");
             self.bucket.remove(&blocks_file_path).await?;
 
@@ -261,62 +259,6 @@ impl<N: Network> BlocksBucket<N> {
 
         Ok(())
     }
-
-    /// Updates the permission of each file in the bucket.
-    pub async fn update_file_permissions(&self, permission: Permission) -> Result<()> {
-        /// The number of concurrent requests with the network.
-        const CONCURRENT_REQUESTS: usize = 100;
-
-        // List all of the files.
-        let files = self.bucket.list_files().await?;
-        trace!("{:#?} block files", files.len());
-
-        // Start a timer.
-        let timer = std::time::Instant::now();
-
-        let total = files.len();
-
-        // Update the permission for each file.
-        futures::stream::iter(files.iter().enumerate())
-            .map(|(index, file)| {
-                let bucket = &self.bucket;
-                let bucket_name = self.bucket.name().to_string();
-                async move {
-                    // Update the file permissions.
-                    (index, bucket.update_file_acl(bucket_name, file.file_path.clone(), permission).await)
-                }
-            })
-            .buffered(CONCURRENT_REQUESTS)
-            .for_each(|(index, _)| {
-                let index = index + 1;
-                // Compute the percentage completed.
-                let percentage = index * 100 / total;
-                // Compute the time remaining (in seconds).
-                let time_remaining = (timer.elapsed().as_secs() + 1) * (total - index) as u64 / index as u64;
-                // Prepare the estimate message.
-                let estimate = format!("(est. {} minutes remaining)", time_remaining / 60u64);
-                // Log the progress.
-                info!(
-                    "Updated permissions for {index} of {total} files - {percentage}% complete {}",
-                    estimate.dimmed()
-                );
-
-                // Return.
-                futures::future::ready(())
-            })
-            .await;
-
-        Ok(())
-    }
-
-    // /// Returns a list of objects in the given bucket starting from the given key.
-    // pub async fn list_blocks_after_height(
-    //     &self,
-    //     height: u32,
-    //     continuation_token: Option<String>,
-    // ) -> Result<ListObjectsV2Output> {
-    //     self.bucket.list_objects_after_key(format!("testnet3/{height}"), continuation_token).await
-    // }
 }
 
 pub fn sha256(data: &[u8]) -> [u8; 32] {
