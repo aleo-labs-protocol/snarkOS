@@ -94,5 +94,35 @@ workspace = true
 workspace = true
 features = [ "env-filter", "parking_lot" ]
 
+[dev-dependencies.aleo-std]
+workspace = true
+features = [ "storage" ]
+
+[dev-dependencies.async-trait]
+workspace = true
+
+[dev-dependencies.hyper-util]
+version = "0.1"
+features = [ "server-auto", "http1", "tokio" ]
+
+[dev-dependencies.s3s]
+version = "0.17"
+
+[dev-dependencies.s3s-fs]
+version = "0.17"
+
+[dev-dependencies.snarkos-node-cdn]
+workspace = true
+
+[dev-dependencies.snarkos-utilities]
+workspace = true
+
+[dev-dependencies.snarkvm]
+workspace = true
+features = [ "synthesizer" ]
+
+[dev-dependencies.tempfile]
+version = "3"
+
 [package.metadata.cargo-machete]
 ignored = ["serde"]

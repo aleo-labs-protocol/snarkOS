@@ -131,6 +131,8 @@ jobs:
               -p snarkos-node-sync-locators -p snarkos-node-network
           - name: cdn
             runs: nextest run -p snarkos-node-cdn
+          - name: ledger-distribution
+            runs: nextest run -p snarkos-ledger-distribution
           - name: messages
             runs: >-
               nextest run -p snarkos-node-bft-events -p snarkos-node-router-messages

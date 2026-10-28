@@ -40,6 +40,15 @@ The binary reads its credentials and its targets from the environment:
 There is also a `GET /health` endpoint on port `3123` that returns `200` without
 touching the bucket.
 
+## Testing
+
+```
+cargo test -p snarkos-ledger-distribution
+```
+
+The test uploads a generated ledger from a mock node to an in-process S3 server, then loads it
+back with `snarkos-node-cdn`, the client snarkOS nodes sync from the CDN with.
+
 ## Procedure
 
 1. Checks the latest block height of the node and of the stored blocks in the bucket.
