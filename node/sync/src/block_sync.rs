@@ -542,8 +542,8 @@ impl<N: Network> BlockSync<N> {
         BlockLocators::new(recents, checkpoints)
     }
 
-    /// Returns a random sample of `max_num_sync_ips` of `sync_peers` (or all of them, if fewer) that
-    /// are still connected and assumed to serve `start_height`, or `None` if too few are. Call it
+    /// Returns a random sample of `max_num_sync_ips` of `sync_peers` (or all still connected, if
+    /// fewer) that are still connected and assumed to serve `start_height`, or `None` if too few are. Call it
     /// while holding `prepare_requests_lock`.
     fn select_sync_ips(
         &self,
@@ -553,6 +553,7 @@ impl<N: Network> BlockSync<N> {
     ) -> Option<IndexSet<SocketAddr>> {
         let locators = self.locators.read();
         let peer_pruning = self.peer_pruning.lock();
+        let num_connected = sync_peers.keys().filter(|ip| locators.contains_key(*ip)).count();
         let sync_ips: IndexSet<_> = sync_peers
             .keys()
             .filter(|ip| {
@@ -564,7 +565,7 @@ impl<N: Network> BlockSync<N> {
             .sample(&mut rand::rng(), max_num_sync_ips)
             .into_iter()
             .collect();
-        (sync_ips.len() >= max_num_sync_ips.min(sync_peers.len())).then_some(sync_ips)
+        (sync_ips.len() >= max_num_sync_ips.min(num_connected)).then_some(sync_ips)
     }
 
     /// Send a batch of block requests.
@@ -591,9 +592,14 @@ impl<N: Network> BlockSync<N> {
             let _prepare_requests_lock = self.prepare_requests_lock.lock();
             let Some(sync_ips) = self.select_sync_ips(sync_peers, start_height, max_num_sync_ips) else {
                 trace!(
-                    "Skipping block request batch for heights {start_height}-{inclusive_end}: no prepared peer can still serve it",
+                    "Skipping block request batch for heights {start_height}-{inclusive_end}: too few prepared peers can still serve it",
                     inclusive_end = end_height.saturating_sub(1)
                 );
+                // Queue the batch for re-issue, as it may have come from the failed requests.
+                let mut failed_requests = self.failed_requests.lock();
+                for (height, (hash, previous_hash, _)) in requests {
+                    failed_requests.insert(*height, (*hash, *previous_hash));
+                }
                 return false;
             };
 
@@ -1254,8 +1260,9 @@ impl<N: Network> BlockSync<N> {
                     greatest_peer_height,
                 );
 
-                // Only remove from failed_requests the heights we actually re-issued.
-                // (If construct_requests returned empty we must not drop these failed requests.)
+                // Only remove from failed_requests the heights we actually re-issued; `send_block_requests`
+                // puts back a batch it skips. (If construct_requests returned empty we must not drop
+                // these failed requests.)
                 for (height, _) in &requests {
                     failed_requests.remove(height);
                 }
@@ -2755,7 +2762,8 @@ mod tests {
         assert!(sync.select_sync_ips(&sync_peers, start_height, 1).is_none());
     }
 
-    /// Tests that a prepared batch needing several peers is skipped when fewer can still serve it.
+    /// Tests that a prepared batch needing several peers is skipped when fewer connected peers can
+    /// still serve it.
     #[test]
     fn test_prepared_batch_needs_enough_peers() {
         let sync = sample_sync_at_height(1_000);
@@ -2766,6 +2774,10 @@ mod tests {
         empty_response_to(&sync, sample_peer_ip(1), 1_001);
         assert!(sync.select_sync_ips(&sync_peers, 1_001, 3).is_none());
         assert_eq!(sync.select_sync_ips(&sync_peers, 1_001, 2).unwrap().len(), 2);
+
+        // A disconnected peer does not count towards the peers the batch needs.
+        sync.remove_peer(&sample_peer_ip(1));
+        assert_eq!(sync.select_sync_ips(&sync_peers, 1_001, 3).unwrap().len(), 2);
     }
 
     /// Tests that peers ahead whose learned floors are above the next block arm the stuck signal, or
