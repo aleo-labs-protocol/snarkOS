@@ -1,0 +1,81 @@
+[package]
+name = "fastsync"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "fastsync"
+path = "src/main.rs"
+
+[dependencies]
+aleo-std = { version = "0.1.24", default-features = false }
+anyhow = { version = "1.0.71" }
+axum = { version = "0.4.8" }
+backoff = { version = "0.4", features = ["tokio"] }
+bytes = { version = "1" }
+colored = { version = "2.0" }
+dotenv = { version = "0.15" }
+futures = { version = "0.3" }
+hyper = { version = "0.14" }
+hyper-tls = { version = "0.5" }
+indexmap = { version = "1.9", features = ["rayon"] }
+num_cpus = { version = "1" }
+once_cell = { version = "1.18.0" }
+rand = { version = "0.8" }
+rayon = { version = "1.5" }
+rusoto_core = { version = "0.48" }
+rusoto_s3 = { version = "0.48" }
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1.24.2", features = ["full"] }
+tokio-util = { version = "0.7.3" }
+tower-http = { version = "0.2.5", features = ["trace"] }
+tracing = { version = "0.1" }
+
+[dependencies.tracing-subscriber]
+version = "0.3"
+features = [ "env-filter", "parking_lot" ]
+
+[dependencies.snarkvm]
+version = "=4.12.0"
+features = [ "circuit", "console", "rocks", "ledger"]
+
+[dependencies.bincode]
+version = "1.0"
+
+[dependencies.reqwest]
+version = "0.11"
+
+[dependencies.serde]
+version = "1.0.188"
+
+[dependencies.sha2]
+version = "0.10"
+default-features = false
+
+[dev-dependencies.rusty-hook]
+version = "0.11.2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+incremental = true
+
+[profile.bench]
+opt-level = 3
+debug = false
+rpath = false
+lto = "thin"
+incremental = true
+debug-assertions = false
+
+[profile.dev]
+opt-level = 3
+lto = "thin"
+incremental = true
+
+[profile.test]
+opt-level = 3
+lto = "thin"
+incremental = true
+debug = true
+debug-assertions = true
