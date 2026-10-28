@@ -13,7 +13,7 @@ cargo +nightly fmt --all -- --check
 
 if command -v cargo-deny >/dev/null; then
   echo "Running cargo deny..."
-  cargo deny check bans licenses sources
+  cargo deny --workspace check bans licenses sources
 else
   echo "warning: cargo-deny not installed, skipping license/bans/sources check (CI will still run it)"
 fi
