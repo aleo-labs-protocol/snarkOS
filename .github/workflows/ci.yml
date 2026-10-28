@@ -131,8 +131,6 @@ jobs:
               -p snarkos-node-sync-locators -p snarkos-node-network
           - name: cdn
             runs: nextest run -p snarkos-node-cdn
-          - name: ledger-distribution
-            runs: nextest run -p snarkos-ledger-distribution
           - name: messages
             runs: >-
               nextest run -p snarkos-node-bft-events -p snarkos-node-router-messages
@@ -216,6 +214,9 @@ jobs:
             runs: nextest run -p snarkos-node-router
           - name: sync
             runs: nextest run -p snarkos-node-sync
+          # Builds RocksDB, whose bindings need libclang, which hosted runners lack.
+          - name: ledger-distribution
+            runs: nextest run -p snarkos-ledger-distribution
     name: test (${{ matrix.name }})
     steps: *test-steps
 
