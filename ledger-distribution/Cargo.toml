@@ -25,7 +25,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies.axum]
-version = "0.4.8"
+workspace = true
 
 [dependencies.bincode]
 workspace = true
@@ -69,7 +69,7 @@ workspace = true
 features = [ "full" ]
 
 [dependencies.tower-http]
-version = "0.2.5"
+version = "0.7"
 features = [ "trace" ]
 
 [dependencies.tracing]
