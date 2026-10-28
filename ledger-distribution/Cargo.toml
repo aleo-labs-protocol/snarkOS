@@ -1,10 +1,10 @@
 [package]
-name = "fastsync"
+name = "snarkos-ledger-distribution"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "fastsync"
+name = "ledger-distribution"
 path = "src/main.rs"
 
 [dependencies]

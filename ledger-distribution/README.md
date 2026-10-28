@@ -1,6 +1,9 @@
-# fastsync
+# snarkos-ledger-distribution
 
 This is a simple tool that fetches chunks of 50 blocks from a node and uploads them to an S3-compatible bucket with a checksum file.
+The bucket is the block CDN that `snarkos-node-cdn` syncs from.
+
+The binary is named `ledger-distribution`; it was previously named `fastsync`.
 
 ## Setup
 
@@ -15,7 +18,7 @@ EXPLORER_URL=
 ## Usage guide
 
 ```
-cargo run --release <network ID> [--dry-run]
+cargo run --release -p snarkos-ledger-distribution --bin ledger-distribution -- <network ID> [--dry-run]
 ```
 
 The network ID is `0` for mainnet, `1` for testnet, and `2` for canary.

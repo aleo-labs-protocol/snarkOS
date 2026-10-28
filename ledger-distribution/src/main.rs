@@ -16,7 +16,7 @@
 #[macro_use]
 extern crate tracing;
 
-use fastsync::{BlocksBucket, Bucket, NUM_BLOCKS_PER_CHUNK, initialize_rest_server};
+use snarkos_ledger_distribution::{BlocksBucket, Bucket, NUM_BLOCKS_PER_CHUNK, initialize_rest_server};
 use snarkvm::{ledger::block::Block, prelude::*};
 
 use anyhow::Result;
@@ -128,7 +128,7 @@ async fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         println!("Invalid number of arguments. Given: {} - Required: 1", args.len() - 1);
-        println!("Usage: fastsync <network_id> [--dry-run]");
+        println!("Usage: ledger-distribution <network_id> [--dry-run]");
         return Ok(());
     }
     let network = match args[1].parse::<u16>()? {
