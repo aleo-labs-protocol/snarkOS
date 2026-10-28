@@ -363,16 +363,16 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         // Manually parse the height or the height of the hash, axum doesn't support different types
         // for the same path param.
         let latest_height = rest.ledger.latest_height();
-        let (hash, is_hash_input) = if let Ok(height) = height_or_hash.parse::<u32>() {
+        let (hash, height) = if let Ok(height) = height_or_hash.parse::<u32>() {
             check_block_retained(height, latest_height)?;
             let hash = rest
                 .ledger
                 .get_hash(height)
                 .with_context(|| "Failed to get a block's hash")
                 .map_err(map_missing_resource_error)?;
-            (hash, false)
+            (hash, Some(height))
         } else if let Ok(hash) = height_or_hash.parse::<N::BlockHash>() {
-            (hash, true)
+            (hash, None)
         } else {
             return Err(RestError::bad_request(anyhow!("invalid input: neither a block height nor a block hash")));
         };
@@ -384,25 +384,32 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             return Ok(json_block);
         }
 
-        // Retrieve the block from the database. A pruning node first reports a pruned block as gone;
-        // a hash it does not know falls through to the 404 below.
-        let check_retention = is_hash_input && oldest_retained_authority_height(latest_height) > 1;
-        let block = tokio::task::spawn_blocking(move || {
-            if check_retention && let Ok(height) = rest.ledger.get_height(&hash) {
+        // Retrieve and serialize the block from the database. A pruning node first reports a pruned
+        // block as gone; a hash it does not know falls through to the 404 below.
+        tokio::task::spawn_blocking(move || {
+            let mut height = height;
+            if height.is_none() && oldest_retained_authority_height(latest_height) > 1 {
+                height = rest.ledger.get_height(&hash).ok();
+            }
+            if let Some(height) = height {
                 check_block_retained(height, latest_height)?;
             }
-            Ok::<_, RestError>(rest.ledger.try_get_block_by_hash(&hash))
+            let read_error = match rest.ledger.try_get_block_by_hash(&hash) {
+                Ok(Some(block)) => return Ok(ErasedJson::new(block)),
+                Ok(None) => None,
+                Err(e) => Some(e),
+            };
+            // The tip may have moved since `latest_height` was read, pruning a block at the floor.
+            if let Some(height) = height.or_else(|| rest.ledger.get_height(&hash).ok()) {
+                check_block_retained(height, rest.ledger.latest_height())?;
+            }
+            if let Some(e) = read_error {
+                error!("Couldn't find a block: {e}");
+            }
+            Err(RestError::not_found(anyhow!("Couldn't find block {height_or_hash}")))
         })
         .await
-        .map_err(|e| RestError::internal_server_error(anyhow!("tokio error: {e}")))??;
-        match block {
-            Ok(Some(block)) => Ok(ErasedJson::new(block)),
-            Ok(None) => Err(RestError::not_found(anyhow!("Couldn't find block {height_or_hash}"))),
-            Err(e) => {
-                error!("Couldn't find a block: {e}");
-                Err(RestError::not_found(anyhow!("Couldn't find block {height_or_hash}")))
-            }
-        }
+        .map_err(|e| RestError::internal_server_error(anyhow!("tokio error: {e}")))?
     }
 
     /// GET /<network>/blocks?start={start_height}&end={end_height}
@@ -424,8 +431,14 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         // Prepare a closure for the blocking work.
         let get_json_blocks = move || -> Result<ErasedJson, RestError> {
             let blocks = cfg_into_iter!(start_height..end_height)
-                .map(|height| rest.ledger.get_block(height).map_err(map_missing_resource_error))
-                .collect::<Result<Vec<_>, _>>()?;
+                .map(|height| rest.ledger.get_block(height))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|err| {
+                    // The tip may have moved since `latest_height` was read, pruning the range's start.
+                    check_range_retained(start_height, end_height, rest.ledger.latest_height())
+                        .err()
+                        .unwrap_or_else(|| map_missing_resource_error(err))
+                })?;
 
             Ok(ErasedJson::new(blocks))
         };

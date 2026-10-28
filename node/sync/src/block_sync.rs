@@ -98,14 +98,15 @@ pub const MAX_BLOCKS_BEHIND: u32 = 1; // blocks
 /// (see [`BlockSync::sync_stuck_below_peer_floors`]) should give up and shut down.
 pub const STUCK_SYNC_SHUTDOWN_THRESHOLD: Duration = Duration::from_secs(5 * 60);
 
-/// Returns `true` if a peer at `peer_tip` is assumed to still serve block `height`: every node is
+/// Returns `true` if a peer at `peer_tip` is assumed to serve block `height`: every node is
 /// assumed to prune authority data older than `AUTHORITY_RETENTION_BLOCKS` blocks, so a peer at
-/// `tip` serves `tip - (AUTHORITY_RETENTION_BLOCKS - 1)..=tip`.
+/// `tip` serves `tip - (AUTHORITY_RETENTION_BLOCKS - 1)..=tip`. A tip that regressed below
+/// `height` is excluded too, so that the peer's empty reply is not read as pruning.
 ///
 /// A peer's advertised tip is a snapshot, so the peer may have pruned a little more by the time a
 /// request arrives. No slack is applied: such a request gets an empty response and is re-issued.
 fn peer_can_serve(peer_tip: u32, height: u32) -> bool {
-    peer_tip.saturating_sub(AUTHORITY_RETENTION_BLOCKS - 1) <= height
+    peer_tip.saturating_sub(AUTHORITY_RETENTION_BLOCKS - 1) <= height && height <= peer_tip
 }
 
 /// Returns `true` if a peer at `peer_tip`, with the given learned floor, is assumed to serve `height`.
@@ -1749,9 +1750,7 @@ impl<N: Network> BlockSync<N> {
                 .filter(|(peer_ip, locators)| {
                     let peer_tip = locators.latest_locator_height();
                     peer_tip > current_height
-                        && first_needed.is_none_or(|height| {
-                            peer_tip >= height && can_serve(peer_tip, learned_floors.get(*peer_ip), height)
-                        })
+                        && first_needed.is_none_or(|height| can_serve(peer_tip, learned_floors.get(*peer_ip), height))
                 })
                 .sorted_by(|(_, a), (_, b)| b.latest_locator_height().cmp(&a.latest_locator_height()))
                 .take(NUM_SYNC_CANDIDATE_PEERS)
@@ -2865,6 +2864,22 @@ mod tests {
         assert!(!peer_can_serve(R, 0));
         assert!(peer_can_serve(2 * R, R + 1));
         assert!(!peer_can_serve(2 * R, R));
+        assert!(peer_can_serve(R, R));
+        assert!(!peer_can_serve(R, R + 1));
+    }
+
+    /// Tests that a prepared batch is not sent to a peer whose tip regressed below its start.
+    #[test]
+    fn test_prepared_batch_skips_peer_with_regressed_tip() {
+        let sync = sample_sync_at_height(1_000);
+        let peer_ip = sample_peer_ip(1);
+        sync.update_peer_locators(peer_ip, &sample_block_locators(1_100)).unwrap();
+        let (requests, sync_peers) = sync.prepare_block_requests().pop().unwrap();
+        let start_height = requests.first().unwrap().0;
+        assert!(sync.select_sync_ips(&sync_peers, start_height, 1).is_some());
+
+        sync.update_peer_locators(peer_ip, &sample_block_locators(start_height - 1)).unwrap();
+        assert!(sync.select_sync_ips(&sync_peers, start_height, 1).is_none());
     }
 
     /// Tests that `find_sync_peers` reports peers that are far ahead even when they have pruned the
