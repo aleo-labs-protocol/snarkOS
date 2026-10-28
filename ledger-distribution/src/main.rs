@@ -13,6 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![forbid(unsafe_code)]
+
 #[macro_use]
 extern crate tracing;
 
@@ -43,15 +45,15 @@ fn explorer_url() -> String {
 }
 
 pub fn initialize_logger(verbosity: u8) {
-    match verbosity {
-        0 => env::set_var("RUST_LOG", "info"),
-        1 => env::set_var("RUST_LOG", "debug"),
-        2 | 3 => env::set_var("RUST_LOG", "trace"),
-        _ => env::set_var("RUST_LOG", "info"),
+    let level = match verbosity {
+        0 => "info",
+        1 => "debug",
+        2 | 3 => "trace",
+        _ => "info",
     };
 
     // Filter out undesirable logs.
-    let filter = tracing_subscriber::EnvFilter::from_default_env()
+    let filter = tracing_subscriber::EnvFilter::new(level)
         .add_directive("hyper::client=off".parse().unwrap())
         .add_directive("hyper::proto=off".parse().unwrap())
         .add_directive("jsonrpsee=off".parse().unwrap())
@@ -235,11 +237,7 @@ async fn detect_and_recover_from_rollback<N: Network>(
         return Ok(latest_bucket_height);
     }
 
-    let new_latest_height = if chunks_to_remove.contains(&0) {
-        0
-    } else {
-        *chunks_to_remove.last().unwrap()
-    };
+    let new_latest_height = if chunks_to_remove.contains(&0) { 0 } else { *chunks_to_remove.last().unwrap() };
 
     if dry_run {
         warn!("DRY-RUN: would remove {} stale chunk(s):", chunks_to_remove.len());
@@ -247,10 +245,7 @@ async fn detect_and_recover_from_rollback<N: Network>(
             let chunk_end = chunk_start + NUM_BLOCKS_PER_CHUNK;
             warn!("  - v0/{}.{}.blocks", chunk_start, chunk_end);
         }
-        warn!(
-            "DRY-RUN: latest bucket height would change from {} to {}",
-            latest_bucket_height, new_latest_height
-        );
+        warn!("DRY-RUN: latest bucket height would change from {} to {}", latest_bucket_height, new_latest_height);
         return Ok(latest_bucket_height);
     }
 
@@ -289,14 +284,15 @@ async fn sync_with_beacon<N: Network>(
     info!("Latest bucket height {}, latest beacon height {}\n", latest_bucket_height, latest_beacon_height);
 
     // Detect and recover from any blockchain rollback
-    let latest_bucket_height = detect_and_recover_from_rollback::<N>(blocks_bucket, latest_bucket_height, dry_run).await?;
+    let latest_bucket_height =
+        detect_and_recover_from_rollback::<N>(blocks_bucket, latest_bucket_height, dry_run).await?;
 
     info!("Latest bucket height after rollback check: {}\n", latest_bucket_height);
 
     // Update the blocks bucket with the latest blocks from the beacon.
     let mut start_height = latest_bucket_height;
     ensure!(
-        start_height % NUM_BLOCKS_PER_CHUNK == 0,
+        start_height.is_multiple_of(NUM_BLOCKS_PER_CHUNK),
         "The latest block height must be a multiple of {NUM_BLOCKS_PER_CHUNK}"
     );
 

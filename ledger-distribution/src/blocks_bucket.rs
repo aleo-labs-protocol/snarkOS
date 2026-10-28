@@ -92,7 +92,7 @@ impl<N: Network> BlocksBucket<N> {
         };
 
         ensure!(
-            latest_state.exclusive_height % NUM_BLOCKS_PER_CHUNK == 0,
+            latest_state.exclusive_height.is_multiple_of(NUM_BLOCKS_PER_CHUNK),
             "The exclusive_height must be a multiple of {}",
             NUM_BLOCKS_PER_CHUNK
         );
@@ -157,7 +157,10 @@ impl<N: Network> BlocksBucket<N> {
 
     /// Fetches the block chunk's bytes with the given starting block height from the bucket.
     pub async fn get_blocks_bytes(&self, start_height: u32) -> Result<Vec<u8>> {
-        ensure!(start_height % NUM_BLOCKS_PER_CHUNK == 0, "Blocks must start at a multiple of {NUM_BLOCKS_PER_CHUNK}");
+        ensure!(
+            start_height.is_multiple_of(NUM_BLOCKS_PER_CHUNK),
+            "Blocks must start at a multiple of {NUM_BLOCKS_PER_CHUNK}"
+        );
 
         let end_height = start_height + NUM_BLOCKS_PER_CHUNK;
 
@@ -190,7 +193,7 @@ impl<N: Network> BlocksBucket<N> {
     pub async fn insert_blocks(&self, blocks: &[Block<N>]) -> Result<()> {
         ensure!(blocks.len() == NUM_BLOCKS_PER_CHUNK as usize, "Blocks must be in chunks of {NUM_BLOCKS_PER_CHUNK}");
         ensure!(
-            blocks[0].height() % NUM_BLOCKS_PER_CHUNK == 0,
+            blocks[0].height().is_multiple_of(NUM_BLOCKS_PER_CHUNK),
             "Blocks must start at a multiple of {NUM_BLOCKS_PER_CHUNK}"
         );
 
@@ -240,7 +243,7 @@ impl<N: Network> BlocksBucket<N> {
     /// Removes a single block chunk from the bucket.
     pub async fn remove_blocks_chunk(&self, start_height: u32) -> Result<()> {
         ensure!(
-            start_height % NUM_BLOCKS_PER_CHUNK == 0,
+            start_height.is_multiple_of(NUM_BLOCKS_PER_CHUNK),
             "Blocks must start at a multiple of {NUM_BLOCKS_PER_CHUNK}"
         );
 

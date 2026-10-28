@@ -51,9 +51,6 @@ use rusoto_s3::{
 pub struct Client {
     region: String,
     endpoint: String,
-    key: String,
-    secret: String,
-    token: Option<String>,
     s3: S3Client,
 }
 
@@ -70,14 +67,13 @@ impl Client {
 
             let dispatcher = HttpClient::from_builder(hyper_builder, HttpsConnector::new());
 
-            let credentials =
-                StaticProvider::from(AwsCredentials::new(key.to_string(), secret.to_string(), token.clone(), None));
+            let credentials = StaticProvider::from(AwsCredentials::new(key, secret, token, None));
             let custom_region = Region::Custom { name: region.clone(), endpoint: endpoint.clone() };
 
             S3Client::new_with(dispatcher, credentials, custom_region)
         };
 
-        Self { region, endpoint, key, secret, token, s3 }
+        Self { region, endpoint, s3 }
     }
 
     pub fn region(&self) -> &str {
