@@ -193,6 +193,10 @@ fn metric_values(status: UpgradeStatus, recorded: Option<RequiredUpgrade>) -> (u
     }
 }
 
+/// The record that stands in for one that cannot be read. It holds back every block until a quorum
+/// that is not ahead of this build at any height refutes it.
+const UNREADABLE_RECORD: RequiredUpgrade = RequiredUpgrade { height: 0, consensus_version: u16::MAX };
+
 /// The evidence the monitor keeps.
 struct State<N: Network> {
     /// The steps of the schedule each validator disclosed in its latest handshake.
@@ -228,13 +232,11 @@ pub struct UpgradeMonitor<N: Network> {
 impl<N: Network> UpgradeMonitor<N> {
     /// Initializes the monitor of the validator at `address` from the record at `record_path`.
     ///
-    /// A record of an upgrade that this build schedules is removed. Any other record, including one
-    /// that cannot be read, holds back the blocks from its stop height until connected validators
-    /// refute it.
+    /// A record of an upgrade that this build schedules is removed. Any other record holds back the
+    /// blocks from its stop height until connected validators refute it, and one that cannot be
+    /// read holds back every block.
     pub fn new(address: Address<N>, record_path: PathBuf) -> Self {
         let own = Steps::new(&ConsensusSchedule::of::<N>());
-        // A record that cannot be read holds back every block.
-        let unreadable = RequiredUpgrade { height: 0, consensus_version: u16::MAX };
         let recorded = match read_record(&record_path) {
             Ok(None) => None,
             Ok(Some(recorded)) if own.version_at(recorded.height) >= recorded.consensus_version => {
@@ -258,7 +260,7 @@ impl<N: Network> UpgradeMonitor<N> {
             }
             Err(error) => {
                 warn!("Unable to read the required upgrade at {} - {error}", record_path.display());
-                Some(unreadable)
+                Some(UNREADABLE_RECORD)
             }
         };
         let state = State { schedules: Default::default(), recorded, warned_at: None, metrics: (0, 0, 0) };
@@ -296,15 +298,22 @@ impl<N: Network> UpgradeMonitor<N> {
             return UpgradeStatus::Required(required);
         }
 
-        if let Some(recorded) = state.recorded
-            && self.is_refuted(state, committee, connected, recorded.height)
-        {
-            info!(
-                "Connected validators holding a quorum of stake do not run ConsensusVersion::V{} at height {}",
-                recorded.consensus_version, recorded.height
-            );
-            remove_record(&self.record_path);
-            state.recorded = None;
+        if let Some(recorded) = state.recorded {
+            let refuted_height = (recorded != UNREADABLE_RECORD).then_some(recorded.height);
+            if self.is_refuted(state, committee, connected, refuted_height) {
+                match refuted_height {
+                    Some(height) => info!(
+                        "Connected validators holding a quorum of stake do not run ConsensusVersion::V{} at height {height}",
+                        recorded.consensus_version
+                    ),
+                    None => info!(
+                        "Connected validators holding a quorum of stake are not ahead of this build at any height, so \
+                         the unreadable record of a required upgrade is removed"
+                    ),
+                }
+                remove_record(&self.record_path);
+                state.recorded = None;
+            }
         }
 
         let status = match self.required_upgrade(state, committee) {
@@ -342,8 +351,10 @@ impl<N: Network> UpgradeMonitor<N> {
     ///   that height hold the quorum threshold of stake.
     ///
     /// Connected validators that disclosed no schedule count as not ahead. A member's schedule
-    /// counts at one height only, so that a faulty member holds back at most one block per
-    /// handshake; any other height would let it list many activations and hold back as many blocks.
+    /// counts only at the first height where it is ahead of this build; any other height would let
+    /// it list many activations and hold back as many blocks. So a faulty member can hold back only
+    /// that height, and only while this validator is connected to less than a quorum of stake that
+    /// is not ahead there. Block sync still advances the ledger past it.
     ///
     /// The error is a [`BlockHeldBack`].
     pub fn ensure_block_may_be_built(
@@ -372,7 +383,7 @@ impl<N: Network> UpgradeMonitor<N> {
         let is_claimed = state.schedules.iter().any(|(address, steps)| {
             committee.get_stake(*address) > 0 && steps.first_ahead_of(&self.own) == Some(height)
         });
-        if is_claimed && !self.is_refuted(&state, committee, connected, height) {
+        if is_claimed && !self.is_refuted(&state, committee, connected, Some(height)) {
             return Err(BlockHeldBack(format!(
                 "Validators may run a newer consensus version than this build at height {height}, and connected \
                  validators holding a quorum of stake have not refuted it"
@@ -383,20 +394,23 @@ impl<N: Network> UpgradeMonitor<N> {
     }
 
     /// Returns `true` if this validator and the connected validators that are not ahead of this
-    /// build at `height` hold the quorum threshold of stake, which leaves the remaining validators
-    /// short of the availability threshold.
+    /// build at `height`, or at any height if `height` is `None`, hold the quorum threshold of
+    /// stake, which leaves the remaining validators short of the availability threshold.
     fn is_refuted(
         &self,
         state: &State<N>,
         committee: &Committee<N>,
         connected: &HashSet<Address<N>>,
-        height: u32,
+        height: Option<u32>,
     ) -> bool {
-        let own_version = self.own.version_at(height);
+        let is_ahead = |steps: &Steps| match height {
+            Some(height) => steps.version_at(height) > self.own.version_at(height),
+            None => steps.first_ahead_of(&self.own).is_some(),
+        };
         let stake = connected
             .iter()
             .filter(|address| **address != self.address)
-            .filter(|address| state.schedules.get(*address).is_none_or(|steps| steps.version_at(height) <= own_version))
+            .filter(|address| state.schedules.get(*address).is_none_or(|steps| !is_ahead(steps)))
             .map(|address| committee.get_stake(*address))
             .fold(committee.get_stake(self.address), u64::saturating_add);
         stake >= committee.quorum_threshold()
@@ -887,6 +901,26 @@ mod tests {
         assert!(monitor.ensure_block_may_be_built(&committee, &HashSet::new(), 1).is_err());
         assert!(monitor.ensure_block_may_be_built(&committee, &connected(&addresses[..2]), 1).is_ok());
         assert_eq!(dir.read(), None);
+    }
+
+    #[test]
+    fn an_unreadable_record_is_refuted_only_by_a_quorum_that_is_not_ahead_at_any_height() {
+        let (committee, addresses) = sample_committee();
+        let dir = RecordDir::new();
+        dir.write(&[1, 2, 3]);
+        let monitor = monitor(&addresses, &dir);
+        let stop = required(H).stop_height();
+
+        // Validator 0 is ahead at H, so it and validator 1 leave the record unrefuted, although they
+        // make a quorum with this validator at every height below H.
+        monitor.record_schedule(addresses[0], Some(&ahead_at(H)));
+        let connected = connected(&addresses[..2]);
+        assert!(monitor.ensure_block_may_be_built(&committee, &connected, stop).is_err());
+        assert_eq!(std::fs::read(dir.record_path()).ok(), Some(vec![1, 2, 3]));
+
+        monitor.record_schedule(addresses[0], Some(&own_schedule()));
+        assert!(monitor.ensure_block_may_be_built(&committee, &connected, stop).is_ok());
+        assert!(!dir.record_path().exists());
     }
 
     #[test]
