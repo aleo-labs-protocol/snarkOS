@@ -50,7 +50,18 @@ pub use node::*;
 mod traits;
 pub use traits::*;
 
+use snarkos_node_cdn::{CdnBlockSync, CdnSyncOutcome};
+use snarkos_node_router::messages::DataBlocks;
+use snarkos_node_sync::{BlockSync, STUCK_SYNC_SHUTDOWN_THRESHOLD, blocks_or_empty};
+use snarkos_utilities::SignalHandler;
+use snarkvm::{
+    prelude::{Ledger, Network, store::ConsensusStorage},
+    utilities::flatten_error,
+};
+
 use aleo_std::StorageMode;
+use anyhow::{Context, Result};
+use std::{sync::Arc, time::Duration};
 
 /// A helper to log instructions to recover.
 pub fn log_clean_error(storage_mode: &StorageMode) {
@@ -64,6 +75,93 @@ pub fn log_clean_error(storage_mode: &StorageMode) {
         }
         StorageMode::Test(_) => {
             // Ephemeral location - no need for cleanups.
+        }
+    }
+}
+
+/// Whether a node whose needed blocks every peer has pruned can recover by restarting into the
+/// startup CDN sync.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CdnFallback {
+    /// The startup CDN sync completed, so a restart repeats it. A CDN that had nothing new then may
+    /// have caught up since.
+    Available,
+    /// CDN sync is disabled (`--nocdn`, or `--dev` without `--cdn`).
+    Disabled,
+    /// The startup CDN sync failed, so a restart may fail the same way.
+    Failed,
+}
+
+/// Waits for the startup CDN sync, if any, and reports whether a restart could repeat it.
+pub async fn wait_for_cdn(cdn_sync: Option<Arc<CdnBlockSync>>) -> Result<CdnFallback> {
+    let Some(cdn_sync) = cdn_sync else { return Ok(CdnFallback::Disabled) };
+    Ok(match cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN")? {
+        CdnSyncOutcome::Synced => CdnFallback::Available,
+        CdnSyncOutcome::Failed(height, error) => {
+            warn!("{}", flatten_error(error.context(format!("The startup CDN sync failed after block {height}"))));
+            CdnFallback::Failed
+        }
+    })
+}
+
+/// Returns `true` if a node that has been stuck for `stuck_for` must shut down.
+///
+/// With CDN sync disabled or failed, waiting changes nothing, so the node fails at once. Otherwise
+/// the condition must persist for `STUCK_SYNC_SHUTDOWN_THRESHOLD`, so that a transient set of peers
+/// does not stop the node.
+fn is_stuck_sync_fatal(stuck_for: Option<Duration>, cdn_fallback: CdnFallback) -> bool {
+    stuck_for.is_some_and(|stuck_for| {
+        matches!(cdn_fallback, CdnFallback::Disabled | CdnFallback::Failed)
+            || stuck_for >= STUCK_SYNC_SHUTDOWN_THRESHOLD
+    })
+}
+
+/// Shuts the node down, as failed, if no connected peer can serve the blocks it needs (see
+/// `BlockSync::sync_stuck_below_peer_floors` and [`is_stuck_sync_fatal`]), and returns whether it did.
+pub fn shut_down_if_stuck_sync<N: Network>(
+    sync: &BlockSync<N>,
+    signal_handler: &SignalHandler,
+    cdn_fallback: CdnFallback,
+) -> bool {
+    if !is_stuck_sync_fatal(sync.sync_stuck_below_peer_floors(), cdn_fallback) {
+        return false;
+    }
+
+    let recovery = match cdn_fallback {
+        CdnFallback::Available => {
+            "Restart the node to sync the missing blocks from the CDN; if the CDN has nothing newer, restore a recent ledger snapshot."
+        }
+        CdnFallback::Disabled => {
+            "CDN sync is disabled: restore a recent ledger snapshot, or restart with CDN sync enabled."
+        }
+        CdnFallback::Failed => {
+            "The startup CDN sync failed (see above): restart the node to retry it, or restore a recent ledger snapshot."
+        }
+    };
+    error!(
+        "No connected peer can serve the blocks this node needs; they have likely been pruned network-wide. \
+        Shutting down. {recovery}"
+    );
+    signal_handler
+        .stop_with_error("No connected peer can serve the blocks this node needs (see the logs above)".to_string());
+    true
+}
+
+/// Returns the blocks to answer a block request for `start_height..end_height` with (see
+/// [`blocks_or_empty`]), or `None` after logging the error if the ledger fails to read them.
+pub(crate) fn blocks_for_request<N: Network, C: ConsensusStorage<N>>(
+    ledger: &Ledger<N, C>,
+    start_height: u32,
+    end_height: u32,
+) -> Option<DataBlocks<N>> {
+    let latest_height = || ledger.latest_height();
+    match blocks_or_empty(start_height, end_height, latest_height, || ledger.get_blocks(start_height..end_height)) {
+        Ok(blocks) => Some(blocks),
+        Err(error) => {
+            let err =
+                error.context(format!("Failed to retrieve blocks {start_height} to {end_height} from the ledger"));
+            error!("{}", flatten_error(&err));
+            None
         }
     }
 }
@@ -137,4 +235,24 @@ pub fn notification_message() -> String {
     .bold();
 
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stuck_sync_is_fatal_at_once_only_without_a_cdn_to_wait_for() {
+        let just_stuck = Some(Duration::ZERO);
+        let below_threshold = Some(STUCK_SYNC_SHUTDOWN_THRESHOLD - Duration::from_secs(1));
+        let at_threshold = Some(STUCK_SYNC_SHUTDOWN_THRESHOLD);
+
+        for cdn_fallback in [CdnFallback::Disabled, CdnFallback::Failed] {
+            assert!(!is_stuck_sync_fatal(None, cdn_fallback));
+            assert!(is_stuck_sync_fatal(just_stuck, cdn_fallback));
+        }
+        assert!(!is_stuck_sync_fatal(None, CdnFallback::Available));
+        assert!(!is_stuck_sync_fatal(below_threshold, CdnFallback::Available));
+        assert!(is_stuck_sync_fatal(at_threshold, CdnFallback::Available));
+    }
 }

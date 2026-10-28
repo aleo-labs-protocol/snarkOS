@@ -14,8 +14,9 @@
 // limitations under the License.
 
 use snarkos_account::Account;
-use snarkos_node_network::NodeType;
+use snarkos_node_network::{NodeType, PeerPoolHandling};
 use snarkos_node_router::{
+    Router,
     expect_message,
     messages::{ChallengeRequest, ChallengeResponse, Message, MessageCodec, MessageTrait},
 };
@@ -31,8 +32,11 @@ use std::{
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
+    sync::{Arc, Mutex},
+    time::Duration,
 };
 
+use deadline::deadline;
 use futures_util::{TryStreamExt, sink::SinkExt};
 use pea2pea::{
     Config,
@@ -64,6 +68,7 @@ pub struct TestPeer {
     node: Node,
     node_type: NodeType,
     account: Account<CurrentNetwork>,
+    received_messages: Arc<Mutex<Vec<Message<CurrentNetwork>>>>,
 }
 
 impl Pea2Pea for TestPeer {
@@ -97,6 +102,7 @@ impl TestPeer {
             }),
             node_type,
             account,
+            received_messages: Default::default(),
         };
 
         peer.enable_handshake().await;
@@ -124,6 +130,11 @@ impl TestPeer {
 
     pub fn address(&self) -> Address<CurrentNetwork> {
         self.account.address()
+    }
+
+    /// Returns a copy of the messages received from connected nodes so far.
+    pub fn received_messages(&self) -> Vec<Message<CurrentNetwork>> {
+        self.received_messages.lock().unwrap().clone()
     }
 }
 
@@ -225,9 +236,27 @@ impl Reading for TestPeer {
         Default::default()
     }
 
-    async fn process_message(&self, _peer_ip: SocketAddr, _message: Self::Message) {}
+    async fn process_message(&self, _peer_ip: SocketAddr, message: Self::Message) {
+        self.received_messages.lock().unwrap().push(message);
+    }
 }
 
 impl OnDisconnect for TestPeer {
     async fn on_disconnect(&self, _peer_addr: SocketAddr, _origin: DisconnectOrigin) {}
+}
+
+/// Spins up a test peer, connects the node's router to it, and waits until both sides see the
+/// connection. Returns the peer and the node's address as the peer sees it.
+pub async fn connect_test_peer(router: &Router<CurrentNetwork>) -> (TestPeer, SocketAddr) {
+    let peer = TestPeer::client().await;
+    let peer_addr = peer.node().listening_addr().await.unwrap();
+    router.connect(peer_addr).unwrap().await.unwrap().unwrap();
+
+    let router_clone = router.clone();
+    deadline!(Duration::from_secs(5), move || router_clone.number_of_connected_peers() == 1);
+    let peer_clone = peer.clone();
+    deadline!(Duration::from_secs(5), move || peer_clone.node().num_connected() == 1);
+
+    let node_addr = *peer.node().connected_addrs().first().unwrap();
+    (peer, node_addr)
 }

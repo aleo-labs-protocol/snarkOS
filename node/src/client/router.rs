@@ -20,7 +20,6 @@ use snarkos_node_router::{
     messages::{
         BlockRequest,
         BlockResponse,
-        DataBlocks,
         DisconnectReason,
         MessageCodec,
         PeerRequest,
@@ -205,15 +204,8 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Client<N, C> {
             }
         };
 
-        // Retrieve the blocks within the requested range.
-        let blocks = match self.ledger.get_blocks(*start_height..*end_height) {
-            Ok(blocks) => DataBlocks(blocks),
-            Err(error) => {
-                let err =
-                    error.context(format!("Failed to retrieve blocks {start_height} to {end_height} from the ledger"));
-                error!("{}", flatten_error(&err));
-                return false;
-            }
+        let Some(blocks) = crate::blocks_for_request(&self.ledger, *start_height, *end_height) else {
+            return false;
         };
 
         // Send the `BlockResponse` message to the peer.
@@ -226,11 +218,12 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Client<N, C> {
     fn block_response(
         &self,
         peer_ip: SocketAddr,
+        start_height: u32,
         blocks: Vec<Block<N>>,
         latest_consensus_version: Option<ConsensusVersion>,
     ) -> bool {
         // We do not need to explicitly sync here because insert_block_response, will wake up the sync task.
-        match self.sync.insert_block_responses(peer_ip, blocks, latest_consensus_version) {
+        match self.sync.insert_block_responses(peer_ip, start_height, blocks, latest_consensus_version) {
             Ok(_) => true,
             Err(err) if err.is_benign() => {
                 let err: anyhow::Error = err.into();

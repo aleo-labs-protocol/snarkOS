@@ -2066,7 +2066,7 @@ pub mod prop_tests {
         type Strategy = BoxedStrategy<CryptoTestRng>;
 
         fn arbitrary_with(_: Self::Parameters) -> Self::Strategy {
-            use proptest::prelude::RngCore as ProptestRngCore;
+            use proptest::prelude::Rng as _;
             Just(0).prop_perturb(|_, mut rng| CryptoTestRng(ChaChaRng::seed_from_u64(rng.next_u64()))).boxed()
         }
     }
