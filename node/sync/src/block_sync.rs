@@ -1196,8 +1196,9 @@ impl<N: Network> BlockSync<N> {
                 // Set the maximum number of blocks, so that they do not exceed the end height.
                 let max_new_blocks_to_request = end_height - start_height;
 
-                let Some((sync_peers, min_common_ancestor)) =
-                    self.find_sync_peers_inner(start_height, Some(start_height))
+                // Re-issue from the first height not in the ledger and not already requested.
+                let start = self.first_unrequested_height(start_height);
+                let Some((sync_peers, min_common_ancestor)) = self.find_sync_peers_inner(start_height, Some(start))
                 else {
                     // No connected peer can serve this range: they disconnected, or have all pruned it
                     // (see `sync_stuck_below_peer_floors`). The requests stay queued for a later round.
@@ -1217,7 +1218,7 @@ impl<N: Network> BlockSync<N> {
                 // (Try to) construct the requests.
                 let requests = self.construct_requests(
                     &sync_peers,
-                    self.first_unrequested_height(start_height),
+                    start,
                     min_common_ancestor,
                     max_new_blocks_to_request,
                     greatest_peer_height,
