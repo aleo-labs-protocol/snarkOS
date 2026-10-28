@@ -47,6 +47,7 @@ use s3s::{
 use s3s_fs::FileSystem;
 use std::{
     collections::HashMap,
+    future::IntoFuture,
     path::Path,
     sync::{Arc, Mutex, atomic::AtomicBool},
 };
@@ -107,8 +108,10 @@ fn serve_beacon(blocks: Arc<Vec<Block<CurrentNetwork>>>) -> String {
         .route("/mainnet/blocks", get(get_blocks));
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(axum::Server::from_tcp(listener).unwrap().serve(app.into_make_service()));
+    let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+    tokio::spawn(axum::serve(listener, app).into_future());
     format!("http://{addr}")
 }
 

@@ -64,10 +64,8 @@ async fn start_rest_server<N: Network>(blocks_bucket: BlocksBucket<N>) {
     let addr = SocketAddr::from(([0, 0, 0, 0], 3123));
     // Run server.
     debug!("Serving at {}", addr);
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service())
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
 }
 
 /// Liveness probe endpoint. Returns `200 OK` without touching the bucket, so it
