@@ -16,7 +16,7 @@
 //! Uploads a ledger's blocks from a mock node to an in-process S3 server, and loads them back
 //! with the client snarkOS nodes sync from the CDN with.
 
-use snarkos_ledger_distribution::{Beacon, BlocksBucket, Bucket, permissions::Permission, sync_with_beacon};
+use snarkos_ledger_distribution::{Beacon, BlocksBucket, Bucket, sync_with_beacon};
 use snarkos_node_cdn::load_blocks;
 use snarkos_utilities::SimpleStoppable;
 use snarkvm::{
@@ -36,6 +36,7 @@ use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::conn::auto::Builder as ConnBuilder,
 };
+use object_store::{Attribute, ObjectStoreExt, aws::AmazonS3Builder, path::Path as ObjectPath};
 use s3s::{
     S3Result,
     access::{S3Access, S3AccessContext},
@@ -46,6 +47,7 @@ use s3s::{
 use s3s_fs::FileSystem;
 use std::{
     collections::HashMap,
+    future::IntoFuture,
     path::Path,
     sync::{Arc, Mutex, atomic::AtomicBool},
 };
@@ -106,8 +108,10 @@ fn serve_beacon(blocks: Arc<Vec<Block<CurrentNetwork>>>) -> String {
         .route("/mainnet/blocks", get(get_blocks));
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(axum::Server::from_tcp(listener).unwrap().serve(app.into_make_service()));
+    let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+    tokio::spawn(axum::serve(listener, app).into_future());
     format!("http://{addr}")
 }
 
@@ -163,8 +167,19 @@ async fn uploaded_blocks_load_through_the_cdn_client() {
     let s3_root = tempfile::tempdir().unwrap();
     let s3_url = serve_s3(s3_root.path()).await;
 
-    let bucket = Bucket::new("auto", &s3_url, BUCKET_NAME, ACCESS_KEY.to_string(), SECRET_KEY.to_string());
-    bucket.create_bucket(BUCKET_NAME.to_string(), Permission::Private).await.unwrap();
+    // s3s-fs stores each bucket as a directory under its root.
+    std::fs::create_dir(s3_root.path().join(BUCKET_NAME)).unwrap();
+    let store = AmazonS3Builder::new()
+        .with_endpoint(&s3_url)
+        .with_allow_http(true)
+        .with_region("auto")
+        .with_bucket_name(BUCKET_NAME)
+        .with_access_key_id(ACCESS_KEY)
+        .with_secret_access_key(SECRET_KEY)
+        .build()
+        .unwrap();
+    let store = Arc::new(store);
+    let bucket = Bucket::new(store.clone(), BUCKET_NAME);
     let blocks_bucket = BlocksBucket::<CurrentNetwork>::new(bucket.clone());
     let beacon = Beacon::<CurrentNetwork>::new(beacon_url);
 
@@ -182,6 +197,12 @@ async fn uploaded_blocks_load_through_the_cdn_client() {
         assert_eq!(latest_state.inclusive_height, 99);
         assert_eq!(latest_state.hash, blocks[99].hash());
     }
+
+    let latest_json = store.get(&ObjectPath::from("v0/latest.json")).await.unwrap();
+    assert_eq!(
+        latest_json.attributes.get(&Attribute::CacheControl).map(|value| value.as_ref()),
+        Some("no-cache, max-age=0")
+    );
 
     // As a node that has only the genesis block does.
     let loaded = Arc::new(Mutex::new(Vec::new()));

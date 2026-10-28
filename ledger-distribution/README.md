@@ -1,6 +1,6 @@
 # snarkos-ledger-distribution
 
-This is a simple tool that fetches chunks of 50 blocks from a node and uploads them to an S3-compatible bucket with a checksum file.
+This is a simple tool that fetches chunks of 50 blocks from a node and uploads them to a Google Cloud Storage or S3-compatible bucket with a checksum file.
 The bucket is the block CDN that `snarkos-node-cdn` syncs from.
 
 The binary is named `ledger-distribution`; it was previously named `fastsync`.
@@ -9,9 +9,7 @@ The binary is named `ledger-distribution`; it was previously named `fastsync`.
 
 Create a `.env` file that contains the following variables:
 ```dotenv
-BUCKETS_KEY=
-BUCKETS_SECRET=
-BUCKET_NAME=
+BUCKET_URL=
 EXPLORER_URL=
 ```
 
@@ -29,13 +27,22 @@ The binary reads its credentials and its targets from the environment:
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
-| `BUCKETS_KEY` | yes | — | HMAC access id |
-| `BUCKETS_SECRET` | yes | — | HMAC secret |
-| `BUCKET_NAME` | yes | — | Target bucket |
+| `BUCKET_URL` | yes | — | Target bucket: `gs://<bucket>` for Google Cloud Storage, or `s3://<bucket>` for an S3-compatible service |
 | `EXPLORER_URL` | yes | — | Base URL of the node REST API that blocks are fetched from |
-| `BLOCKS_ENDPOINT` | no | `storage.googleapis.com` | S3-compatible endpoint |
-| `BLOCKS_REGION` | no | `auto` | Bucket region |
 | `GENESIS_PATH` | no | the network's genesis block | File holding the genesis block (as written by `snarkos start --dev`) that an empty bucket must start with |
+
+The bucket's credentials and other settings come from the environment variables that the
+[`object_store`](https://docs.rs/object_store) builders read:
+
+- **`gs://`**: application default credentials, which on GKE include Workload Identity, or a
+  service account key in `GOOGLE_SERVICE_ACCOUNT` or `GOOGLE_APPLICATION_CREDENTIALS`.
+- **`s3://`**: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` and `AWS_ENDPOINT`.
+  To use Google Cloud Storage's S3-compatible API with HMAC keys, set
+  `AWS_ENDPOINT=https://storage.googleapis.com` and `AWS_REGION=auto`.
+
+Uploads set no per-object ACL. The bucket itself must grant public read access, for example
+with uniform bucket-level access and `roles/storage.objectViewer` for `allUsers`, since nodes
+download from it without credentials.
 
 There is also a `GET /health` endpoint on port `3123` that returns `200` without
 touching the bucket.
