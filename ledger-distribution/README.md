@@ -35,6 +35,7 @@ The binary reads its credentials and its targets from the environment:
 | `EXPLORER_URL` | yes | — | Base URL of the node REST API that blocks are fetched from |
 | `BLOCKS_ENDPOINT` | no | `storage.googleapis.com` | S3-compatible endpoint |
 | `BLOCKS_REGION` | no | `auto` | Bucket region |
+| `GENESIS_PATH` | no | the network's genesis block | File holding the genesis block (as written by `snarkos start --dev`) that an empty bucket must start with |
 
 There is also a `GET /health` endpoint on port `3123` that returns `200` without
 touching the bucket.

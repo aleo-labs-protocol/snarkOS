@@ -26,3 +26,6 @@ pub use bucket::*;
 
 mod rest;
 pub use rest::*;
+
+mod sync;
+pub use sync::*;
