@@ -323,6 +323,17 @@ pub struct Start {
     #[clap(long, requires = "metrics")]
     pub metrics_ip: Option<SocketAddr>,
 
+    /// Send transaction events as JSON over UDP to the given address, e.g. 127.0.0.1:9150
+    #[cfg(feature = "metrics")]
+    #[clap(long)]
+    pub tx_events: Option<SocketAddr>,
+
+    /// Select the transaction events to send.
+    /// `lifecycle` sends stage changes; `all` also sends router drops and memory-pool refusals
+    #[cfg(feature = "metrics")]
+    #[clap(long, requires = "tx_events", default_value = "lifecycle", value_parser = ["lifecycle", "all"])]
+    pub tx_events_level: String,
+
     /// Specify the directory that holds all ledger data, e.g., blocks and transactions.
     /// This flag overrides the default path, even when `--dev` is set.
     ///
@@ -953,6 +964,18 @@ impl Start {
         #[cfg(feature = "metrics")]
         if self.metrics {
             metrics::initialize_metrics(self.metrics_ip);
+        }
+        #[cfg(feature = "metrics")]
+        if let Some(target) = self.tx_events {
+            let ntype = match node_type {
+                NodeType::Client => "client",
+                NodeType::Prover => "prover",
+                NodeType::Validator => "validator",
+                NodeType::BootstrapClient => "bootstrap_client",
+            };
+            let batched = self.tx_events_level == "all";
+            metrics::tx_events::initialize(target, batched, N::SHORT_NAME, account.address().to_string(), ntype)
+                .with_context(|| format!("Failed to start sending transaction events to {target}"))?;
         }
 
         // Determine whether to generate background transactions in dev mode.
