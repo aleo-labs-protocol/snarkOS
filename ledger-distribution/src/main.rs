@@ -22,7 +22,7 @@ use snarkos_ledger_distribution::{Beacon, BlocksBucket, Bucket, initialize_rest_
 use snarkvm::{ledger::block::Block, prelude::*};
 
 use anyhow::Result;
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use std::{
     env,
     fs,

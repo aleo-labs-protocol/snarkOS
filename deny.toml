@@ -11,11 +11,6 @@ ignore = [
   "RUSTSEC-2025-0057",
   # TODO remove once we migrate away from bincode, or it becomes maintained again.
   "RUSTSEC-2025-0141",
-  # TODO remove once snarkos-ledger-distribution moves off dotenv and hyper 0.14,
-  # which pull these in.
-  "RUSTSEC-2021-0141", # dotenv is unmaintained
-  "RUSTSEC-2025-0134", # rustls-pemfile is unmaintained
-  "RUSTSEC-2026-0258", # h2 0.3 accepts unbounded empty DATA frames
 ]
 
 [licenses]
