@@ -42,6 +42,13 @@ workspace = true
 [dependencies.rayon]
 workspace = true
 
+[dependencies.serde]
+workspace = true
+features = [ "derive" ]
+
+[dependencies.serde_json]
+workspace = true
+
 [dependencies.snarkvm]
 workspace = true
 features = [ "console", "ledger", "metrics" ]

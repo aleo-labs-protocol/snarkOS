@@ -14,6 +14,7 @@
 // limitations under the License.
 
 pub mod names;
+pub mod tx_events;
 
 // Expose the names at the crate level for easy access.
 pub use names::*;
@@ -40,7 +41,7 @@ use std::{
         OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 use time::OffsetDateTime;
 use tokio::task::JoinHandle;
@@ -298,12 +299,36 @@ impl TransactionCheckTimer {
         Self { site, kind: transaction_kind(transaction), start: Instant::now() }
     }
 
-    /// Records the check's outcome and the time since `start`.
-    pub fn finish<T, E>(self, result: &Result<T, E>) {
+    /// Records the check's outcome and the time since `start`, and returns that time.
+    pub fn finish<T, E>(self, result: &Result<T, E>) -> Duration {
         let Self { site, kind, start } = self;
+        let elapsed = start.elapsed();
         let outcome = if result.is_ok() { "ok" } else { "err" };
         increment_counter_3(verification::TRANSACTION_CHECKS, "site", site, "kind", kind, "outcome", outcome);
-        histogram_2(verification::TRANSACTION_CHECK_SECS, "site", site, "kind", kind, start.elapsed().as_secs_f64());
+        histogram_2(verification::TRANSACTION_CHECK_SECS, "site", site, "kind", kind, elapsed.as_secs_f64());
+        elapsed
+    }
+
+    /// Records the check like [`Self::finish`], and emits it as a `checked` transaction event.
+    /// `checksum` is called only if transaction events are enabled.
+    pub fn finish_and_emit<N: Network, T, E: std::fmt::Display>(
+        self,
+        result: &Result<T, E>,
+        transaction_id: &N::TransactionID,
+        checksum: impl FnOnce() -> Option<N::TransmissionChecksum>,
+    ) {
+        let (site, kind) = (self.site, self.kind);
+        let elapsed = self.finish(result);
+        if let Some(events) = tx_events::get() {
+            events.emit(tx_events::TxEvent::checked::<N, _, _>(
+                site,
+                kind,
+                transaction_id,
+                checksum(),
+                result,
+                elapsed,
+            ));
+        }
     }
 }
 
@@ -313,9 +338,23 @@ pub fn record_solution_check(site: &'static str, is_ok: bool) {
     increment_counter_2(verification::SOLUTION_CHECKS, "site", site, "outcome", outcome);
 }
 
-/// Records the outcome of offering a transaction to the memory pool.
-pub fn record_mempool_transaction(kind: &'static str, outcome: &'static str) {
+/// Records the outcome of offering a transaction to the memory pool. If `emit` is set, a refused
+/// offer (any `outcome` but `accepted`) is also emitted as a batched `mempool_refused` event.
+pub fn record_mempool_transaction<N: Network>(
+    kind: &'static str,
+    outcome: &'static str,
+    transaction_id: &N::TransactionID,
+    checksum: N::TransmissionChecksum,
+    emit: bool,
+) {
     increment_counter_2(consensus::MEMPOOL_TRANSACTIONS, "kind", kind, "outcome", outcome);
+    if let Some(events) = tx_events::get().filter(|_| emit && outcome != "accepted") {
+        events.emit_batched(tx_events::TxEvent {
+            kind: Some(kind),
+            reason: Some(outcome),
+            ..tx_events::TxEvent::new::<N>("mempool_refused", transaction_id, Some(checksum))
+        });
+    }
 }
 
 // Include the generated build information

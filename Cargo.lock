@@ -5243,6 +5243,8 @@ dependencies = [
  "metrics-exporter-prometheus",
  "parking_lot",
  "rayon",
+ "serde",
+ "serde_json",
  "snarkvm",
  "time",
  "tokio",
