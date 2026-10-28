@@ -1217,7 +1217,7 @@ impl<N: Network> BlockSync<N> {
                 // (Try to) construct the requests.
                 let requests = self.construct_requests(
                     &sync_peers,
-                    start_height.saturating_sub(1),
+                    self.first_unrequested_height(start_height),
                     min_common_ancestor,
                     max_new_blocks_to_request,
                     greatest_peer_height,
@@ -1246,6 +1246,9 @@ impl<N: Network> BlockSync<N> {
         let max_new_blocks_to_request =
             max_outstanding_block_requests.saturating_sub(self.num_outstanding_block_requests() as u32);
 
+        // The first height to request: not in the ledger and not already requested.
+        let start_height = self.first_unrequested_height(current_height + 1);
+
         // Prepare the block requests and sync peers, or returns an empty result if there is nothing to request.
         if self.num_total_block_requests() >= max_total_requests as usize {
             trace!(
@@ -1262,7 +1265,7 @@ impl<N: Network> BlockSync<N> {
             print_requests();
             vec![]
         } else if let Some((sync_peers, min_common_ancestor)) =
-            self.find_sync_peers_inner(current_height, Some(self.retention_height().saturating_add(1)))
+            self.find_sync_peers_inner(current_height, Some(start_height))
         {
             // Retrieve the greatest block height of any connected peer.
             // We do not need to update the sync state here, as that already happens when the block locators are received.
@@ -1271,7 +1274,7 @@ impl<N: Network> BlockSync<N> {
             // Construct the list of block requests.
             let requests = self.construct_requests(
                 &sync_peers,
-                current_height,
+                start_height,
                 min_common_ancestor,
                 max_new_blocks_to_request,
                 greatest_peer_height,
@@ -1788,39 +1791,35 @@ impl<N: Network> BlockSync<N> {
         None
     }
 
-    /// Given the sync peers and their minimum common ancestor, return a list of block requests.
+    /// Returns the first height at or above `height` that is above the ledger height and not
+    /// already requested.
+    fn first_unrequested_height(&self, height: u32) -> u32 {
+        let requests = self.requests.read();
+        let mut height = height.max(self.ledger.latest_block_height().saturating_add(1));
+        while requests.contains_key(&height) {
+            height += 1;
+        }
+        height
+    }
+
+    /// Given the sync peers and their minimum common ancestor, return a list of block requests
+    /// starting at `start_height` (see `first_unrequested_height`).
     ///
     /// # Returns
     /// The list of block requests, ordered by height.
     fn construct_requests(
         &self,
         sync_peers: &IndexMap<SocketAddr, BlockLocators<N>>,
-        sync_height: u32,
+        start_height: u32,
         min_common_ancestor: u32,
         max_blocks_to_request: u32,
         greatest_peer_height: u32,
     ) -> Vec<(u32, PrepareSyncRequest<N>)> {
-        // Compute the start height for the block requests.
-        let start_height = {
-            let requests = self.requests.read();
-            let ledger_height = self.ledger.latest_block_height();
-
-            // Do not issue requests for blocks already contained in the ledger.
-            let mut start_height = ledger_height.max(sync_height + 1);
-
-            // Do not issue requests that already exist.
-            while requests.contains_key(&start_height) {
-                start_height += 1;
-            }
-
-            start_height
-        };
-
         // If the minimum common ancestor is below the start height, then return early.
         if min_common_ancestor < start_height {
             if start_height < greatest_peer_height {
                 trace!(
-                    "No request to construct. Height for the next block request is {start_height}, but minimum common block locator ancestor is only {min_common_ancestor} (sync_height={sync_height} greatest_peer_height={greatest_peer_height})"
+                    "No request to construct. Height for the next block request is {start_height}, but minimum common block locator ancestor is only {min_common_ancestor} (greatest_peer_height={greatest_peer_height})"
                 );
             }
             return Default::default();
@@ -2598,6 +2597,25 @@ mod tests {
         assert!(sync.find_sync_peers_inner(1_000, Some(1_002)).is_some());
         // The network tip is not filtered.
         assert!(sync.find_sync_peers().is_some());
+    }
+
+    /// Tests that peers are filtered by the first height to request, not the next ledger height:
+    /// during catch-up the two are far apart, and a peer whose assumed floor lies between them can
+    /// serve the request.
+    #[test]
+    fn test_sync_peers_filtered_by_first_unrequested_height() {
+        let sync = sample_sync_at_height(1_000);
+        for height in 1_001..=1_050 {
+            sync.insert_block_request(height, (None, None, indexset![sample_peer_ip(1)])).unwrap();
+        }
+        // The peer's assumed floor is 1,030: above 1,001, below the next request at 1,051.
+        let peer_ip = sample_peer_ip(2);
+        sync.update_peer_locators(peer_ip, &sample_block_locators(1_029 + AUTHORITY_RETENTION_BLOCKS)).unwrap();
+        assert!(sync.find_sync_peers_inner(1_000, Some(1_001)).is_none());
+
+        let (requests, sync_peers) = sync.prepare_block_requests().pop().unwrap();
+        assert_eq!(requests.first().unwrap().0, 1_051);
+        assert!(sync_peers.contains_key(&peer_ip));
     }
 
     /// Tests that a prepared batch is not sent to a peer whose learned floor rose above its start.
