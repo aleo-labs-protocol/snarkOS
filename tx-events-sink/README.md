@@ -76,7 +76,7 @@ Before a node checks a transaction, its id is only what the bytes claim.
 | `gossiped` | REST, client, validator | | `site`: `rest`, `client_unverified`, `client_verified` or `validator` |
 | `router_dropped` | router | `syncing`, `seen`, `bad_encoding` or `id_mismatch` | `via`: `router` |
 | `mempool_inserted` | validator | | `via`; `prio_fee`; `qlen` |
-| `mempool_refused` | validator | `recently_seen`, `already_queued`, `in_ledger`, `rejected_pool_full` or `rejected_fee_transaction` | |
+| `mempool_refused` | validator | `recently_seen`, `already_queued`, `in_ledger`, `rejected_pool_full` or `rejected_fee_transaction` | `via`: `rest` or `router` |
 | `mempool_evicted` | validator | `oldest_zero_fee` or `lower_fee` | `by` (the id that took the place); `by_fee` |
 | `fetched` | validator | | `site`: `peer_proposal` or `worker_ping` |
 | `propose_dropped` | validator | `spend_cost` or `spend_overflow` | |
@@ -87,12 +87,12 @@ Before a node checks a transaction, its id is only what the bytes claim.
 | `heartbeat` | all, every 10 s | | `emit_dropped`; `rest_status` (error responses of `POST /transaction/broadcast`, by status); `batched` |
 
 `site` and `outcome` values match the labels of the Prometheus metrics at the same points.
-`router_dropped`, `mempool_refused` and `received` with `via: router` use the batched path.
+`router_dropped`, and `received` and `mempool_refused` with `via: router`, use the batched path.
 They are sent only with `--tx-events-level all`.
 
 The node sends no event for a REST request that returns an error status.
 The caller already has that answer.
-A `recently_seen` refusal returns success to the caller, so the node sends it.
+A `recently_seen` or `already_queued` refusal can return success to the caller, so the node sends it at every level.
 
 `in_block` is sent when a node adds a block to its ledger, from consensus or from block sync.
 Blocks loaded from the CDN at startup send no events.

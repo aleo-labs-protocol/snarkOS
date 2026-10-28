@@ -77,8 +77,8 @@ impl Event {
 
     /// Events that a node sends on its batched path, for which the sink creates no new entry.
     fn is_batched(&self) -> bool {
-        matches!(self.ev.as_str(), "router_dropped" | "mempool_refused")
-            || (self.ev == "received" && self.extra_str("via") == Some("router"))
+        self.ev == "router_dropped"
+            || (matches!(self.ev.as_str(), "received" | "mempool_refused") && self.extra_str("via") == Some("router"))
     }
 
     fn stage(&self) -> Option<usize> {
@@ -586,6 +586,11 @@ mod tests {
         sink.ingest(dropped.as_bytes());
         assert!(sink.status("at1x").is_none());
         assert_eq!(sink.stats()["counters"]["unattached"], 1);
+
+        let refused =
+            line("n2", 0, "mempool_refused", "at1y", Some("1"), Some("recently_seen"), json!({ "via": "rest" }));
+        sink.ingest(refused.as_bytes());
+        assert!(sink.status("at1y").is_some());
 
         sink.ingest(line("n1", 1, "gossiped", "at1x", Some("1"), None, json!({ "site": "rest" })).as_bytes());
         sink.ingest(line("n1", 2, "router_dropped", "at1x", None, Some("seen"), json!({})).as_bytes());

@@ -417,20 +417,35 @@ impl<N: Network> Consensus<N> {
                     &transaction_id,
                     checksum,
                     from_router,
+                    from_router,
                 );
                 bail!("Transaction '{}' is a fee transaction (skipping)", fmt_id(transaction_id));
             }
             // Check if the transaction was recently seen.
             if self.seen_transactions.lock().put(transaction_id, ()).is_some() {
                 #[cfg(feature = "metrics")]
-                metrics::record_mempool_transaction::<N>(kind, "recently_seen", &transaction_id, checksum, true);
+                metrics::record_mempool_transaction::<N>(
+                    kind,
+                    "recently_seen",
+                    &transaction_id,
+                    checksum,
+                    true,
+                    from_router,
+                );
                 // If the transaction was recently seen, return early.
                 return Ok(checksum);
             }
             // Check if the transaction already exists in the ledger.
             if self.ledger.contains_transmission(&TransmissionID::Transaction(transaction_id, checksum))? {
                 #[cfg(feature = "metrics")]
-                metrics::record_mempool_transaction::<N>(kind, "in_ledger", &transaction_id, checksum, from_router);
+                metrics::record_mempool_transaction::<N>(
+                    kind,
+                    "in_ledger",
+                    &transaction_id,
+                    checksum,
+                    from_router,
+                    from_router,
+                );
                 bail!("Transaction '{}' exists in the ledger (skipping)", fmt_id(transaction_id));
             }
             // Check that the transaction is not in the mempool.
@@ -441,6 +456,7 @@ impl<N: Network> Consensus<N> {
                     "already_queued",
                     &transaction_id,
                     checksum,
+                    from_router,
                     from_router,
                 );
                 bail!("Transaction '{}' exists in the memory pool", fmt_id(transaction_id));
@@ -456,7 +472,7 @@ impl<N: Network> Consensus<N> {
                     // The queue returns an error only when it is full.
                     Err(_) => ("rejected_pool_full", from_router),
                 };
-                metrics::record_mempool_transaction::<N>(kind, outcome, &transaction_id, checksum, emit);
+                metrics::record_mempool_transaction::<N>(kind, outcome, &transaction_id, checksum, emit, from_router);
             }
             // A duplicate was counted and tracked when its first copy was queued.
             #[cfg(feature = "metrics")]
