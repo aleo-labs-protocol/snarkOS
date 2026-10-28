@@ -5429,6 +5429,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "snarkos-tx-events-sink"
+version = "4.12.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "lru 0.19.0",
+ "serde",
+ "serde_json",
+ "snarkos-node-metrics",
+ "snarkvm",
+ "tokio",
+]
+
+[[package]]
 name = "snarkos-utilities"
 version = "4.12.0"
 dependencies = [
