@@ -75,8 +75,9 @@ impl Event {
         self.cks.as_deref().unwrap_or(UNKNOWN_CHECKSUM)
     }
 
-    /// Events that a node sends on its batched path, for which the sink creates no new entry.
-    fn is_batched(&self) -> bool {
+    /// Events keyed by an id that a peer claims, before any check, for which the sink creates no new
+    /// entry.
+    fn is_claimed(&self) -> bool {
         self.ev == "router_dropped"
             || (matches!(self.ev.as_str(), "received" | "mempool_refused") && self.extra_str("via") == Some("router"))
     }
@@ -141,7 +142,7 @@ pub struct Counters {
     pub heartbeats: u64,
     /// Lines that are not an event.
     pub malformed: u64,
-    /// Batched-path events for a transaction with no entry.
+    /// Events with a claimed id for a transaction with no entry.
     pub unattached: u64,
     /// Events from nodes beyond the node limit.
     pub rejected_nodes: u64,
@@ -270,7 +271,7 @@ impl Sink {
                 store.counters.evicted_events += 1;
             }
             entry.events.push_back(event);
-        } else if event.is_batched() {
+        } else if event.is_claimed() {
             store.counters.unattached += 1;
         } else if store.txs.push(tx, TxEntry { events: VecDeque::from([event]), evicted_events: 0 }).is_some() {
             store.counters.evicted_txs += 1;
@@ -580,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn test_batched_events_do_not_create_entries() {
+    fn test_claimed_events_do_not_create_entries() {
         let sink = Sink::new(limits(10, 10));
         let dropped = line("n1", 0, "router_dropped", "at1x", None, Some("seen"), json!({ "via": "router" }));
         sink.ingest(dropped.as_bytes());

@@ -328,12 +328,6 @@ pub struct Start {
     #[clap(long)]
     pub tx_events: Option<SocketAddr>,
 
-    /// Select the transaction events to send.
-    /// `lifecycle` sends stage changes; `all` also sends router drops and memory-pool refusals
-    #[cfg(feature = "metrics")]
-    #[clap(long, requires = "tx_events", default_value = "lifecycle", value_parser = ["lifecycle", "all"])]
-    pub tx_events_level: String,
-
     /// Specify the directory that holds all ledger data, e.g., blocks and transactions.
     /// This flag overrides the default path, even when `--dev` is set.
     ///
@@ -973,8 +967,7 @@ impl Start {
                 NodeType::Validator => "validator",
                 NodeType::BootstrapClient => "bootstrap_client",
             };
-            let batched = self.tx_events_level == "all";
-            metrics::tx_events::initialize(target, batched, N::SHORT_NAME, account.address().to_string(), ntype)
+            metrics::tx_events::initialize(target, N::SHORT_NAME, account.address().to_string(), ntype)
                 .with_context(|| format!("Failed to start sending transaction events to {target}"))?;
         }
 

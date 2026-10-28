@@ -112,7 +112,7 @@ async fn test_udp_ingest_and_http_queries() {
 #[tokio::test]
 async fn test_node_emitter_output_is_accepted() {
     let (udp, http) = start_sink().await;
-    tx_events::initialize(udp, true, "testnet", "node-a".to_string(), "validator").unwrap();
+    tx_events::initialize(udp, "testnet", "node-a".to_string(), "validator").unwrap();
     let events = tx_events::get().unwrap();
 
     let transaction_id = <MainnetV0 as Network>::TransactionID::default();
@@ -124,7 +124,7 @@ async fn test_node_emitter_output_is_accepted() {
         extra: json!({ "prio_fee": 0, "qlen": 1 }),
         ..event("mempool_inserted")
     });
-    events.emit_batched(TxEvent { reason: Some("recently_seen"), ..event("mempool_refused") });
+    events.emit(TxEvent { reason: Some("recently_seen"), ..event("mempool_refused") });
     events.emit_all([TxEvent { extra: json!({ "outcome": "rejected", "height": 3 }), ..event("in_block") }]);
 
     let path = format!("/tx/{tx}/events");

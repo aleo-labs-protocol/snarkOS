@@ -412,8 +412,8 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
     ) -> bool;
 }
 
-/// Emits a batched transaction event for an `UnconfirmedTransaction` message, keyed by the id the
-/// message claims.
+/// Emits a transaction event for an `UnconfirmedTransaction` message, keyed by the id the message
+/// claims.
 #[cfg(feature = "metrics")]
 fn emit_router_transaction<N: Network>(
     ev: &'static str,
@@ -421,7 +421,7 @@ fn emit_router_transaction<N: Network>(
     transaction_id: &N::TransactionID,
 ) {
     if let Some(events) = metrics::tx_events::get() {
-        events.emit_batched(metrics::tx_events::TxEvent {
+        events.emit(metrics::tx_events::TxEvent {
             reason,
             extra: metrics::tx_events::json!({ "via": "router" }),
             ..metrics::tx_events::TxEvent::new::<N>(ev, transaction_id, None)

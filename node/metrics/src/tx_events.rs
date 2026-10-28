@@ -15,8 +15,8 @@
 
 //! Per-transaction events, sent as JSON lines over UDP to an address set with `--tx-events`.
 //!
-//! Delivery is best-effort: a send that fails, or finds the batch queue full, is counted in the
-//! `emit_dropped` field of the next heartbeat and is otherwise ignored. Each line carries the
+//! Delivery is best-effort: a send that fails is counted in the `emit_dropped` field of the next
+//! heartbeat and is otherwise ignored. Each line carries the
 //! process's `boot` id and a `seq` number, so a receiver can count lost events.
 
 use serde::Serialize;
@@ -38,10 +38,9 @@ use std::{
     sync::{
         OnceLock,
         atomic::{AtomicU32, AtomicU64, Ordering},
-        mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel},
     },
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 /// The schema version in the `v` field.
@@ -49,10 +48,6 @@ pub const SCHEMA_VERSION: u8 = 1;
 /// The size up to which lines are packed into one datagram. A datagram of this size is not
 /// fragmented on a path with a 1280-byte MTU or larger.
 pub const MAX_DATAGRAM_BYTES: usize = 1200;
-/// The number of lines the batch queue holds before it drops new ones.
-const BATCH_QUEUE_CAPACITY: usize = 4096;
-/// The interval at which queued lines are sent.
-const FLUSH_INTERVAL: Duration = Duration::from_millis(50);
 /// The interval between heartbeats.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 /// The length to which error text in `extra.err` is truncated.
@@ -77,28 +72,14 @@ pub fn set_height(height: u32) {
     HEIGHT.store(height, Ordering::Relaxed);
 }
 
-/// Starts sending events to `target`. With `batched` set, router drops and memory-pool refusals
-/// are also sent, packed into datagrams by a background thread.
-pub fn initialize(
-    target: SocketAddr,
-    batched: bool,
-    net: &'static str,
-    node: String,
-    ntype: &'static str,
-) -> io::Result<()> {
+/// Starts sending events to `target`, and a heartbeat from a background thread.
+pub fn initialize(target: SocketAddr, net: &'static str, node: String, ntype: &'static str) -> io::Result<()> {
     let bind: SocketAddr =
         if target.is_ipv4() { (Ipv4Addr::UNSPECIFIED, 0).into() } else { (Ipv6Addr::UNSPECIFIED, 0).into() };
     let socket = UdpSocket::bind(bind)?;
     socket.connect(target)?;
     socket.set_nonblocking(true)?;
 
-    let (batch, receiver) = match batched {
-        true => {
-            let (sender, receiver) = sync_channel(BATCH_QUEUE_CAPACITY);
-            (Some(sender), Some(receiver))
-        }
-        false => (None, None),
-    };
     let boot = format!("{:016x}", RandomState::new().hash_one(SystemTime::now()));
     let events = TxEvents {
         socket,
@@ -108,14 +89,13 @@ pub fn initialize(
         boot,
         seq: AtomicU64::new(0),
         dropped: AtomicU64::new(0),
-        batch,
         rest_status: std::array::from_fn(|_| AtomicU64::new(0)),
     };
     if TX_EVENTS.set(events).is_err() {
         return Err(io::Error::new(io::ErrorKind::AlreadyExists, "transaction events are already initialized"));
     }
     let events = TX_EVENTS.get().ok_or_else(|| io::Error::other("transaction events are not initialized"))?;
-    thread::Builder::new().name("tx-events".to_string()).spawn(move || events.run_background(receiver))?;
+    thread::Builder::new().name("tx-events".to_string()).spawn(move || events.run_heartbeat())?;
     Ok(())
 }
 
@@ -206,7 +186,6 @@ pub struct TxEvents {
     boot: String,
     seq: AtomicU64,
     dropped: AtomicU64,
-    batch: Option<SyncSender<Vec<u8>>>,
     rest_status: [AtomicU64; 200],
 }
 
@@ -232,18 +211,6 @@ impl TxEvents {
         });
         if !datagram.is_empty() {
             self.send(&datagram);
-        }
-    }
-
-    /// Queues the event for the background thread, if `--tx-events-level all` is set.
-    pub fn emit_batched(&self, event: TxEvent) {
-        let Some(batch) = &self.batch else {
-            return;
-        };
-        let mut line = Vec::with_capacity(MAX_DATAGRAM_BYTES / 4);
-        self.encode(&event, &mut line);
-        if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) = batch.try_send(line) {
-            self.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -309,37 +276,14 @@ impl TxEvents {
         let extra = json!({
             "emit_dropped": self.dropped.load(Ordering::Relaxed),
             "rest_status": rest_status,
-            "batched": self.batch.is_some(),
         });
         self.emit(TxEvent { ev: "heartbeat", tx: None, cks: None, kind: None, reason: None, extra });
     }
 
-    fn run_background(&self, receiver: Option<Receiver<Vec<u8>>>) {
-        let mut datagram = Vec::with_capacity(MAX_DATAGRAM_BYTES);
-        let mut next_flush = Instant::now() + FLUSH_INTERVAL;
-        let mut next_heartbeat = Instant::now();
+    fn run_heartbeat(&self) {
         loop {
-            let timeout = next_flush.min(next_heartbeat).saturating_duration_since(Instant::now());
-            match &receiver {
-                Some(receiver) => match receiver.recv_timeout(timeout) {
-                    Ok(line) => self.pack(&mut datagram, &line),
-                    Err(RecvTimeoutError::Timeout) => {}
-                    Err(RecvTimeoutError::Disconnected) => return,
-                },
-                None => thread::sleep(timeout),
-            }
-            let now = Instant::now();
-            if now >= next_flush {
-                if !datagram.is_empty() {
-                    self.send(&datagram);
-                    datagram.clear();
-                }
-                next_flush = now + FLUSH_INTERVAL;
-            }
-            if now >= next_heartbeat {
-                self.heartbeat();
-                next_heartbeat = now + HEARTBEAT_INTERVAL;
-            }
+            self.heartbeat();
+            thread::sleep(HEARTBEAT_INTERVAL);
         }
     }
 }
@@ -433,7 +377,6 @@ mod tests {
             boot: "0123456789abcdef".to_string(),
             seq: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
-            batch: None,
             rest_status: std::array::from_fn(|_| AtomicU64::new(0)),
         }
     }

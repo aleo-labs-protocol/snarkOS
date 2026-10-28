@@ -11,7 +11,7 @@ The chain is the source of truth.
 
 ```bash
 cargo run --release -p snarkos-tx-events-sink -- --udp 127.0.0.1:9150 --http 127.0.0.1:9151
-snarkos start --tx-events 127.0.0.1:9150 --tx-events-level all ...
+snarkos start --tx-events 127.0.0.1:9150 ...
 ```
 
 | option | default | meaning |
@@ -29,7 +29,6 @@ Bind the sink to an address that only your nodes can reach.
 | option | meaning |
 |---|---|
 | `--tx-events <addr>` | Send events as JSON over UDP to `<addr>`. Off by default. |
-| `--tx-events-level lifecycle\|all` | `lifecycle` (default) sends stage changes. `all` also sends router drops and memory-pool refusals. |
 
 The node never waits for the sink.
 If a send fails, the node counts the event in `emit_dropped` and continues.
@@ -84,15 +83,14 @@ Before a node checks a transaction, its id is only what the bytes claim.
 | `certified` | validator | | `round`; `author` |
 | `speculated` | validator | | `outcome`: `accepted`, `rejected` or `aborted`; `height` |
 | `in_block` | validator, client | | `outcome`: `accepted`, `rejected` or `aborted`; `height` |
-| `heartbeat` | all, every 10 s | | `emit_dropped`; `rest_status` (error responses of `POST /transaction/broadcast`, by status); `batched` |
+| `heartbeat` | all, every 10 s | | `emit_dropped`; `rest_status` (error responses of `POST /transaction/broadcast`, by status) |
 
 `site` and `outcome` values match the labels of the Prometheus metrics at the same points.
-`router_dropped`, and `received` and `mempool_refused` with `via: router`, use the batched path.
-They are sent only with `--tx-events-level all`.
+Each event is one datagram, except that the events of one REST call, batch, certificate or block are packed into as few datagrams as fit.
 
 The node sends no event for a REST request that returns an error status.
 The caller already has that answer.
-A `recently_seen` or `already_queued` refusal can return success to the caller, so the node sends it at every level.
+A `recently_seen` or `already_queued` refusal can return success to the caller, so the node sends it.
 
 `in_block` is sent when a node adds a block to its ledger, from consensus or from block sync.
 Blocks loaded from the CDN at startup send no events.
@@ -137,5 +135,6 @@ A failure under a different checksum does not change them.
 
 Returns the counters of the sink, and for each node its `boot`, the `seq` range, the events received, the events lost, and the last heartbeat.
 
-The sink does not create an entry for a batched event of an unknown id.
+`router_dropped`, and `received` and `mempool_refused` with `via: router`, are keyed by the id that a peer claims.
+The sink does not create an entry for such an event of an unknown id.
 It counts the event in `unattached`.

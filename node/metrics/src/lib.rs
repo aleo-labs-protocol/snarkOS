@@ -339,8 +339,7 @@ pub fn record_solution_check(site: &'static str, is_ok: bool) {
 }
 
 /// Records the outcome of offering a transaction to the memory pool. If `emit` is set, a refused
-/// offer (any `outcome` but `accepted`) is also emitted as a `mempool_refused` event, on the batched
-/// path if `from_router` is set and on the direct path otherwise.
+/// offer (any `outcome` but `accepted`) is also emitted as a `mempool_refused` event.
 pub fn record_mempool_transaction<N: Network>(
     kind: &'static str,
     outcome: &'static str,
@@ -351,16 +350,12 @@ pub fn record_mempool_transaction<N: Network>(
 ) {
     increment_counter_2(consensus::MEMPOOL_TRANSACTIONS, "kind", kind, "outcome", outcome);
     if let Some(events) = tx_events::get().filter(|_| emit && outcome != "accepted") {
-        let event = tx_events::TxEvent {
+        events.emit(tx_events::TxEvent {
             kind: Some(kind),
             reason: Some(outcome),
             extra: tx_events::json!({ "via": if from_router { "router" } else { "rest" } }),
             ..tx_events::TxEvent::new::<N>("mempool_refused", transaction_id, Some(checksum))
-        };
-        match from_router {
-            true => events.emit_batched(event),
-            false => events.emit(event),
-        }
+        });
     }
 }
 
