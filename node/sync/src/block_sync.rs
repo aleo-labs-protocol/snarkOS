@@ -2607,16 +2607,35 @@ mod tests {
     #[test]
     fn test_sync_peers_filtered_by_first_unrequested_height() {
         let sync = sample_sync_at_height(1_000);
+        // A peer that serves block 1,001 holds the outstanding requests for 1,001..=1,050.
+        sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(1_000 + AUTHORITY_RETENTION_BLOCKS))
+            .unwrap();
         for height in 1_001..=1_050 {
             sync.insert_block_request(height, (None, None, indexset![sample_peer_ip(1)])).unwrap();
         }
         // The peer's assumed floor is 1,030: above 1,001, below the next request at 1,051.
         let peer_ip = sample_peer_ip(2);
         sync.update_peer_locators(peer_ip, &sample_block_locators(1_029 + AUTHORITY_RETENTION_BLOCKS)).unwrap();
-        assert!(sync.find_sync_peers_inner(1_000, Some(1_001)).is_none());
+        assert!(!sync.find_sync_peers_inner(1_000, Some(1_001)).unwrap().0.contains_key(&peer_ip));
 
         let (requests, sync_peers) = sync.prepare_block_requests().pop().unwrap();
         assert_eq!(requests.first().unwrap().0, 1_051);
+        assert!(sync_peers.contains_key(&peer_ip));
+    }
+
+    /// Tests that a failed batch starting below the ledger height is re-issued from the first height
+    /// the node needs, by a peer that serves that height.
+    #[test]
+    fn test_failed_batch_reissued_from_first_unrequested_height() {
+        let sync = BlockSync::<CurrentNetwork>::new(Arc::new(sample_ledger_service(0)), ConnectionMode::Router);
+        let sync = BlockSync { ledger: Arc::new(sample_ledger_service(1_000)), ..sync };
+        sync.failed_requests.lock().extend((990..=999).map(|height| (height, (None, None))));
+        // The peer's assumed floor is 1,001: above the batch start, at the first height needed.
+        let peer_ip = sample_peer_ip(1);
+        sync.update_peer_locators(peer_ip, &sample_block_locators(1_000 + AUTHORITY_RETENTION_BLOCKS)).unwrap();
+
+        let (requests, sync_peers) = sync.prepare_block_requests().pop().unwrap();
+        assert_eq!(requests.first().unwrap().0, 1_001);
         assert!(sync_peers.contains_key(&peer_ip));
     }
 
