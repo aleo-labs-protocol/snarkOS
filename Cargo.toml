@@ -375,6 +375,16 @@ tikv-jemallocator = "0.7"
 [dependencies.tracing]
 workspace = true
 
+<<<<<<< staging
+=======
+# Pinned to =0.14.1 because k256 v0.14.0 requires it.
+# Adding this as a direct dependency forces cargo to resolve the exact version
+# and prevents automatic upgrades to incompatible releases.
+[dependencies.elliptic-curve]
+version = "=0.14.1"
+default-features = false
+
+>>>>>>> testnet
 [dev-dependencies.rusty-hook]
 version = "0.11.2"
 
@@ -406,6 +416,10 @@ opt-level = 2
 
 [package.metadata.cargo-machete]
 ignored = [
+<<<<<<< staging
+=======
+  "elliptic-curve", # Needed to pin the crate to a specific version
+>>>>>>> testnet
   "snarkos-account", # Needed for cuda feature
   "snarkos-node", # Needed for metrics feature
   "snarkos-node-bft", # Needed for cuda and locktick features
