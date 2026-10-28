@@ -9,7 +9,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  SNARKVM_REPO: ProvableHQ/snarkVM
+  SNARKVM_REPO: aleo-labs-protocol/snarkVM
   SNARKVM_BRANCH: staging
   BASE_BRANCH: staging
   PR_BRANCH: ci/bump-snarkvm

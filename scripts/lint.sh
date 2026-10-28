@@ -13,9 +13,9 @@ cargo +nightly fmt --all -- --check
 
 if command -v cargo-deny >/dev/null; then
   echo "Running cargo deny..."
-  cargo deny check
+  cargo deny check bans licenses sources
 else
-  echo "warning: cargo-deny not installed, skipping advisory/license/bans/sources check (CI will still run it)"
+  echo "warning: cargo-deny not installed, skipping license/bans/sources check (CI will still run it)"
 fi
 
 if command -v shellcheck >/dev/null; then

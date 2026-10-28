@@ -1126,9 +1126,9 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "crypto-bigint"
-version = "0.7.5"
+version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a52aa3fcda4e6302a9f48734f234d35d4721b96f8fe07d073f07ce9df4f0271"
+checksum = "cc907c45bb7e9ef8fc3778defd0f3cd8c81288f1b4e748eba064948f20c47122"
 dependencies = [
  "cpubits",
  "ctutils",
@@ -1180,9 +1180,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.2"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+checksum = "38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0"
 dependencies = [
  "cmov",
  "subtle",
@@ -2363,7 +2363,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -3815,7 +3815,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -3854,7 +3854,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -4912,7 +4912,6 @@ version = "4.12.0"
 dependencies = [
  "built",
  "clap",
- "crypto-bigint",
  "elliptic-curve",
  "locktick",
  "rusty-hook",
@@ -6635,7 +6634,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -6937,9 +6936,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.53.1"
+version = "1.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
 dependencies = [
  "bytes",
  "libc",

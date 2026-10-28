@@ -1,0 +1,47 @@
+name: Job home
+description: >
+  On a self-hosted box, a home directory and TMPDIR for this job alone, so
+  ledgers, node data and other state never reach a later job. Two caches carry
+  over: downloaded parameters, and dev genesis blocks keyed by the files that
+  decide them. Does nothing on a hosted runner, which starts clean.
+
+inputs:
+  genesis-scope:
+    description: >
+      Appended to the dev genesis cache key, for a job whose genesis blocks
+      may come from another snarkOS build than this checkout's.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - if: runner.environment == 'self-hosted'
+      shell: bash
+      env:
+        # The dev genesis cache names a block by its inputs, not by the code
+        # that builds it, so a shared cache would hand one snarkVM's block to
+        # another.
+        GENESIS_KEY: ${{ hashFiles('Cargo.lock', 'cli/src/commands/start.rs') }}${{ inputs.genesis-scope && format('-{0}', inputs.genesis-scope) || '' }}
+      run: |
+        set -euo pipefail
+        # Empty would put every key's blocks in one shared directory.
+        [ -n "$GENESIS_KEY" ] || { echo "::error::no dev genesis key"; exit 1; }
+        box="$HOME/.cache/snarkos"
+        genesis="$box/dev-genesis/$GENESIS_KEY"
+        home="$RUNNER_TEMP/home"
+        mkdir -p "$HOME/.aleo/resources" "$genesis" "$home/.aleo" "$RUNNER_TEMP/tmp"
+        touch "$genesis"
+        find "$box/dev-genesis" -mindepth 1 -maxdepth 1 -mtime +14 -exec rm -rf {} +
+        ln -s "$HOME/.aleo/resources" "$home/.aleo/resources"
+        ln -s "$genesis" "$home/.aleo/dev-genesis"
+        {
+          echo "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}"
+          echo "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}"
+          # sccache's default cache dir is under HOME.
+          echo "SCCACHE_DIR=${SCCACHE_DIR:-$HOME/.cache/sccache}"
+          echo "SNARKOS_RELEASE_DIR=$box/release-snarkos"
+          echo "HOME=$home"
+          # Scripts under .ci keep ledgers and checkpoints in TMPDIR.
+          echo "TMPDIR=$RUNNER_TEMP/tmp"
+        } >> "$GITHUB_ENV"
