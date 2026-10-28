@@ -224,7 +224,7 @@ pub async fn load_blocks<N: Network>(
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                 }
-                Err(error) => return Err((start_height, error)),
+                Err(error) => return Err((start_height.saturating_sub(1), error)),
             }
         }
     };
@@ -236,7 +236,7 @@ pub async fn load_blocks<N: Network>(
             return Ok(start_height.saturating_sub(1));
         }
         return Err((
-            start_height,
+            start_height.saturating_sub(1),
             anyhow!("The given start height ({start_height}) must be less than the CDN height ({cdn_height})"),
         ));
     }
@@ -247,7 +247,7 @@ pub async fn load_blocks<N: Network>(
     // If the end height is less than the start height, return.
     if end_height < start_height {
         return Err((
-            start_height,
+            start_height.saturating_sub(1),
             anyhow!("The given end height ({end_height}) must not be less than the start height ({start_height})"),
         ));
     }
