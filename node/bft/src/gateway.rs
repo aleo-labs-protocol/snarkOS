@@ -754,11 +754,6 @@ impl<N: Network> Gateway<N> {
                             debug!("{}", flatten_error(err));
                             Ok(true)
                         }
-                        // Returning an error disconnects the peer.
-                        Err(err) if err.requires_disconnect() => {
-                            let err: anyhow::Error = err.into();
-                            Err(err.context(format!("Peer '{peer_ip}' sent an invalid block response")))
-                        }
                         Err(err) if err.is_consensus_version_ahead() => {
                             let err: anyhow::Error = err.into();
                             let err = err.context(format!(
