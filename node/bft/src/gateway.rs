@@ -692,14 +692,18 @@ impl<N: Network> Gateway<N> {
 
                 let self_ = self.clone();
                 let blocks = match task::spawn_blocking(move || {
-                    let latest_height = self_.ledger.latest_block_height();
-                    blocks_or_empty(start_height, end_height, latest_height, || {
-                        self_.ledger.get_blocks(start_height..end_height)
-                    })
+                    blocks_or_empty(
+                        start_height,
+                        end_height,
+                        || self_.ledger.latest_block_height(),
+                        || self_.ledger.get_blocks(start_height..end_height),
+                    )
+                    .map_err(|error| anyhow!("Missing blocks {start_height} to {end_height} from ledger - {error}"))
                 })
                 .await
                 {
-                    Ok(blocks) => blocks,
+                    Ok(Ok(blocks)) => blocks,
+                    Ok(Err(error)) => return Err(error),
                     Err(error) => return Err(anyhow!("[BlockRequest] {error}")),
                 };
 

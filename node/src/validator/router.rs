@@ -202,9 +202,20 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Validator<N, C> {
             }
         };
 
-        let blocks = blocks_or_empty(*start_height, *end_height, self.ledger.latest_height(), || {
-            self.ledger.get_blocks(*start_height..*end_height)
-        });
+        let blocks = match blocks_or_empty(
+            *start_height,
+            *end_height,
+            || self.ledger.latest_height(),
+            || self.ledger.get_blocks(*start_height..*end_height),
+        ) {
+            Ok(blocks) => blocks,
+            Err(err) => {
+                let err =
+                    err.context(format!("Failed to retrieve blocks {start_height} to {end_height} from the ledger"));
+                error!("{}", flatten_error(err));
+                return false;
+            }
+        };
         // Send the `BlockResponse` message to the peer.
         self.router()
             .send(peer_ip, Message::BlockResponse(BlockResponse::new(message, blocks, latest_consensus_version)));

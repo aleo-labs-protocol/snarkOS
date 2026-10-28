@@ -135,26 +135,31 @@ pub fn range_below_retention_window(start_height: u32, end_height: u32, latest_h
 }
 
 /// Returns the blocks to answer a block request for `start_height..end_height` with: the blocks
-/// from `get_blocks`, or none if this node cannot serve the range (see
+/// from `get_blocks`, or none if this node has pruned the range or it reaches past the tip (see
 /// [`DataBlocks::ensure_response_is_well_formed`]). A range below this node's retention window is
-/// answered empty without reading storage. A read error within the window is logged as a warning.
+/// answered empty without reading storage. A read error within the window is returned, so that the
+/// requester sees a disconnect rather than a "pruned" signal.
 pub fn blocks_or_empty<N: Network>(
     start_height: u32,
     end_height: u32,
-    latest_height: u32,
+    latest_height: impl Fn() -> u32,
     get_blocks: impl FnOnce() -> Result<Vec<Block<N>>>,
-) -> DataBlocks<N> {
-    if range_below_retention_window(start_height, end_height, latest_height) {
+) -> Result<DataBlocks<N>> {
+    if range_below_retention_window(start_height, end_height, latest_height()) {
         debug!("Cannot serve block request {start_height}..{end_height} - below the retention window");
-        return DataBlocks(vec![]);
+        return Ok(DataBlocks(vec![]));
     }
-    get_blocks().map(DataBlocks).unwrap_or_else(|error| {
-        if end_height <= latest_height.saturating_add(1) {
-            warn!("Failed to read blocks {start_height}..{end_height} for a block request - {}", flatten_error(&error));
-        } else {
+    get_blocks().map(DataBlocks).or_else(|error| {
+        // Re-read the tip: the range may have been pruned since the check above.
+        let latest_height = latest_height();
+        if end_height > latest_height.saturating_add(1)
+            || range_below_retention_window(start_height, end_height, latest_height)
+        {
             debug!("Cannot serve block request {start_height}..{end_height} - {}", flatten_error(&error));
+            Ok(DataBlocks(vec![]))
+        } else {
+            Err(error)
         }
-        DataBlocks(vec![])
     })
 }
 
@@ -2765,16 +2770,29 @@ mod tests {
     fn test_blocks_or_empty() {
         let latest = 2 * AUTHORITY_RETENTION_BLOCKS;
         let read = std::cell::Cell::new(false);
-        let blocks = blocks_or_empty::<CurrentNetwork>(1, 3, latest, || {
-            read.set(true);
-            Ok(vec![])
-        });
-        assert!(blocks.0.is_empty());
+        let blocks = blocks_or_empty::<CurrentNetwork>(
+            1,
+            3,
+            || latest,
+            || {
+                read.set(true);
+                Ok(vec![])
+            },
+        );
+        assert!(blocks.unwrap().0.is_empty());
         // Without `prune-authority-data` in snarkVM, every block is retained and storage is read.
         assert_eq!(read.get(), oldest_retained_authority_height(latest) == 0);
 
-        let blocks = blocks_or_empty::<CurrentNetwork>(latest, latest + 1, latest, || bail!("storage error"));
-        assert!(blocks.0.is_empty());
+        // A read error within the window is returned; past the tip, the response is empty.
+        assert!(blocks_or_empty::<CurrentNetwork>(latest, latest + 1, || latest, || bail!("storage error")).is_err());
+        let blocks = blocks_or_empty::<CurrentNetwork>(latest, latest + 2, || latest, || bail!("missing block"));
+        assert!(blocks.unwrap().0.is_empty());
+
+        // A range pruned between the check and the read is answered empty on a pruning node.
+        let tip = std::cell::Cell::new(latest);
+        let next_tip = || tip.replace(latest + AUTHORITY_RETENTION_BLOCKS);
+        let blocks = blocks_or_empty::<CurrentNetwork>(latest, latest + 1, next_tip, || bail!("pruned"));
+        assert_eq!(blocks.is_ok(), oldest_retained_authority_height(latest) > 0);
     }
 
     #[test]
