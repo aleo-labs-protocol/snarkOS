@@ -66,8 +66,11 @@ jobs:
         with: { persist-credentials: false }
       - uses: taiki-e/install-action@v2
         with: { tool: cargo-deny@0.20.2 }
-      # Advisories: bump-advisories.yml.
       - run: cargo deny check bans licenses sources
+      # staging's advisories are bumped nightly by bump-advisories.yml, which
+      # does not cover the release line.
+      - if: github.base_ref != 'staging' && github.ref_name != 'staging'
+        run: cargo deny check advisories
 
   shellcheck:
     runs-on: ubuntu-latest
