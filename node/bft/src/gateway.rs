@@ -692,6 +692,7 @@ impl<N: Network> Gateway<N> {
             Event::BlockRequest(_) => {
                 let num_events = self.cache.insert_inbound_block_request(peer_ip, CACHE_REQUESTS_INTERVAL);
                 if num_events >= self.max_cache_duplicates() {
+                    trace!("{CONTEXT} Dropping a block request from '{peer_ip}' (rate limit exceeded)");
                     return Ok(true);
                 }
             }
