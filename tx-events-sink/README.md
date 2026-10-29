@@ -66,6 +66,15 @@ The key of a transaction is `(tx, cks)`.
 One id can arrive with several checksums.
 Before a node checks a transaction, its id is only what the bytes claim.
 
+### Versioning
+
+- Adding a field, an event name or a reason keeps `v`.
+- Renaming or removing a field, an event name or a reason increments `v`.
+  So does a change to the type or meaning of a field.
+- A consumer must ignore unknown fields, event names and reasons.
+
+`node/metrics/tests/fixtures/tx_events.jsonl` holds an example of each kind of event.
+
 ### Events
 
 | `ev` | sent by | `reason` | `extra` |

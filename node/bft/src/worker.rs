@@ -412,7 +412,7 @@ impl<N: Network> Worker<N> {
             #[cfg(feature = "metrics")]
             if let Some(events) = metrics::tx_events::get()
                 && let Some(event) = metrics::tx_events::TxEvent::for_transmission(
-                    "fetched",
+                    metrics::tx_events::Ev::Fetched,
                     &transmission_id,
                     metrics::tx_events::json!({ "site": site }),
                 )

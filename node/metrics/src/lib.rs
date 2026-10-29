@@ -345,7 +345,7 @@ pub fn record_transaction_propagated<N: Network>(
     if let Some(events) = tx_events::get() {
         events.emit(tx_events::TxEvent {
             extra: tx_events::json!({ "site": site }),
-            ..tx_events::TxEvent::new::<N>("gossiped", transaction_id, checksum)
+            ..tx_events::TxEvent::new::<N>(tx_events::Ev::Gossiped, transaction_id, checksum)
         });
     }
 }

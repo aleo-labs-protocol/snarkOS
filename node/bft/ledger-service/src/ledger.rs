@@ -133,7 +133,7 @@ impl<'a, N: Network, C: ConsensusStorage<N>> LedgerUpdateService<N> for LedgerUp
             metrics::increment_gauge(metrics::blocks::TRANSACTIONS, num_tx as f64);
             metrics::update_block_metrics(block);
             metrics::tx_events::set_height(block.height());
-            metrics::tx_events::emit_block_outcomes("in_block", block);
+            metrics::tx_events::emit_block_outcomes(metrics::tx_events::Ev::InBlock, block);
         }
 
         tracing::info!("Advanced to block {} at round {} - {}\n", block.height(), block.round(), block.hash());

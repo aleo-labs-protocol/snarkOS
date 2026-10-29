@@ -761,13 +761,13 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
                         #[cfg(feature = "metrics")]
                         let kind = metrics::transaction_kind(&transaction);
                         #[cfg(feature = "metrics")]
-                        let emit_dropped = move |reason: &'static str| {
+                        let emit_dropped = move |reason: metrics::tx_events::Reason| {
                             if let Some(events) = metrics::tx_events::get() {
                                 events.emit(metrics::tx_events::TxEvent {
                                     kind: Some(kind),
                                     reason: Some(reason),
                                     ..metrics::tx_events::TxEvent::new::<N>(
-                                        "propose_dropped",
+                                        metrics::tx_events::Ev::ProposeDropped,
                                         &transaction_id,
                                         Some(checksum),
                                     )
@@ -780,7 +780,7 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
                         let Ok(cost) = self.ledger.transaction_spend_in_microcredits(&transaction, consensus_version)
                         else {
                             #[cfg(feature = "metrics")]
-                            emit_dropped("spend_cost");
+                            emit_dropped(metrics::tx_events::Reason::SpendCost);
                             debug!(
                                 "Proposing - Skipping and discarding transaction '{}' - Unable to compute transaction spent cost",
                                 fmt_id(transaction_id)
@@ -803,7 +803,7 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
                         // Note: We purposefully discard this transaction if the proposal cost overflows.
                         let Some(next_proposal_cost) = proposal_cost.checked_add(cost) else {
                             #[cfg(feature = "metrics")]
-                            emit_dropped("spend_overflow");
+                            emit_dropped(metrics::tx_events::Reason::SpendOverflow);
                             debug!(
                                 "Proposing - Skipping and discarding transaction '{}' - Proposal cost overflowed",
                                 fmt_id(transaction_id)
@@ -903,7 +903,11 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
         if let Some((events, transmission_ids)) = proposed {
             let extra = metrics::tx_events::json!({ "round": round });
             events.emit_all(transmission_ids.iter().filter_map(|transmission_id| {
-                metrics::tx_events::TxEvent::for_transmission("proposed", transmission_id, extra.clone())
+                metrics::tx_events::TxEvent::for_transmission(
+                    metrics::tx_events::Ev::Proposed,
+                    transmission_id,
+                    extra.clone(),
+                )
             }));
         }
 
@@ -2253,7 +2257,11 @@ fn emit_certified<N: Network>(certificate: &BatchCertificate<N>) {
         let extra =
             metrics::tx_events::json!({ "round": certificate.round(), "author": certificate.author().to_string() });
         events.emit_all(certificate.transmission_ids().iter().filter_map(|transmission_id| {
-            metrics::tx_events::TxEvent::for_transmission("certified", transmission_id, extra.clone())
+            metrics::tx_events::TxEvent::for_transmission(
+                metrics::tx_events::Ev::Certified,
+                transmission_id,
+                extra.clone(),
+            )
         }));
     }
 }

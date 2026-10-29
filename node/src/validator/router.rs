@@ -314,8 +314,12 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Validator<N, C> {
             {
                 events.emit(snarkos_node_metrics::tx_events::TxEvent {
                     kind: Some(kind),
-                    reason: Some(refused.outcome),
-                    ..snarkos_node_metrics::tx_events::TxEvent::new::<N>("mempool_refused", &transaction_id, checksum)
+                    reason: Some(refused.reason),
+                    ..snarkos_node_metrics::tx_events::TxEvent::new::<N>(
+                        snarkos_node_metrics::tx_events::Ev::MempoolRefused,
+                        &transaction_id,
+                        checksum,
+                    )
                 });
             }
             trace!("[UnconfirmedTransaction] {error}");

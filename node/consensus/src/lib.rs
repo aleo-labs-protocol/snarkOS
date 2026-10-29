@@ -26,6 +26,8 @@ extern crate tracing;
 #[cfg(feature = "metrics")]
 extern crate snarkos_node_metrics as metrics;
 
+#[cfg(feature = "metrics")]
+use metrics::tx_events::{Ev, Reason};
 use snarkos_account::Account;
 use snarkos_node_bft::{
     BFT,
@@ -95,8 +97,9 @@ type BftRunArgs<N> = Arc<Mutex<Option<(ConsensusSender<N>, PrimaryReceiver<N>)>>
 /// The error of [`Consensus::add_unconfirmed_transaction`] for a transaction that the memory pool refused.
 #[derive(Debug)]
 pub struct MempoolRefused {
-    /// The `outcome` label of the memory pool metric.
-    pub outcome: &'static str,
+    /// The reason, which is also the `outcome` label of the memory pool metric.
+    #[cfg(feature = "metrics")]
+    pub reason: Reason,
     message: String,
 }
 
@@ -418,13 +421,13 @@ impl<N: Network> Consensus<N> {
             let transaction_id = transaction.id();
             // Records a refusal that returns `Ok`, and emits it.
             #[cfg(feature = "metrics")]
-            let refused = |outcome| {
-                metrics::record_mempool_transaction(kind, outcome);
+            let refused = |reason: Reason| {
+                metrics::record_mempool_transaction(kind, reason.as_str());
                 if let Some(events) = metrics::tx_events::get() {
                     events.emit(metrics::tx_events::TxEvent {
                         kind: Some(kind),
-                        reason: Some(outcome),
-                        ..metrics::tx_events::TxEvent::new::<N>("mempool_refused", &transaction_id, Some(checksum))
+                        reason: Some(reason),
+                        ..metrics::tx_events::TxEvent::new::<N>(Ev::MempoolRefused, &transaction_id, Some(checksum))
                     });
                 }
             };
@@ -432,34 +435,37 @@ impl<N: Network> Consensus<N> {
             // Check that the transaction is not a fee transaction.
             if transaction.is_fee() {
                 #[cfg(feature = "metrics")]
-                metrics::record_mempool_transaction(kind, "rejected_fee_transaction");
+                metrics::record_mempool_transaction(kind, Reason::RejectedFeeTransaction.as_str());
                 bail!(MempoolRefused {
-                    outcome: "rejected_fee_transaction",
+                    #[cfg(feature = "metrics")]
+                    reason: Reason::RejectedFeeTransaction,
                     message: format!("Transaction '{}' is a fee transaction (skipping)", fmt_id(transaction_id)),
                 });
             }
             // Check if the transaction was recently seen.
             if self.seen_transactions.lock().put(transaction_id, ()).is_some() {
                 #[cfg(feature = "metrics")]
-                refused("recently_seen");
+                refused(Reason::RecentlySeen);
                 // If the transaction was recently seen, return early.
                 return Ok(());
             }
             // Check if the transaction already exists in the ledger.
             if self.ledger.contains_transmission(&TransmissionID::Transaction(transaction_id, checksum))? {
                 #[cfg(feature = "metrics")]
-                metrics::record_mempool_transaction(kind, "in_ledger");
+                metrics::record_mempool_transaction(kind, Reason::InLedger.as_str());
                 bail!(MempoolRefused {
-                    outcome: "in_ledger",
+                    #[cfg(feature = "metrics")]
+                    reason: Reason::InLedger,
                     message: format!("Transaction '{}' exists in the ledger (skipping)", fmt_id(transaction_id)),
                 });
             }
             // Check that the transaction is not in the mempool.
             if self.contains_transaction(&transaction_id) {
                 #[cfg(feature = "metrics")]
-                metrics::record_mempool_transaction(kind, "already_queued");
+                metrics::record_mempool_transaction(kind, Reason::AlreadyQueued.as_str());
                 bail!(MempoolRefused {
-                    outcome: "already_queued",
+                    #[cfg(feature = "metrics")]
+                    reason: Reason::AlreadyQueued,
                     message: format!("Transaction '{}' exists in the memory pool", fmt_id(transaction_id)),
                 });
             }
@@ -484,10 +490,10 @@ impl<N: Network> Consensus<N> {
                             let evicted_fee = evicted.priority_fee_amount().map(|fee| *fee).unwrap_or_default();
                             events.emit(metrics::tx_events::TxEvent {
                                 kind: Some(metrics::transaction_kind(evicted)),
-                                reason: Some(if evicted_fee == 0 { "oldest_zero_fee" } else { "lower_fee" }),
+                                reason: Some(if evicted_fee == 0 { Reason::OldestZeroFee } else { Reason::LowerFee }),
                                 extra: metrics::tx_events::json!({ "by": transaction_id.to_string(), "by_fee": *priority_fee }),
                                 ..metrics::tx_events::TxEvent::new::<N>(
-                                    "mempool_evicted",
+                                    Ev::MempoolEvicted,
                                     evicted_id,
                                     metrics::tx_events::transaction_checksum(evicted),
                                 )
@@ -496,16 +502,24 @@ impl<N: Network> Consensus<N> {
                         events.emit(metrics::tx_events::TxEvent {
                             kind: Some(kind),
                             extra: metrics::tx_events::json!({ "prio_fee": *priority_fee, "qlen": qlen }),
-                            ..metrics::tx_events::TxEvent::new::<N>("mempool_inserted", &transaction_id, Some(checksum))
+                            ..metrics::tx_events::TxEvent::new::<N>(
+                                Ev::MempoolInserted,
+                                &transaction_id,
+                                Some(checksum),
+                            )
                         });
                     }
                 }
                 // A duplicate was counted and tracked when its first copy was queued.
-                Ok((QueueInsertion::Duplicate, _)) => refused("already_queued"),
+                Ok((QueueInsertion::Duplicate, _)) => refused(Reason::AlreadyQueued),
                 // The queue returns an error only when it is full.
-                Err(_) => metrics::record_mempool_transaction(kind, "rejected_pool_full"),
+                Err(_) => metrics::record_mempool_transaction(kind, Reason::RejectedPoolFull.as_str()),
             }
-            insertion.map_err(|err| MempoolRefused { outcome: "rejected_pool_full", message: err.to_string() })?;
+            insertion.map_err(|err| MempoolRefused {
+                #[cfg(feature = "metrics")]
+                reason: Reason::RejectedPoolFull,
+                message: err.to_string(),
+            })?;
             trace!("Received unconfirmed transaction '{}' in the queue", fmt_id(transaction_id));
         }
 
@@ -771,7 +785,7 @@ impl<N: Network> Consensus<N> {
         self.bft.primary().gateway().ensure_block_may_be_built(block_height)?;
 
         #[cfg(feature = "metrics")]
-        metrics::tx_events::emit_block_outcomes("speculated", &block);
+        metrics::tx_events::emit_block_outcomes(Ev::Speculated, &block);
         // Advance to the next block.
         let advance_instant = std::time::Instant::now();
         ledger_update.advance_to_next_block(&block)?;

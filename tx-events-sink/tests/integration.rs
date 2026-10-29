@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use serde_json::{Value, json};
-use snarkos_node_metrics::tx_events::{self, TxEvent};
+use snarkos_node_metrics::tx_events::{self, Ev, Reason, TxEvent};
 use snarkos_tx_events_sink::{Limits, Sink, run};
 use snarkvm::prelude::{MainnetV0, Network};
 use std::{
@@ -109,6 +109,38 @@ async fn test_udp_ingest_and_http_queries() {
     assert_eq!(stats["nodes"]["n1"]["lost"], 1);
 }
 
+/// Returns an event named `ev` as a node sends it, or `None` for `heartbeat`, which the background
+/// thread sends.
+fn node_event(ev: Ev, transaction_id: &<MainnetV0 as Network>::TransactionID) -> Option<TxEvent> {
+    let (kind, reason, extra) = match ev {
+        Ev::Received => (None, None, json!({ "via": "rest" })),
+        Ev::Checked => {
+            let result: Result<(), &str> = Ok(());
+            let elapsed = Duration::from_micros(10);
+            return Some(TxEvent::checked::<MainnetV0, _, _>(
+                "worker",
+                "execute",
+                transaction_id,
+                Some(5),
+                &result,
+                elapsed,
+            ));
+        }
+        Ev::Gossiped => (None, None, json!({ "site": "validator" })),
+        Ev::RouterDropped => (None, Some(Reason::Seen), json!({ "via": "router" })),
+        Ev::MempoolInserted => (Some("execute"), None, json!({ "prio_fee": 0, "qlen": 1 })),
+        Ev::MempoolRefused => (Some("execute"), Some(Reason::RecentlySeen), Value::Null),
+        Ev::MempoolEvicted => (Some("execute"), Some(Reason::LowerFee), json!({ "by": "at1by", "by_fee": 1 })),
+        Ev::Fetched => (None, None, json!({ "site": "peer_proposal" })),
+        Ev::ProposeDropped => (Some("execute"), Some(Reason::SpendCost), Value::Null),
+        Ev::Proposed => (None, None, json!({ "round": 2 })),
+        Ev::Certified => (None, None, json!({ "round": 2, "author": "aleo1author" })),
+        Ev::Speculated | Ev::InBlock => (Some("execute"), None, json!({ "outcome": "rejected", "height": 3 })),
+        Ev::Heartbeat => return None,
+    };
+    Some(TxEvent { kind, reason, extra, ..TxEvent::new::<MainnetV0>(ev, transaction_id, Some(5)) })
+}
+
 #[tokio::test]
 async fn test_node_emitter_output_is_accepted() {
     let (udp, http) = start_sink().await;
@@ -117,18 +149,23 @@ async fn test_node_emitter_output_is_accepted() {
 
     let transaction_id = <MainnetV0 as Network>::TransactionID::default();
     let tx = transaction_id.to_string();
-    let event = |ev| TxEvent::new::<MainnetV0>(ev, &transaction_id, Some(5));
-    events.emit(TxEvent { extra: json!({ "via": "rest" }), ..event("received") });
-    events.emit(TxEvent {
-        kind: Some("execute"),
-        extra: json!({ "prio_fee": 0, "qlen": 1 }),
-        ..event("mempool_inserted")
-    });
-    events.emit(TxEvent { reason: Some("recently_seen"), ..event("mempool_refused") });
-    events.emit_all([TxEvent { extra: json!({ "outcome": "rejected", "height": 3 }), ..event("in_block") }]);
+    let sent: Vec<TxEvent> = Ev::ALL.into_iter().filter_map(|ev| node_event(ev, &transaction_id)).collect();
+    let mut expected: Vec<Value> = sent.iter().map(|event| json!(event.ev)).collect();
+    let mut sent = sent.into_iter();
+    for event in sent.by_ref().take(expected.len() / 2) {
+        events.emit(event);
+    }
+    events.emit_all(sent);
 
     let path = format!("/tx/{tx}/events");
-    let body = get_until(http, &path, |body| body["events"].as_array().unwrap().len() == 4).await;
+    let body =
+        get_until(http, &path, |body| body["events"].as_array().is_some_and(|events| events.len() == expected.len()))
+            .await;
+    let mut received: Vec<Value> =
+        body["events"].as_array().into_iter().flatten().map(|event| event["ev"].clone()).collect();
+    received.sort_by_key(Value::to_string);
+    expected.sort_by_key(Value::to_string);
+    assert_eq!(received, expected);
     for event in body["events"].as_array().unwrap() {
         assert_eq!(event["node"], "node-a");
         assert_eq!(event["cks"], "5");
@@ -140,4 +177,19 @@ async fn test_node_emitter_output_is_accepted() {
     assert_eq!(stats["counters"]["malformed"], 0);
     assert_eq!(stats["nodes"]["node-a"]["lost"], 0);
     assert_eq!(stats["nodes"]["node-a"]["last_heartbeat"]["emit_dropped"], 0);
+}
+
+#[test]
+fn test_readme_lists_every_event_and_reason() {
+    let readme = include_str!("../README.md");
+    let section = readme.split("\n### Events\n").nth(1).and_then(|rest| rest.split("\n## ").next()).unwrap_or_default();
+    let rows: Vec<&str> = section.lines().filter(|line| line.starts_with('|')).collect();
+    for ev in Ev::ALL {
+        let row = format!("| `{}` |", json!(ev).as_str().unwrap_or_default());
+        assert!(rows.iter().any(|line| line.starts_with(&row)), "README.md has no row {row} in its events table");
+    }
+    for reason in Reason::ALL {
+        let code = format!("`{}`", reason.as_str());
+        assert!(rows.iter().any(|line| line.contains(&code)), "README.md lists no {code} in its events table");
+    }
 }

@@ -18,6 +18,11 @@
 //! Delivery is best-effort: an event whose send fails is counted in the `emit_dropped` field of the
 //! next heartbeat and is otherwise ignored. Each line carries the process's `boot` id and a `seq`
 //! number, so a receiver can count lost events.
+//!
+//! The `v` field is `SCHEMA_VERSION`. Adding a field, an event name or a reason keeps `v`. Renaming or
+//! removing any of them, or changing the type or meaning of a field, increments `v`. A consumer must
+//! ignore unknown fields, event names and reasons. `tests/fixtures/tx_events.jsonl` holds the encoding
+//! of each kind of event.
 
 use serde::Serialize;
 pub use serde_json::{Value, json};
@@ -113,21 +118,121 @@ pub fn initialize(target: SocketAddr, net: &'static str, node: String, ntype: &'
     Ok(())
 }
 
+/// The name of an event, in the `ev` field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ev {
+    Received,
+    Checked,
+    Gossiped,
+    RouterDropped,
+    MempoolInserted,
+    MempoolRefused,
+    MempoolEvicted,
+    Fetched,
+    ProposeDropped,
+    Proposed,
+    Certified,
+    Speculated,
+    InBlock,
+    Heartbeat,
+}
+
+impl Ev {
+    /// Every event name, in declaration order. A new variant must be added here.
+    pub const ALL: [Self; 14] = [
+        Self::Received,
+        Self::Checked,
+        Self::Gossiped,
+        Self::RouterDropped,
+        Self::MempoolInserted,
+        Self::MempoolRefused,
+        Self::MempoolEvicted,
+        Self::Fetched,
+        Self::ProposeDropped,
+        Self::Proposed,
+        Self::Certified,
+        Self::Speculated,
+        Self::InBlock,
+        Self::Heartbeat,
+    ];
+}
+
+/// A fixed code in the `reason` field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reason {
+    Syncing,
+    Seen,
+    BadEncoding,
+    IdMismatch,
+    RecentlySeen,
+    AlreadyQueued,
+    InLedger,
+    RejectedPoolFull,
+    RejectedFeeTransaction,
+    OldestZeroFee,
+    LowerFee,
+    SpendCost,
+    SpendOverflow,
+    CheckFailed,
+}
+
+impl Reason {
+    /// Every reason, in declaration order. A new variant must be added here.
+    pub const ALL: [Self; 14] = [
+        Self::Syncing,
+        Self::Seen,
+        Self::BadEncoding,
+        Self::IdMismatch,
+        Self::RecentlySeen,
+        Self::AlreadyQueued,
+        Self::InLedger,
+        Self::RejectedPoolFull,
+        Self::RejectedFeeTransaction,
+        Self::OldestZeroFee,
+        Self::LowerFee,
+        Self::SpendCost,
+        Self::SpendOverflow,
+        Self::CheckFailed,
+    ];
+
+    /// Returns the code as it is serialized. A code that is also a Prometheus label is taken from here.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Syncing => "syncing",
+            Self::Seen => "seen",
+            Self::BadEncoding => "bad_encoding",
+            Self::IdMismatch => "id_mismatch",
+            Self::RecentlySeen => "recently_seen",
+            Self::AlreadyQueued => "already_queued",
+            Self::InLedger => "in_ledger",
+            Self::RejectedPoolFull => "rejected_pool_full",
+            Self::RejectedFeeTransaction => "rejected_fee_transaction",
+            Self::OldestZeroFee => "oldest_zero_fee",
+            Self::LowerFee => "lower_fee",
+            Self::SpendCost => "spend_cost",
+            Self::SpendOverflow => "spend_overflow",
+            Self::CheckFailed => "check_failed",
+        }
+    }
+}
+
 /// One transaction event. The envelope fields are added when it is sent.
 #[derive(Clone)]
 pub struct TxEvent {
-    pub ev: &'static str,
+    pub ev: Ev,
     pub tx: Option<String>,
     pub cks: Option<String>,
     pub kind: Option<&'static str>,
-    pub reason: Option<&'static str>,
+    pub reason: Option<Reason>,
     pub extra: Value,
 }
 
 impl TxEvent {
     /// Returns an event named `ev` for the transaction, with no `kind`, `reason` or `extra`.
     pub fn new<N: Network>(
-        ev: &'static str,
+        ev: Ev,
         transaction_id: &N::TransactionID,
         checksum: Option<N::TransmissionChecksum>,
     ) -> Self {
@@ -143,11 +248,7 @@ impl TxEvent {
 
     /// Returns an event named `ev` with `extra` for a transaction transmission, or `None` for other
     /// transmissions.
-    pub fn for_transmission<N: Network>(
-        ev: &'static str,
-        transmission_id: &TransmissionID<N>,
-        extra: Value,
-    ) -> Option<Self> {
+    pub fn for_transmission<N: Network>(ev: Ev, transmission_id: &TransmissionID<N>, extra: Value) -> Option<Self> {
         let transaction_id = transmission_id.transaction()?;
         Some(Self { extra, ..Self::new::<N>(ev, &transaction_id, transmission_id.checksum()) })
     }
@@ -167,10 +268,10 @@ impl TxEvent {
             Err(err) => {
                 let err = err.to_string();
                 let err = &err[..err.floor_char_boundary(MAX_ERR_BYTES)];
-                (Some("check_failed"), json!({ "site": site, "outcome": "err", "dur_us": dur_us, "err": err }))
+                (Some(Reason::CheckFailed), json!({ "site": site, "outcome": "err", "dur_us": dur_us, "err": err }))
             }
         };
-        Self { kind: Some(kind), reason, extra, ..Self::new::<N>("checked", transaction_id, checksum) }
+        Self { kind: Some(kind), reason, extra, ..Self::new::<N>(Ev::Checked, transaction_id, checksum) }
     }
 }
 
@@ -184,18 +285,18 @@ struct Envelope<'a> {
     seq: u64,
     ts_ms: u64,
     height: u32,
-    ev: &'a str,
+    ev: Ev,
     tx: Option<&'a str>,
     cks: Option<&'a str>,
     kind: Option<&'a str>,
-    reason: Option<&'a str>,
+    reason: Option<Reason>,
     peer: Option<&'a str>,
     extra: &'a Value,
 }
 
 /// The events of one block, for the background thread.
 struct BlockJob {
-    ev: &'static str,
+    ev: Ev,
     hash: String,
     num_events: u64,
     stamp: (u32, u64),
@@ -305,7 +406,7 @@ impl TxEvents {
         }
     }
 
-    fn heartbeat(&self) {
+    fn heartbeat_event(&self) -> TxEvent {
         let rest_status: serde_json::Map<String, Value> = self
             .rest_status
             .iter()
@@ -319,7 +420,7 @@ impl TxEvents {
             "emit_dropped": self.dropped.load(Ordering::Relaxed),
             "rest_status": rest_status,
         });
-        self.emit(TxEvent { ev: "heartbeat", tx: None, cks: None, kind: None, reason: None, extra });
+        TxEvent { ev: Ev::Heartbeat, tx: None, cks: None, kind: None, reason: None, extra }
     }
 
     /// Sends a heartbeat every `HEARTBEAT_INTERVAL`, and the events of the queued blocks. The
@@ -329,7 +430,7 @@ impl TxEvents {
         let mut next_heartbeat = Instant::now();
         loop {
             if Instant::now() >= next_heartbeat {
-                self.heartbeat();
+                self.emit(self.heartbeat_event());
                 next_heartbeat = Instant::now() + HEARTBEAT_INTERVAL;
             }
             // The sender lives as long as `self`, so this fails only on a timeout.
@@ -355,7 +456,7 @@ pub fn transaction_checksum<N: Network>(transaction: &Transaction<N>) -> Option<
 /// `extra.outcome` set to `accepted`, `rejected` or `aborted`. This copies the ids and checksums, and
 /// clones only the transactions whose id or checksum is costly to find. The background thread builds
 /// and sends the events.
-pub fn emit_block_outcomes<N: Network>(ev: &'static str, block: &Block<N>) {
+pub fn emit_block_outcomes<N: Network>(ev: Ev, block: &Block<N>) {
     let Some(events) = get() else {
         return;
     };
@@ -458,7 +559,7 @@ mod tests {
         }
     }
 
-    fn sample_event(ev: &'static str) -> TxEvent {
+    fn sample_event(ev: Ev) -> TxEvent {
         let transaction_id = <CurrentNetwork as Network>::TransactionID::default();
         TxEvent::new::<CurrentNetwork>(ev, &transaction_id, Some(7))
     }
@@ -467,7 +568,7 @@ mod tests {
     fn test_encode_envelope() {
         let events = sample_events((Ipv4Addr::LOCALHOST, 9).into());
         let mut line = Vec::new();
-        events.encode(&sample_event("mempool_inserted"), stamp(), &mut line);
+        events.encode(&sample_event(Ev::MempoolInserted), stamp(), &mut line);
         let value: Value = serde_json::from_slice(&line).unwrap();
         for field in
             ["v", "net", "node", "ntype", "boot", "seq", "ts_ms", "height", "ev", "tx", "cks", "kind", "reason", "peer"]
@@ -477,6 +578,122 @@ mod tests {
         assert_eq!(value["ev"], "mempool_inserted");
         assert_eq!(value["cks"], "7");
         assert!(value["tx"].as_str().unwrap().starts_with("at1"));
+    }
+
+    const FIXTURE_PATH: &str = "node/metrics/tests/fixtures/tx_events.jsonl";
+    const FIXTURE: &str = include_str!("../tests/fixtures/tx_events.jsonl");
+
+    /// Returns events named `ev`, one for each shape in use.
+    fn representative_events(events: &TxEvents, ev: Ev) -> Vec<TxEvent> {
+        let transaction_id = <CurrentNetwork as Network>::TransactionID::default();
+        let transmission_id = TransmissionID::<CurrentNetwork>::Transaction(transaction_id, 7);
+        let event = |kind| TxEvent { kind, ..TxEvent::new::<CurrentNetwork>(ev, &transaction_id, Some(7)) };
+        let claimed = |reason| TxEvent {
+            reason,
+            extra: json!({ "via": "router" }),
+            ..TxEvent::new::<CurrentNetwork>(ev, &transaction_id, None)
+        };
+        let checked = |site, kind, result: Result<(), &str>| {
+            TxEvent::checked::<CurrentNetwork, _, _>(
+                site,
+                kind,
+                &transaction_id,
+                Some(7),
+                &result,
+                Duration::from_micros(1500),
+            )
+        };
+        let with_reasons = |kind, reasons: &[Reason]| -> Vec<TxEvent> {
+            reasons.iter().map(|reason| TxEvent { reason: Some(*reason), ..event(kind) }).collect()
+        };
+        match ev {
+            Ev::Received => vec![TxEvent { extra: json!({ "via": "rest" }), ..event(Some("execute")) }, claimed(None)],
+            Ev::Checked => vec![checked("worker", "execute", Ok(())), checked("rest", "deploy", Err("invalid proof"))],
+            Ev::Gossiped => vec![TxEvent { extra: json!({ "site": "rest" }), ..event(Some("execute")) }, TxEvent {
+                extra: json!({ "site": "validator" }),
+                ..event(None)
+            }],
+            Ev::RouterDropped => [Reason::Syncing, Reason::Seen, Reason::BadEncoding, Reason::IdMismatch]
+                .map(|reason| claimed(Some(reason)))
+                .into(),
+            Ev::MempoolInserted => {
+                vec![TxEvent { extra: json!({ "prio_fee": 5000, "qlen": 3 }), ..event(Some("execute")) }]
+            }
+            Ev::MempoolRefused => with_reasons(Some("execute"), &[
+                Reason::RecentlySeen,
+                Reason::AlreadyQueued,
+                Reason::InLedger,
+                Reason::RejectedPoolFull,
+                Reason::RejectedFeeTransaction,
+            ]),
+            Ev::MempoolEvicted => with_reasons(Some("execute"), &[Reason::OldestZeroFee, Reason::LowerFee])
+                .into_iter()
+                .map(|evicted| TxEvent { extra: json!({ "by": "at1by", "by_fee": 5000 }), ..evicted })
+                .collect(),
+            Ev::Fetched => TxEvent::for_transmission(ev, &transmission_id, json!({ "site": "peer_proposal" }))
+                .into_iter()
+                .collect(),
+            Ev::ProposeDropped => with_reasons(Some("execute"), &[Reason::SpendCost, Reason::SpendOverflow]),
+            Ev::Proposed => {
+                TxEvent::for_transmission(ev, &transmission_id, json!({ "round": 7 })).into_iter().collect()
+            }
+            Ev::Certified => {
+                TxEvent::for_transmission(ev, &transmission_id, json!({ "round": 7, "author": "aleo1author" }))
+                    .into_iter()
+                    .collect()
+            }
+            Ev::Speculated => {
+                vec![TxEvent { extra: json!({ "outcome": "accepted", "height": 9 }), ..event(Some("execute")) }]
+            }
+            Ev::InBlock => vec![
+                TxEvent { extra: json!({ "outcome": "rejected", "height": 9 }), ..event(Some("deploy")) },
+                TxEvent { extra: json!({ "outcome": "aborted", "height": 9 }), ..event(None) },
+            ],
+            Ev::Heartbeat => {
+                let idle = events.heartbeat_event();
+                events.count_rest_status(422);
+                events.dropped.fetch_add(2, Ordering::Relaxed);
+                vec![idle, events.heartbeat_event()]
+            }
+        }
+    }
+
+    #[test]
+    fn test_wire_format_matches_fixture() {
+        let events = sample_events((Ipv4Addr::LOCALHOST, 9).into());
+        let representatives: Vec<TxEvent> =
+            Ev::ALL.into_iter().flat_map(|ev| representative_events(&events, ev)).collect();
+        for reason in Reason::ALL {
+            assert!(representatives.iter().any(|event| event.reason == Some(reason)), "no event with {reason:?}");
+        }
+        let actual: Vec<String> = representatives
+            .iter()
+            .map(|event| {
+                let mut line = Vec::new();
+                events.encode(event, (1234567, 1793000000000), &mut line);
+                String::from_utf8_lossy(&line).into_owned()
+            })
+            .collect();
+        assert!(
+            actual.iter().map(String::as_str).eq(FIXTURE.lines()),
+            "The transaction events no longer encode as {FIXTURE_PATH}. External services parse these lines, so \
+             this is a change to the wire format. Follow the rule for `v` in the documentation of the `tx_events` \
+             module, update tx-events-sink/README.md, and replace the fixture with:\n{}",
+            actual.join("\n")
+        );
+    }
+
+    #[test]
+    fn test_all_is_in_declaration_order() {
+        assert!(Ev::ALL.into_iter().enumerate().all(|(i, ev)| ev as usize == i));
+        assert!(Reason::ALL.into_iter().enumerate().all(|(i, reason)| reason as usize == i));
+    }
+
+    #[test]
+    fn test_reason_as_str_matches_serialization() {
+        for reason in Reason::ALL {
+            assert_eq!(serde_json::to_value(reason).ok(), Some(Value::from(reason.as_str())));
+        }
     }
 
     #[test]
@@ -491,7 +708,7 @@ mod tests {
             &result,
             Duration::ZERO,
         );
-        assert_eq!(event.reason, Some("check_failed"));
+        assert_eq!(event.reason, Some(Reason::CheckFailed));
         assert!(event.extra["err"].as_str().unwrap().len() <= MAX_ERR_BYTES);
     }
 
@@ -500,7 +717,7 @@ mod tests {
         let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         receiver.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let events = sample_events(receiver.local_addr().unwrap());
-        events.emit_all((0..20).map(|_| sample_event("in_block")));
+        events.emit_all((0..20).map(|_| sample_event(Ev::InBlock)));
 
         let mut seqs = Vec::new();
         let mut buffer = [0u8; 65536];

@@ -1331,15 +1331,15 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         metrics::increment_counter_1(metrics::router::UNCONFIRMED_TRANSACTIONS_PROPAGATED, "site", "rest");
         #[cfg(feature = "metrics")]
         if let Some(events) = metrics::tx_events::get() {
-            use metrics::tx_events::{TxEvent, json};
+            use metrics::tx_events::{Ev, TxEvent, json};
             let kind = metrics::transaction_kind(&tx);
             let checked = check_elapsed
                 .map(|elapsed| TxEvent::checked::<N, (), &str>("rest", kind, &tx_id, checksum, &Ok(()), elapsed));
             let kind = Some(kind);
             let received =
-                TxEvent { kind, extra: json!({ "via": "rest" }), ..TxEvent::new::<N>("received", &tx_id, checksum) };
+                TxEvent { kind, extra: json!({ "via": "rest" }), ..TxEvent::new::<N>(Ev::Received, &tx_id, checksum) };
             let gossiped =
-                TxEvent { kind, extra: json!({ "site": "rest" }), ..TxEvent::new::<N>("gossiped", &tx_id, checksum) };
+                TxEvent { kind, extra: json!({ "site": "rest" }), ..TxEvent::new::<N>(Ev::Gossiped, &tx_id, checksum) };
             events.emit_all(checked.into_iter().chain([received, gossiped]));
         }
 

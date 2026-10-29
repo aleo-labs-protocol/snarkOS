@@ -285,7 +285,10 @@ impl Sink {
             return;
         }
         let Some(tx) = event.tx.as_deref() else {
-            store.counters.malformed += 1;
+            // An event name that the sink does not know may carry no transaction.
+            if event.stage().is_some() {
+                store.counters.malformed += 1;
+            }
             return;
         };
         if let Some(entry) = store.txs.get_mut(tx) {
@@ -565,6 +568,29 @@ mod tests {
         assert_eq!(status.status, "pending");
         assert_eq!(status.stage, Some("mempool"));
         assert_eq!(status.holders, BTreeSet::from(["n1".to_string()]));
+    }
+
+    #[test]
+    fn test_unknown_fields_and_values_are_ignored() {
+        let sink = Sink::new(limits(10, 10));
+        let datagram = [
+            line("n1", 0, "received", "at1x", Some("1"), None, json!({ "via": "rest" }))
+                .replace("\"v\":1", "\"v\":1,\"new_field\":[1]"),
+            line("n1", 1, "new_event", "at1x", Some("1"), Some("new_reason"), json!({ "new": 1 })),
+            line("n1", 2, "mempool_refused", "at1x", Some("1"), Some("new_reason"), json!({})),
+            line("n1", 3, "new_event", "at1x", None, None, json!({})).replace("\"tx\":\"at1x\"", "\"tx\":null"),
+        ]
+        .join("\n");
+        sink.ingest(datagram.as_bytes());
+
+        let stats = sink.stats();
+        assert_eq!(stats["counters"]["events"], 4);
+        assert_eq!(stats["counters"]["malformed"], 0);
+        assert_eq!(sink.events("at1x").map(|body| body["events"].as_array().map_or(0, Vec::len)), Some(3));
+        let Some(status) = sink.status("at1x") else { panic!("at1x has no status") };
+        assert_eq!(status.status, "pending");
+        assert_eq!(status.stage, Some("seen"));
+        assert_eq!(status.last_drop, None);
     }
 
     #[test]
