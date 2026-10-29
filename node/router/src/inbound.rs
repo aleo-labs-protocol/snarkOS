@@ -156,7 +156,13 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
                 // Process the block response.
                 let node = self.clone();
                 match spawn_blocking(move || {
-                    node.block_response(peer_ip, request.start_height, blocks.0, latest_consensus_version)
+                    node.block_response(
+                        peer_ip,
+                        request.start_height,
+                        request.end_height,
+                        blocks.0,
+                        latest_consensus_version,
+                    )
                 })
                 .await?
                 {
@@ -345,6 +351,7 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
         &self,
         peer_ip: SocketAddr,
         start_height: u32,
+        end_height: u32,
         blocks: Vec<Block<N>>,
         latest_consensus_version: Option<ConsensusVersion>,
     ) -> bool;

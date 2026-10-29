@@ -234,10 +234,12 @@ impl<N: Network> Sync<N> {
         // which causes the `rx_block_sync_advance_with_sync_blocks.recv()` call below to return.
         let self_ = self.clone();
         self.spawn(async move {
-            while let Some((peer_ip, start_height, blocks, latest_consensus_version, callback)) =
+            while let Some((peer_ip, start_height, end_height, blocks, latest_consensus_version, callback)) =
                 rx_block_sync_insert_block_response.recv().await
             {
-                let result = self_.insert_block_response(peer_ip, start_height, blocks, latest_consensus_version).await;
+                let result = self_
+                    .insert_block_response(peer_ip, start_height, end_height, blocks, latest_consensus_version)
+                    .await;
 
                 //TODO remove this once channels are gone
                 if let Err(err) = &result {
@@ -320,10 +322,11 @@ impl<N: Network> Sync<N> {
         &self,
         peer_ip: SocketAddr,
         start_height: u32,
+        end_height: u32,
         blocks: Vec<Block<N>>,
         latest_consensus_version: Option<ConsensusVersion>,
     ) -> Result<(), InsertBlockResponseError<N>> {
-        self.block_sync.insert_block_responses(peer_ip, start_height, blocks, latest_consensus_version)
+        self.block_sync.insert_block_responses(peer_ip, start_height, end_height, blocks, latest_consensus_version)
 
         // No need to advance block sync here, as the new response will
         // notify the incoming task.

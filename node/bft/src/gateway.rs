@@ -786,7 +786,13 @@ impl<N: Network> Gateway<N> {
                     blocks.ensure_response_is_well_formed(peer_ip, request.start_height, request.end_height)?;
                     // Send the blocks to the sync module.
                     match sync_sender
-                        .insert_block_response(peer_ip, request.start_height, blocks.0, latest_consensus_version)
+                        .insert_block_response(
+                            peer_ip,
+                            request.start_height,
+                            request.end_height,
+                            blocks.0,
+                            latest_consensus_version,
+                        )
                         .await
                     {
                         Ok(_) => Ok(true),

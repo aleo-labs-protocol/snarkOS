@@ -182,6 +182,7 @@ pub struct SyncSender<N: Network> {
     pub tx_block_sync_insert_block_response: mpsc::Sender<(
         SocketAddr,
         u32,
+        u32,
         Vec<Block<N>>,
         Option<ConsensusVersion>,
         oneshot::Sender<Result<(), InsertBlockResponseError<N>>>,
@@ -211,6 +212,7 @@ impl<N: Network> SyncSender<N> {
         &self,
         peer_ip: SocketAddr,
         start_height: u32,
+        end_height: u32,
         blocks: Vec<Block<N>>,
         latest_consensus_version: Option<ConsensusVersion>,
     ) -> Result<(), InsertBlockResponseError<N>> {
@@ -222,7 +224,7 @@ impl<N: Network> SyncSender<N> {
         // in one of the loops in [`Sync::run()`] to return.
         if let Err(err) = self
             .tx_block_sync_insert_block_response
-            .send((peer_ip, start_height, blocks, latest_consensus_version, callback_sender))
+            .send((peer_ip, start_height, end_height, blocks, latest_consensus_version, callback_sender))
             .await
         {
             return Err(anyhow!("Failed to send block response - {err}").into());
@@ -240,6 +242,7 @@ impl<N: Network> SyncSender<N> {
 pub struct SyncReceiver<N: Network> {
     pub rx_block_sync_insert_block_response: mpsc::Receiver<(
         SocketAddr,
+        u32,
         u32,
         Vec<Block<N>>,
         Option<ConsensusVersion>,

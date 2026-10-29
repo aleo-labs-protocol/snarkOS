@@ -219,11 +219,12 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Client<N, C> {
         &self,
         peer_ip: SocketAddr,
         start_height: u32,
+        end_height: u32,
         blocks: Vec<Block<N>>,
         latest_consensus_version: Option<ConsensusVersion>,
     ) -> bool {
         // We do not need to explicitly sync here because insert_block_response, will wake up the sync task.
-        match self.sync.insert_block_responses(peer_ip, start_height, blocks, latest_consensus_version) {
+        match self.sync.insert_block_responses(peer_ip, start_height, end_height, blocks, latest_consensus_version) {
             Ok(_) => true,
             Err(err) if err.is_benign() => {
                 let err: anyhow::Error = err.into();
