@@ -48,6 +48,7 @@ use rand::seq::{IteratorRandom, SliceRandom};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque, hash_map},
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    ops::Range,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -742,14 +743,19 @@ impl<N: Network> BlockSync<N> {
             let Some(last_height) = blocks.as_slice().last().map(|b| b.height()) else {
                 debug!("Peer {peer_ip} cannot serve blocks {start_height}..{end_height}; re-queuing them");
                 // Holding `locators` keeps a concurrent `remove_peer` from leaving the entry behind.
+                // A node answers empty for any range past its tip (`blocks_or_empty`); only an empty
+                // reply for a range at or below the tip is pruning evidence.
                 let locators = self.locators.read();
-                if locators.contains_key(&peer_ip) {
+                if locators
+                    .get(&peer_ip)
+                    .is_some_and(|locators| end_height <= locators.latest_locator_height().saturating_add(1))
+                {
                     self.answered_empty.lock().insert(peer_ip);
                 }
                 drop(locators);
-                // The reply answers the whole range. The peer may still answer its requests above
-                // it; re-sending one of them to it would collide with the reply in flight.
-                self.remove_block_requests_to_peer_below(&peer_ip, end_height);
+                // The peer may still answer its other requests; re-sending one of them to it would
+                // collide with the reply in flight.
+                self.remove_block_requests_to_peer_in(&peer_ip, start_height..end_height);
                 return Err(InsertBlockResponseError::EmptyBlockResponse);
             };
 
@@ -1568,19 +1574,19 @@ impl<N: Network> BlockSync<N> {
     /// This is used when disconnecting from a peer or when a peer sends invalid block responses.
     fn remove_block_requests_to_peer(&self, peer_ip: &SocketAddr) {
         trace!("Block sync is removing all block requests to peer {peer_ip}...");
-        self.remove_block_requests_to_peer_below(peer_ip, u32::MAX);
+        self.remove_block_requests_to_peer_in(peer_ip, 0..u32::MAX);
     }
 
-    /// Removes the block requests to the given peer IP below `end_height`, as in
+    /// Removes the block requests to the given peer IP in `range`, as in
     /// [`Self::remove_block_requests_to_peer`].
-    fn remove_block_requests_to_peer_below(&self, peer_ip: &SocketAddr, end_height: u32) {
+    fn remove_block_requests_to_peer_in(&self, peer_ip: &SocketAddr, range: Range<u32>) {
         let mut heights = vec![];
         let mut removed_requests = vec![];
 
         // Remove the peer IP from the requests map. If any request entry is now empty,
         // and its corresponding response entry is also empty, then remove that request entry altogether.
         self.requests.write().retain(|height, e| {
-            if *height >= end_height {
+            if !range.contains(height) {
                 return true;
             }
             let had_peer = e.sync_ips_mut().swap_remove(peer_ip);
@@ -2607,6 +2613,31 @@ mod tests {
         assert!(requests.values().all(|request| request.sync_ips().contains(&peer_ip)));
     }
 
+    /// Tests that an empty response releases only the answered range: the peer's earlier in-flight
+    /// chunk stays assigned to it, so its reply to that chunk is still accepted.
+    #[test]
+    fn test_empty_block_response_releases_only_answered_range() {
+        let sync = sample_sync_at_height(0);
+        let peer_ip = sample_peer_ip(1);
+        sync.update_peer_locators(peer_ip, &sample_block_locators(10)).unwrap();
+
+        // Two in-flight chunks to the peer: blocks 1..6 and blocks 6..11.
+        let (requests, _) = sync.prepare_block_requests().pop().unwrap();
+        for (height, (hash, previous_hash, _)) in requests {
+            sync.insert_block_request(height, (hash, previous_hash, [peer_ip].into_iter().collect())).unwrap();
+        }
+        assert_eq!(sync.requests.read().len(), 10);
+
+        // The peer answers the second chunk empty.
+        assert!(sync.insert_block_responses(peer_ip, 6, 11, vec![], None).unwrap_err().is_benign());
+
+        // The second chunk was re-queued; the peer is still assigned the first.
+        assert_eq!(sync.failed_requests.lock().keys().copied().collect::<Vec<_>>(), (6..11).collect::<Vec<_>>());
+        let requests = sync.requests.read();
+        assert_eq!(requests.keys().copied().collect::<Vec<_>>(), (1..6).collect::<Vec<_>>());
+        assert!(requests.values().all(|request| request.sync_ips().contains(&peer_ip)));
+    }
+
     /// Tests that peers are filtered by the first height to request, not the next ledger height:
     /// during catch-up the two are far apart, and a peer whose assumed floor lies between them can
     /// serve the request.
@@ -2852,6 +2883,29 @@ mod tests {
         assert!(sync.answered_empty.lock().is_empty());
         empty_response().unwrap_err();
         assert!(sync.answered_empty.lock().is_empty());
+    }
+
+    /// Tests that an empty response the peer's regressed tip already explains does not skip the peer:
+    /// it is still offered the heights below its new tip.
+    #[test]
+    fn test_empty_block_response_above_regressed_tip_does_not_skip_peer() {
+        let sync = sample_sync_at_height(0);
+        let peer_ip = sample_peer_ip(1);
+        sync.update_peer_locators(peer_ip, &sample_block_locators(10)).unwrap();
+        let (requests, _) = sync.prepare_block_requests().pop().unwrap();
+        for (height, (hash, previous_hash, _)) in requests.into_iter().filter(|(height, _)| (6..11).contains(height)) {
+            sync.insert_block_request(height, (hash, previous_hash, [peer_ip].into_iter().collect())).unwrap();
+        }
+
+        // The peer's tip regresses to 8, inside the range, then it answers 6..11 empty.
+        sync.update_peer_locators(peer_ip, &sample_block_locators(8)).unwrap();
+        assert!(sync.insert_block_responses(peer_ip, 6, 11, vec![], None).unwrap_err().is_benign());
+
+        // The peer is not marked, and the re-queued chunk is re-issued to it up to its new tip.
+        assert!(sync.answered_empty.lock().is_empty());
+        let (requests, sync_peers) = sync.prepare_block_requests().pop().unwrap();
+        assert_eq!(requests.iter().map(|(height, _)| *height).collect::<Vec<_>>(), (6..9).collect::<Vec<_>>());
+        assert!(sync_peers.contains_key(&peer_ip));
     }
 
     /// Tests that a prepared batch is not sent to a peer whose tip regressed below its start.
