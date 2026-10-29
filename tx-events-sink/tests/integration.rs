@@ -33,7 +33,7 @@ async fn start_sink() -> (SocketAddr, SocketAddr) {
     let udp = TokioUdpSocket::bind("127.0.0.1:0").await.unwrap();
     let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addresses = (udp.local_addr().unwrap(), http.local_addr().unwrap());
-    let limits = Limits { max_txs: NonZeroUsize::new(100).unwrap(), max_events_per_tx: 64 };
+    let limits = Limits { max_txs: NonZeroUsize::new(100).unwrap(), max_events_per_tx: NonZeroUsize::new(64).unwrap() };
     tokio::spawn(run(udp, http, Arc::new(Sink::new(limits))));
     addresses
 }

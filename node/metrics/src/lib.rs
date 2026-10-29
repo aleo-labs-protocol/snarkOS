@@ -310,24 +310,16 @@ impl TransactionCheckTimer {
     }
 
     /// Records the check like [`Self::finish`], and emits it as a `checked` transaction event.
-    /// `checksum` is called only if transaction events are enabled.
     pub fn finish_and_emit<N: Network, T, E: std::fmt::Display>(
         self,
         result: &Result<T, E>,
         transaction_id: &N::TransactionID,
-        checksum: impl FnOnce() -> Option<N::TransmissionChecksum>,
+        checksum: Option<N::TransmissionChecksum>,
     ) {
         let (site, kind) = (self.site, self.kind);
         let elapsed = self.finish(result);
         if let Some(events) = tx_events::get() {
-            events.emit(tx_events::TxEvent::checked::<N, _, _>(
-                site,
-                kind,
-                transaction_id,
-                checksum(),
-                result,
-                elapsed,
-            ));
+            events.emit(tx_events::TxEvent::checked::<N, _, _>(site, kind, transaction_id, checksum, result, elapsed));
         }
     }
 }
@@ -346,15 +338,33 @@ pub fn record_mempool_transaction<N: Network>(
     transaction_id: &N::TransactionID,
     checksum: N::TransmissionChecksum,
     emit: bool,
-    from_router: bool,
+    via: &'static str,
 ) {
     increment_counter_2(consensus::MEMPOOL_TRANSACTIONS, "kind", kind, "outcome", outcome);
-    if let Some(events) = tx_events::get().filter(|_| emit && outcome != "accepted") {
+    if emit
+        && outcome != "accepted"
+        && let Some(events) = tx_events::get()
+    {
         events.emit(tx_events::TxEvent {
             kind: Some(kind),
             reason: Some(outcome),
-            extra: tx_events::json!({ "via": if from_router { "router" } else { "rest" } }),
+            extra: tx_events::json!({ "via": via }),
             ..tx_events::TxEvent::new::<N>("mempool_refused", transaction_id, Some(checksum))
+        });
+    }
+}
+
+/// Records a transaction propagated from `site`, and emits it as a `gossiped` transaction event.
+pub fn record_transaction_propagated<N: Network>(
+    site: &'static str,
+    transaction_id: &N::TransactionID,
+    checksum: Option<N::TransmissionChecksum>,
+) {
+    increment_counter_1(router::UNCONFIRMED_TRANSACTIONS_PROPAGATED, "site", site);
+    if let Some(events) = tx_events::get() {
+        events.emit(tx_events::TxEvent {
+            extra: tx_events::json!({ "site": site }),
+            ..tx_events::TxEvent::new::<N>("gossiped", transaction_id, checksum)
         });
     }
 }

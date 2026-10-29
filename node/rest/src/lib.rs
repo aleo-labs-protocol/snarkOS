@@ -465,7 +465,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         // Outside the rate limiter, so that rejected requests are counted too.
         #[cfg(feature = "metrics")]
         let routes = match metrics::tx_events::get() {
-            Some(_) => routes.layer(middleware::from_fn(count_transaction_broadcast_errors)),
+            Some(events) => routes.layer(middleware::from_fn_with_state(events, count_transaction_broadcast_errors)),
             None => routes,
         };
 
@@ -559,15 +559,15 @@ async fn record_rest_request(request: Request<Body>, next: middleware::Next) -> 
 
 /// Counts the error statuses of transaction broadcasts, for the transaction events heartbeat.
 #[cfg(feature = "metrics")]
-async fn count_transaction_broadcast_errors(request: Request<Body>, next: middleware::Next) -> Response {
+async fn count_transaction_broadcast_errors(
+    State(events): State<&'static metrics::tx_events::TxEvents>,
+    request: Request<Body>,
+    next: middleware::Next,
+) -> Response {
     let is_broadcast = request.uri().path() == "/transaction/broadcast";
     let response = next.run(request).await;
-    let status = response.status();
-    if is_broadcast
-        && (status.is_client_error() || status.is_server_error())
-        && let Some(events) = metrics::tx_events::get()
-    {
-        events.count_rest_status(status.as_u16());
+    if is_broadcast {
+        events.count_rest_status(response.status().as_u16());
     }
     response
 }

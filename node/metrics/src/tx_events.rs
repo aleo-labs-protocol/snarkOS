@@ -16,8 +16,8 @@
 //! Per-transaction events, sent as JSON lines over UDP to an address set with `--tx-events`.
 //!
 //! Delivery is best-effort: a send that fails is counted in the `emit_dropped` field of the next
-//! heartbeat and is otherwise ignored. Each line carries the
-//! process's `boot` id and a `seq` number, so a receiver can count lost events.
+//! heartbeat and is otherwise ignored. Each line carries the process's `boot` id and a `seq`
+//! number, so a receiver can count lost events.
 
 use serde::Serialize;
 pub use serde_json::{Value, json};
@@ -44,10 +44,10 @@ use std::{
 };
 
 /// The schema version in the `v` field.
-pub const SCHEMA_VERSION: u8 = 1;
+const SCHEMA_VERSION: u8 = 1;
 /// The size up to which lines are packed into one datagram. A datagram of this size is not
 /// fragmented on a path with a 1280-byte MTU or larger.
-pub const MAX_DATAGRAM_BYTES: usize = 1200;
+const MAX_DATAGRAM_BYTES: usize = 1200;
 /// The interval between heartbeats.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 /// The length to which error text in `extra.err` is truncated.
@@ -81,20 +81,23 @@ pub fn initialize(target: SocketAddr, net: &'static str, node: String, ntype: &'
     socket.set_nonblocking(true)?;
 
     let boot = format!("{:016x}", RandomState::new().hash_one(SystemTime::now()));
-    let events = TxEvents {
-        socket,
-        net,
-        node,
-        ntype,
-        boot,
-        seq: AtomicU64::new(0),
-        dropped: AtomicU64::new(0),
-        rest_status: std::array::from_fn(|_| AtomicU64::new(0)),
-    };
-    if TX_EVENTS.set(events).is_err() {
+    let mut fresh = false;
+    let events = TX_EVENTS.get_or_init(|| {
+        fresh = true;
+        TxEvents {
+            socket,
+            net,
+            node,
+            ntype,
+            boot,
+            seq: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
+            rest_status: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    });
+    if !fresh {
         return Err(io::Error::new(io::ErrorKind::AlreadyExists, "transaction events are already initialized"));
     }
-    let events = TX_EVENTS.get().ok_or_else(|| io::Error::other("transaction events are not initialized"))?;
     thread::Builder::new().name("tx-events".to_string()).spawn(move || events.run_heartbeat())?;
     Ok(())
 }
@@ -126,14 +129,15 @@ impl TxEvent {
         }
     }
 
-    /// Returns an event named `ev` for a transaction transmission, or `None` for other transmissions.
-    pub fn for_transmission<N: Network>(ev: &'static str, transmission_id: &TransmissionID<N>) -> Option<Self> {
-        match transmission_id {
-            TransmissionID::Transaction(transaction_id, checksum) => {
-                Some(Self::new::<N>(ev, transaction_id, Some(*checksum)))
-            }
-            _ => None,
-        }
+    /// Returns an event named `ev` with `extra` for a transaction transmission, or `None` for other
+    /// transmissions.
+    pub fn for_transmission<N: Network>(
+        ev: &'static str,
+        transmission_id: &TransmissionID<N>,
+        extra: Value,
+    ) -> Option<Self> {
+        let transaction_id = transmission_id.transaction()?;
+        Some(Self { extra, ..Self::new::<N>(ev, &transaction_id, transmission_id.checksum()) })
     }
 
     /// Returns a `checked` event for a transaction check at `site`.
@@ -288,20 +292,6 @@ impl TxEvents {
     }
 }
 
-/// Emits a `gossiped` event for a transaction propagated from `site`.
-pub fn emit_gossiped<N: Network>(
-    site: &'static str,
-    transaction_id: &N::TransactionID,
-    checksum: Option<N::TransmissionChecksum>,
-) {
-    if let Some(events) = get() {
-        events.emit(TxEvent {
-            extra: json!({ "site": site }),
-            ..TxEvent::new::<N>("gossiped", transaction_id, checksum)
-        });
-    }
-}
-
 /// Returns the transmission checksum of the transaction, as the memory pool and the BFT compute it.
 pub fn transaction_checksum<N: Network>(transaction: &Transaction<N>) -> Option<N::TransmissionChecksum> {
     Data::<Transaction<N>>::Buffer(transaction.to_bytes_le().ok()?.into()).to_checksum::<N>().ok()
@@ -313,7 +303,9 @@ pub fn emit_block_outcomes<N: Network>(ev: &'static str, block: &Block<N>) {
     let Some(events) = get() else {
         return;
     };
-    let mut checksums: HashMap<N::TransactionID, Vec<N::TransmissionChecksum>> = HashMap::new();
+    let num_transactions = block.transactions().len() + block.aborted_transaction_ids().len();
+    let mut checksums: HashMap<N::TransactionID, Vec<N::TransmissionChecksum>> =
+        HashMap::with_capacity(num_transactions);
     if let Authority::Quorum(subdag) = block.authority() {
         for transmission_id in subdag.transmission_ids() {
             if let TransmissionID::Transaction(transaction_id, checksum) = transmission_id {
@@ -322,7 +314,7 @@ pub fn emit_block_outcomes<N: Network>(ev: &'static str, block: &Block<N>) {
         }
     }
     let height = block.height();
-    let mut out = Vec::with_capacity(block.transactions().len() + block.aborted_transaction_ids().len());
+    let mut out = Vec::with_capacity(num_transactions);
     for confirmed in block.transactions().iter() {
         let Ok(transaction_id) = confirmed.to_unconfirmed_transaction_id() else {
             continue;

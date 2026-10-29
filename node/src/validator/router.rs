@@ -309,16 +309,12 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Validator<N, C> {
             }
         };
         #[cfg(feature = "metrics")]
-        snarkos_node_metrics::tx_events::emit_gossiped::<N>("validator", &serialized.transaction_id, Some(checksum));
+        let transaction_id = serialized.transaction_id;
         let message = Message::UnconfirmedTransaction(serialized);
         // Propagate the "UnconfirmedTransaction" to the connected validators.
         self.propagate_to_validators(message, &[peer_ip]);
         #[cfg(feature = "metrics")]
-        snarkos_node_metrics::increment_counter_1(
-            snarkos_node_metrics::router::UNCONFIRMED_TRANSACTIONS_PROPAGATED,
-            "site",
-            "validator",
-        );
+        snarkos_node_metrics::record_transaction_propagated::<N>("validator", &transaction_id, Some(checksum));
         true
     }
 }

@@ -32,7 +32,7 @@ struct Args {
     max_txs: NonZeroUsize,
     /// The number of events kept per transaction
     #[clap(long, default_value = "64")]
-    max_events_per_tx: usize,
+    max_events_per_tx: NonZeroUsize,
 }
 
 #[tokio::main]

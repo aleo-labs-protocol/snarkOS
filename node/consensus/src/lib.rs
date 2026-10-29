@@ -404,109 +404,90 @@ impl<N: Network> Consensus<N> {
         let checksum = Data::<Transaction<N>>::Buffer(transaction.to_bytes_le()?.into()).to_checksum::<N>()?;
         #[cfg(feature = "metrics")]
         let kind = metrics::transaction_kind(&transaction);
+        #[cfg(feature = "metrics")]
+        let via = if from_router { "router" } else { "rest" };
         // Queue the unconfirmed transaction.
         {
             let transaction_id = transaction.id();
+            // Records the memory pool outcome; `returns_ok` is set if the caller receives `Ok`.
+            #[cfg(feature = "metrics")]
+            let record = |outcome, returns_ok: bool| {
+                metrics::record_mempool_transaction::<N>(
+                    kind,
+                    outcome,
+                    &transaction_id,
+                    checksum,
+                    from_router || returns_ok,
+                    via,
+                )
+            };
 
             // Check that the transaction is not a fee transaction.
             if transaction.is_fee() {
                 #[cfg(feature = "metrics")]
-                metrics::record_mempool_transaction::<N>(
-                    kind,
-                    "rejected_fee_transaction",
-                    &transaction_id,
-                    checksum,
-                    from_router,
-                    from_router,
-                );
+                record("rejected_fee_transaction", false);
                 bail!("Transaction '{}' is a fee transaction (skipping)", fmt_id(transaction_id));
             }
             // Check if the transaction was recently seen.
             if self.seen_transactions.lock().put(transaction_id, ()).is_some() {
                 #[cfg(feature = "metrics")]
-                metrics::record_mempool_transaction::<N>(
-                    kind,
-                    "recently_seen",
-                    &transaction_id,
-                    checksum,
-                    true,
-                    from_router,
-                );
+                record("recently_seen", true);
                 // If the transaction was recently seen, return early.
                 return Ok(checksum);
             }
             // Check if the transaction already exists in the ledger.
             if self.ledger.contains_transmission(&TransmissionID::Transaction(transaction_id, checksum))? {
                 #[cfg(feature = "metrics")]
-                metrics::record_mempool_transaction::<N>(
-                    kind,
-                    "in_ledger",
-                    &transaction_id,
-                    checksum,
-                    from_router,
-                    from_router,
-                );
+                record("in_ledger", false);
                 bail!("Transaction '{}' exists in the ledger (skipping)", fmt_id(transaction_id));
             }
             // Check that the transaction is not in the mempool.
             if self.contains_transaction(&transaction_id) {
                 #[cfg(feature = "metrics")]
-                metrics::record_mempool_transaction::<N>(
-                    kind,
-                    "already_queued",
-                    &transaction_id,
-                    checksum,
-                    from_router,
-                    from_router,
-                );
+                record("already_queued", false);
                 bail!("Transaction '{}' exists in the memory pool", fmt_id(transaction_id));
             }
             // Add the transaction to the memory pool.
             let priority_fee = transaction.priority_fee_amount()?;
-            let insertion = self.transactions_queue.write().insert(transaction_id, transaction, priority_fee);
+            let mut queue = self.transactions_queue.write();
+            let insertion = queue.insert(transaction_id, transaction, priority_fee);
             #[cfg(feature = "metrics")]
-            {
-                let (outcome, emit) = match &insertion {
-                    Ok((QueueInsertion::Inserted | QueueInsertion::InsertedWithEviction, _)) => ("accepted", false),
-                    Ok((QueueInsertion::Duplicate, _)) => ("already_queued", true),
-                    // The queue returns an error only when it is full.
-                    Err(_) => ("rejected_pool_full", from_router),
-                };
-                metrics::record_mempool_transaction::<N>(kind, outcome, &transaction_id, checksum, emit, from_router);
-            }
-            // A duplicate was counted and tracked when its first copy was queued.
+            let qlen = metrics::tx_events::get().map(|_| queue.len());
+            drop(queue);
             #[cfg(feature = "metrics")]
-            if let Ok((QueueInsertion::Inserted | QueueInsertion::InsertedWithEviction, evicted)) = &insertion {
-                metrics::increment_counter(metrics::consensus::UNCONFIRMED_TRANSACTIONS);
-                let timestamp = snarkos_node_bft::helpers::now();
-                self.transmissions_tracker
-                    .lock()
-                    .insert(TransmissionID::Transaction(transaction_id, checksum), timestamp);
-                if let Some(events) = metrics::tx_events::get() {
-                    if let Some((evicted_id, evicted)) = evicted {
-                        let evicted_fee = evicted.priority_fee_amount().map(|fee| *fee).unwrap_or_default();
+            match &insertion {
+                Ok((QueueInsertion::Inserted | QueueInsertion::InsertedWithEviction, evicted)) => {
+                    record("accepted", false);
+                    metrics::increment_counter(metrics::consensus::UNCONFIRMED_TRANSACTIONS);
+                    let timestamp = snarkos_node_bft::helpers::now();
+                    self.transmissions_tracker
+                        .lock()
+                        .insert(TransmissionID::Transaction(transaction_id, checksum), timestamp);
+                    if let Some(events) = metrics::tx_events::get() {
+                        if let Some((evicted_id, evicted)) = evicted {
+                            let evicted_fee = evicted.priority_fee_amount().map(|fee| *fee).unwrap_or_default();
+                            events.emit(metrics::tx_events::TxEvent {
+                                kind: Some(metrics::transaction_kind(evicted)),
+                                reason: Some(if evicted_fee == 0 { "oldest_zero_fee" } else { "lower_fee" }),
+                                extra: metrics::tx_events::json!({ "by": transaction_id.to_string(), "by_fee": *priority_fee }),
+                                ..metrics::tx_events::TxEvent::new::<N>(
+                                    "mempool_evicted",
+                                    evicted_id,
+                                    metrics::tx_events::transaction_checksum(evicted),
+                                )
+                            });
+                        }
                         events.emit(metrics::tx_events::TxEvent {
-                            kind: Some(metrics::transaction_kind(evicted)),
-                            reason: Some(if evicted_fee == 0 { "oldest_zero_fee" } else { "lower_fee" }),
-                            extra: metrics::tx_events::json!({ "by": transaction_id.to_string(), "by_fee": *priority_fee }),
-                            ..metrics::tx_events::TxEvent::new::<N>(
-                                "mempool_evicted",
-                                evicted_id,
-                                metrics::tx_events::transaction_checksum(evicted),
-                            )
+                            kind: Some(kind),
+                            extra: metrics::tx_events::json!({ "via": via, "prio_fee": *priority_fee, "qlen": qlen }),
+                            ..metrics::tx_events::TxEvent::new::<N>("mempool_inserted", &transaction_id, Some(checksum))
                         });
                     }
-                    let qlen = self.transactions_queue.read().len();
-                    events.emit(metrics::tx_events::TxEvent {
-                        kind: Some(kind),
-                        extra: metrics::tx_events::json!({
-                            "via": if from_router { "router" } else { "rest" },
-                            "prio_fee": *priority_fee,
-                            "qlen": qlen,
-                        }),
-                        ..metrics::tx_events::TxEvent::new::<N>("mempool_inserted", &transaction_id, Some(checksum))
-                    });
                 }
+                // A duplicate was counted and tracked when its first copy was queued.
+                Ok((QueueInsertion::Duplicate, _)) => record("already_queued", true),
+                // The queue returns an error only when it is full.
+                Err(_) => record("rejected_pool_full", false),
             }
             insertion?;
             trace!("Received unconfirmed transaction '{}' in the queue", fmt_id(transaction_id));

@@ -411,10 +411,13 @@ impl<N: Network> Worker<N> {
             let site = if enforce_capacity_limit { "worker_ping" } else { "peer_proposal" };
             #[cfg(feature = "metrics")]
             if let Some(events) = metrics::tx_events::get()
-                && let Some(event) = metrics::tx_events::TxEvent::for_transmission("fetched", &transmission_id)
+                && let Some(event) = metrics::tx_events::TxEvent::for_transmission(
+                    "fetched",
+                    &transmission_id,
+                    metrics::tx_events::json!({ "site": site }),
+                )
             {
-                events
-                    .emit(metrics::tx_events::TxEvent { extra: metrics::tx_events::json!({ "site": site }), ..event });
+                events.emit(event);
             }
             // Eagerly verify a newly-inserted execution to warm the verification cache.
             if let Some((tx_id, tx)) = execution_to_verify {
@@ -424,7 +427,7 @@ impl<N: Network> Worker<N> {
                     let timer = metrics::TransactionCheckTimer::start(site, &tx);
                     let _result = self_.ledger.check_transaction_basic(tx_id, tx).await;
                     #[cfg(feature = "metrics")]
-                    timer.finish_and_emit::<N, _, _>(&_result, &tx_id, || transmission_id.checksum());
+                    timer.finish_and_emit::<N, _, _>(&_result, &tx_id, transmission_id.checksum());
                 });
             }
             trace!(
@@ -506,7 +509,7 @@ impl<N: Network> Worker<N> {
         let timer = metrics::TransactionCheckTimer::start("worker", &transaction);
         let result = self.ledger.check_transaction_basic(transaction_id, transaction).await;
         #[cfg(feature = "metrics")]
-        timer.finish_and_emit::<N, _, _>(&result, &transaction_id, || Some(checksum));
+        timer.finish_and_emit::<N, _, _>(&result, &transaction_id, Some(checksum));
         result?;
         // Adds the transaction to the ready queue.
         if self.ready.write().insert(transmission_id, transmission) {

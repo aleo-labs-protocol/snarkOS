@@ -1255,10 +1255,17 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         // The buffer is initially roughly sized to hold a `transfer_public`,
         // most transactions will be smaller and this reduces unnecessary allocations.
         // TODO: Should this be a blocking task?
-        let buffer = Vec::with_capacity(3000);
-        if tx.write_le(LimitedWriter::new(buffer, N::LATEST_MAX_TRANSACTION_SIZE())).is_err() {
+        let mut buffer = Vec::with_capacity(3000);
+        if tx.write_le(LimitedWriter::new(&mut buffer, N::LATEST_MAX_TRANSACTION_SIZE())).is_err() {
             return Err(RestError::bad_request(anyhow!("Transaction size exceeds the byte limit")));
         }
+        // Without consensus, transaction events take the checksum from the serialized transaction.
+        #[cfg(feature = "metrics")]
+        let serialized_checksum = (rest.consensus.is_none() && metrics::tx_events::get().is_some())
+            .then(move || Data::<Transaction<N>>::Buffer(buffer.into()).to_checksum::<N>().ok())
+            .flatten();
+        #[cfg(not(feature = "metrics"))]
+        drop(buffer);
 
         // Prepare the unconfirmed transaction message.
         let tx_id = tx.id();
@@ -1286,13 +1293,14 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             match tokio::task::spawn_blocking(move || {
                 // Hold the slot until verification finishes, even if the client disconnects.
                 let _verification_slot = verification_slot;
-                let started = std::time::Instant::now();
                 #[cfg(feature = "metrics")]
                 let timer = metrics::TransactionCheckTimer::start("rest", &tx);
                 let result = ledger.check_transaction_basic(&tx, None, &mut rand::rng());
                 #[cfg(feature = "metrics")]
-                timer.finish(&result);
-                result.map(|()| (tx, Some(started.elapsed())))
+                let elapsed = Some(timer.finish(&result));
+                #[cfg(not(feature = "metrics"))]
+                let elapsed = None::<std::time::Duration>;
+                result.map(|()| (tx, elapsed))
             })
             .await
             {
@@ -1328,7 +1336,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         #[cfg(feature = "metrics")]
         if let Some(events) = metrics::tx_events::get() {
             use metrics::tx_events::{TxEvent, json};
-            let checksum = checksum.or_else(|| metrics::tx_events::transaction_checksum(&tx));
+            let checksum = checksum.or(serialized_checksum);
             let kind = metrics::transaction_kind(&tx);
             let checked = check_elapsed
                 .map(|elapsed| TxEvent::checked::<N, (), &str>("rest", kind, &tx_id, checksum, &Ok(()), elapsed));

@@ -5436,6 +5436,7 @@ dependencies = [
  "axum",
  "clap",
  "lru 0.19.0",
+ "parking_lot",
  "serde",
  "serde_json",
  "snarkos-node-metrics",

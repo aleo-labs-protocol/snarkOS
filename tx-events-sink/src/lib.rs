@@ -27,12 +27,13 @@ use axum::{
     routing::get,
 };
 use lru::LruCache;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     num::NonZeroUsize,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::Arc,
 };
 use tokio::net::{TcpListener, UdpSocket};
 
@@ -131,7 +132,7 @@ pub struct Limits {
     /// The number of transactions kept; the least recently updated one is evicted first.
     pub max_txs: NonZeroUsize,
     /// The number of events kept per transaction; the oldest one is evicted first.
-    pub max_events_per_tx: usize,
+    pub max_events_per_tx: NonZeroUsize,
 }
 
 /// Counts of what the sink received and discarded.
@@ -223,35 +224,42 @@ pub struct Sink {
 impl Sink {
     pub fn new(limits: Limits) -> Self {
         let store = Store { txs: LruCache::new(limits.max_txs), nodes: BTreeMap::new(), counters: Counters::default() };
-        Self { store: Mutex::new(store), max_events_per_tx: limits.max_events_per_tx.max(1) }
-    }
-
-    fn lock(&self) -> MutexGuard<'_, Store> {
-        self.store.lock().unwrap_or_else(PoisonError::into_inner)
+        Self { store: Mutex::new(store), max_events_per_tx: limits.max_events_per_tx.get() }
     }
 
     /// Ingests one datagram of newline-delimited events.
     pub fn ingest(&self, datagram: &[u8]) {
-        let mut store = self.lock();
-        store.counters.datagrams += 1;
+        let mut events = Vec::new();
+        let mut malformed = 0;
         for line in datagram.split(|byte| *byte == b'\n') {
             if line.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
             match serde_json::from_slice::<Event>(line) {
-                Ok(event) => self.insert(&mut store, event),
-                Err(_) => store.counters.malformed += 1,
+                Ok(event) => events.push(event),
+                Err(_) => malformed += 1,
             }
+        }
+        let mut store = self.store.lock();
+        store.counters.datagrams += 1;
+        store.counters.malformed += malformed;
+        for event in events {
+            self.insert(&mut store, event);
         }
     }
 
     fn insert(&self, store: &mut Store, event: Event) {
-        if !store.nodes.contains_key(&event.node) && store.nodes.len() >= MAX_NODES {
+        if let Some(node) = store.nodes.get_mut(&event.node) {
+            node.record(&event);
+        } else if store.nodes.len() >= MAX_NODES {
             store.counters.rejected_nodes += 1;
             return;
+        } else {
+            let mut node = NodeStats::new(&event);
+            node.record(&event);
+            store.nodes.insert(event.node.clone(), node);
         }
         store.counters.events += 1;
-        store.nodes.entry(event.node.clone()).or_insert_with(|| NodeStats::new(&event)).record(&event);
 
         if event.ev == "heartbeat" {
             store.counters.heartbeats += 1;
@@ -260,11 +268,11 @@ impl Sink {
             }
             return;
         }
-        let Some(tx) = event.tx.clone() else {
+        let Some(tx) = event.tx.as_deref() else {
             store.counters.malformed += 1;
             return;
         };
-        if let Some(entry) = store.txs.get_mut(&tx) {
+        if let Some(entry) = store.txs.get_mut(tx) {
             if entry.events.len() >= self.max_events_per_tx {
                 entry.events.pop_front();
                 entry.evicted_events += 1;
@@ -273,14 +281,18 @@ impl Sink {
             entry.events.push_back(event);
         } else if event.is_claimed() {
             store.counters.unattached += 1;
-        } else if store.txs.push(tx, TxEntry { events: VecDeque::from([event]), evicted_events: 0 }).is_some() {
+        } else if store
+            .txs
+            .push(tx.to_string(), TxEntry { events: VecDeque::from([event]), evicted_events: 0 })
+            .is_some()
+        {
             store.counters.evicted_txs += 1;
         }
     }
 
     /// Returns the events for the transaction, ordered by time, then node and sequence number.
     pub fn events(&self, tx: &str) -> Option<Value> {
-        let store = self.lock();
+        let store = self.store.lock();
         let entry = store.txs.peek(tx)?;
         let mut events: Vec<&Event> = entry.events.iter().collect();
         events.sort_by(|a, b| (a.ts_ms, &a.node, &a.boot, a.seq).cmp(&(b.ts_ms, &b.node, &b.boot, b.seq)));
@@ -289,14 +301,14 @@ impl Sink {
 
     /// Returns the status of the transaction derived from its events.
     pub fn status(&self, tx: &str) -> Option<TxStatus> {
-        let store = self.lock();
+        let store = self.store.lock();
         let entry = store.txs.peek(tx)?;
         Some(TxStatus::derive(tx, entry.events.iter()))
     }
 
     /// Returns the counters and the per-node sequence statistics.
     pub fn stats(&self) -> Value {
-        let store = self.lock();
+        let store = self.store.lock();
         json!({ "txs": store.txs.len(), "counters": store.counters, "nodes": store.nodes })
     }
 }
@@ -491,7 +503,10 @@ mod tests {
     use super::*;
 
     fn limits(max_txs: usize, max_events_per_tx: usize) -> Limits {
-        Limits { max_txs: NonZeroUsize::new(max_txs).unwrap(), max_events_per_tx }
+        Limits {
+            max_txs: NonZeroUsize::new(max_txs).unwrap(),
+            max_events_per_tx: NonZeroUsize::new(max_events_per_tx).unwrap(),
+        }
     }
 
     fn line(node: &str, seq: u64, ev: &str, tx: &str, cks: Option<&str>, reason: Option<&str>, extra: Value) -> String {
