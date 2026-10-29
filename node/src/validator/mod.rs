@@ -15,7 +15,7 @@
 
 mod router;
 
-use crate::traits::NodeInterface;
+use crate::{CdnFallback, traits::NodeInterface};
 
 use snarkos_account::Account;
 #[cfg(feature = "test_network")]
@@ -33,12 +33,12 @@ use snarkos_node_router::{
     Routing,
     messages::{PuzzleResponse, UnconfirmedSolution, UnconfirmedTransaction},
 };
-use snarkos_node_sync::{BlockSync, Ping};
+use snarkos_node_sync::{BlockSync, Ping, STUCK_SYNC_SHUTDOWN_THRESHOLD};
 use snarkos_node_tcp::{
     P2P,
     protocols::{Disconnect, Handshake, OnConnect, Reading},
 };
-use snarkos_utilities::{DevHotswapConfig, NodeDataDir, SignalHandler};
+use snarkos_utilities::{DevHotswapConfig, NodeDataDir, SignalHandler, Stoppable};
 
 use snarkvm::prelude::{
     Ledger,
@@ -76,6 +76,8 @@ pub struct Validator<N: Network, C: ConsensusStorage<N>> {
     pub(crate) handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
     /// Keeps track of sending pings.
     ping: Arc<Ping<N>>,
+    /// The signal handler, used to shut the node down on fatal errors.
+    signal_handler: Arc<SignalHandler>,
 }
 
 impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
@@ -154,7 +156,9 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         .await?;
 
         // Initialize the block synchronization logic.
-        let sync = Arc::new(BlockSync::new(ledger_service.clone(), ConnectionMode::Gateway));
+        let sync = Arc::new(
+            BlockSync::new(ledger_service.clone(), ConnectionMode::Gateway).with_trusted_peers_only(trusted_peers_only),
+        );
         let locators = sync.get_block_locators()?;
         let ping = Arc::new(Ping::new(router.clone(), locators));
 
@@ -183,6 +187,7 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
             sync: sync.clone(),
             ping,
             handles: Default::default(),
+            signal_handler: signal_handler.clone(),
         };
 
         // Stop the node once validators run a consensus version this build lacks.
@@ -213,12 +218,22 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         }
 
         // Set up everything else after CDN sync is done.
-        if let Some(cdn_sync) = cdn_sync
-            && let Err(error) = cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN")
-        {
-            crate::log_clean_error(&storage_mode);
-            node.shut_down().await;
-            return Err(error);
+        let cdn_fallback = match crate::wait_for_cdn(cdn_sync).await {
+            Ok(cdn_fallback) => cdn_fallback,
+            Err(error) => {
+                crate::log_clean_error(&storage_mode);
+                node.shut_down().await;
+                return Err(error);
+            }
+        };
+        // Blocks added by CDN sync do not pass through block sync, so record and advertise them.
+        node.sync.set_sync_height(ledger.latest_height());
+        match node.sync.get_block_locators() {
+            Ok(locators) => node.ping.update_block_locators(locators),
+            Err(error) => {
+                node.shut_down().await;
+                return Err(error);
+            }
         }
 
         // Start the BFT and consensus handlers now that CDN sync is complete. This ensures that
@@ -226,6 +241,8 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         node.start_consensus_handlers().await?;
         // Initialize the routing.
         node.initialize_routing().await;
+        // Initialize the stuck-sync monitor.
+        node.initialize_stuck_sync_monitor(cdn_fallback);
         // Initialize the notification message loop.
         node.handles.lock().push(crate::start_notification_message_loop());
 
@@ -538,6 +555,23 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
             }
         });
         Ok(())
+    }
+
+    /// Spawns a task that shuts the node down if no connected peer can serve the blocks it needs
+    /// to sync, so that the missing range can be fetched from the CDN on restart (or restored
+    /// from a snapshot).
+    fn initialize_stuck_sync_monitor(&self, cdn_fallback: CdnFallback) {
+        let sync = self.sync.clone();
+        let signal_handler = self.signal_handler.clone();
+        self.spawn(async move {
+            while !signal_handler.is_stopped() {
+                tokio::time::sleep(STUCK_SYNC_SHUTDOWN_THRESHOLD / 10).await;
+
+                if crate::shut_down_if_stuck_sync(&sync, &signal_handler, cdn_fallback) {
+                    break;
+                }
+            }
+        });
     }
 
     /// Spawns a task with the given future; it should only be used for long-running tasks.

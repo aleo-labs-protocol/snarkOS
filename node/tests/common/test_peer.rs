@@ -14,15 +14,19 @@
 // limitations under the License.
 
 use snarkos_account::Account;
-use snarkos_node_network::NodeType;
+use snarkos_node_network::{NodeType, PeerPoolHandling};
 use snarkos_node_router::{
+    Router,
     expect_message,
     messages::{ChallengeRequest, ChallengeResponse, Message, MessageCodec, MessageTrait},
 };
 use snarkos_node_tcp::ConnectError;
 use snarkvm::{
     console::network::{MainnetV0 as CurrentNetwork, Network},
-    ledger::{block::Block, narwhal::Data},
+    ledger::{
+        block::{Block, Header},
+        narwhal::Data,
+    },
     prelude::{Address, Field, FromBytes, TestRng},
     utilities::into_io_error,
 };
@@ -31,8 +35,11 @@ use std::{
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
+    sync::{Arc, Mutex},
+    time::Duration,
 };
 
+use deadline::deadline;
 use futures_util::{TryStreamExt, sink::SinkExt};
 use pea2pea::{
     Config,
@@ -59,11 +66,17 @@ pub fn sample_genesis_block() -> Block<CurrentNetwork> {
     Block::<CurrentNetwork>::from_bytes_le(CurrentNetwork::genesis_bytes()).unwrap()
 }
 
+/// Produces the reply to a message received from a node, if any.
+type Responder = Box<dyn Fn(&Message<CurrentNetwork>) -> Option<Message<CurrentNetwork>> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct TestPeer {
     node: Node,
     node_type: NodeType,
     account: Account<CurrentNetwork>,
+    genesis_header: Header<CurrentNetwork>,
+    received_messages: Arc<Mutex<Vec<Message<CurrentNetwork>>>>,
+    responder: Arc<Mutex<Option<Responder>>>,
 }
 
 impl Pea2Pea for TestPeer {
@@ -86,6 +99,15 @@ impl TestPeer {
     }
 
     pub async fn new(node_type: NodeType, account: Account<CurrentNetwork>) -> Self {
+        Self::with_genesis(node_type, account, *sample_genesis_block().header()).await
+    }
+
+    /// Returns a peer that presents `genesis_header` in the handshake.
+    pub async fn with_genesis(
+        node_type: NodeType,
+        account: Account<CurrentNetwork>,
+        genesis_header: Header<CurrentNetwork>,
+    ) -> Self {
         let peer = Self {
             node: Node::new(Config {
                 max_connections: 200,
@@ -97,6 +119,9 @@ impl TestPeer {
             }),
             node_type,
             account,
+            genesis_header,
+            received_messages: Default::default(),
+            responder: Default::default(),
         };
 
         peer.enable_handshake().await;
@@ -125,6 +150,19 @@ impl TestPeer {
     pub fn address(&self) -> Address<CurrentNetwork> {
         self.account.address()
     }
+
+    /// Returns a copy of the messages received from connected nodes so far.
+    pub fn received_messages(&self) -> Vec<Message<CurrentNetwork>> {
+        self.received_messages.lock().unwrap().clone()
+    }
+
+    /// Replies to every received message with what `respond` returns for it.
+    pub fn set_responder(
+        &self,
+        respond: impl Fn(&Message<CurrentNetwork>) -> Option<Message<CurrentNetwork>> + Send + Sync + 'static,
+    ) {
+        *self.responder.lock().unwrap() = Some(Box::new(respond));
+    }
 }
 
 impl Handshake for TestPeer {
@@ -144,8 +182,7 @@ impl TestPeer {
         let stream = self.borrow_stream(&mut conn);
         let mut framed = Framed::new(stream, MessageCodec::<CurrentNetwork>::default());
 
-        // Retrieve the genesis block header.
-        let genesis_header = *sample_genesis_block().header();
+        let genesis_header = self.genesis_header;
         // Retrieve the restrictions ID.
         let restrictions_id = Field::<CurrentNetwork>::from_str(
             "7562506206353711030068167991213732850758501012603348777370400520506564970105field",
@@ -225,9 +262,40 @@ impl Reading for TestPeer {
         Default::default()
     }
 
-    async fn process_message(&self, _peer_ip: SocketAddr, _message: Self::Message) {}
+    async fn process_message(&self, peer_ip: SocketAddr, message: Self::Message) {
+        let reply = self.responder.lock().unwrap().as_ref().and_then(|respond| respond(&message));
+        self.received_messages.lock().unwrap().push(message);
+        if let Some(reply) = reply {
+            // A panic here would die with the reading task, unseen by the test.
+            if let Err(error) = self.unicast(peer_ip, reply) {
+                eprintln!("failed to reply to {peer_ip}: {error}");
+            }
+        }
+    }
 }
 
 impl OnDisconnect for TestPeer {
     async fn on_disconnect(&self, _peer_addr: SocketAddr, _origin: DisconnectOrigin) {}
+}
+
+/// Spins up a test peer, connects the node's router to it, and waits until both sides see the
+/// connection. Returns the peer and the node's address as the peer sees it.
+pub async fn connect_test_peer(router: &Router<CurrentNetwork>) -> (TestPeer, SocketAddr) {
+    connect_peer(router, TestPeer::client().await).await
+}
+
+/// Connects the node's router to `peer` and waits until both sides see the connection. Returns the
+/// peer and the node's address as the peer sees it.
+pub async fn connect_peer(router: &Router<CurrentNetwork>, peer: TestPeer) -> (TestPeer, SocketAddr) {
+    let peer_addr = peer.listening_addr().await;
+    let num_peers = router.number_of_connected_peers() + 1;
+    router.connect(peer_addr).unwrap().await.unwrap().unwrap();
+
+    let router_clone = router.clone();
+    deadline!(Duration::from_secs(5), move || router_clone.number_of_connected_peers() == num_peers);
+    let peer_clone = peer.clone();
+    deadline!(Duration::from_secs(5), move || peer_clone.node().num_connected() == 1);
+
+    let node_addr = *peer.node().connected_addrs().first().unwrap();
+    (peer, node_addr)
 }

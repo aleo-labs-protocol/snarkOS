@@ -18,7 +18,6 @@ use snarkos_node_network::{PeerPoolHandling, harden_socket};
 use snarkos_node_router::messages::{
     BlockRequest,
     BlockResponse,
-    DataBlocks,
     DisconnectReason,
     Message,
     MessageCodec,
@@ -202,15 +201,8 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Validator<N, C> {
             }
         };
 
-        // Retrieve the blocks within the requested range.
-        let blocks = match self.ledger.get_blocks(*start_height..*end_height) {
-            Ok(blocks) => DataBlocks(blocks),
-            Err(err) => {
-                let err =
-                    err.context(format!("Failed to retrieve blocks {start_height} to {end_height} from the ledger"));
-                error!("{}", flatten_error(err));
-                return false;
-            }
+        let Some(blocks) = crate::blocks_for_request(&self.ledger, *start_height, *end_height) else {
+            return false;
         };
         // Send the `BlockResponse` message to the peer.
         self.router()
@@ -222,6 +214,8 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Validator<N, C> {
     fn block_response(
         &self,
         peer_ip: SocketAddr,
+        _start_height: u32,
+        _end_height: u32,
         _blocks: Vec<Block<N>>,
         _latest_consensus_version: Option<ConsensusVersion>,
     ) -> bool {

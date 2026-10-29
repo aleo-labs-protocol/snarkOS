@@ -43,12 +43,15 @@ pub const fn max(a: usize, b: usize) -> usize {
     }
 }
 
+/// The minimum number of peers required to maintain connections with.
+pub const MINIMUM_NUMBER_OF_PEERS: usize = 3;
+
 #[async_trait]
 pub trait Heartbeat<N: Network>: Outbound<N> {
     /// The duration in seconds to sleep in between heartbeat executions.
     const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(25);
     /// The minimum number of peers required to maintain connections with.
-    const MINIMUM_NUMBER_OF_PEERS: usize = 3;
+    const MINIMUM_NUMBER_OF_PEERS: usize = self::MINIMUM_NUMBER_OF_PEERS;
     /// The minimum time between connection attempts to a peer.
     const MINIMUM_TIME_BETWEEN_CONNECTION_ATTEMPTS: Duration = Duration::from_secs(10);
     /// The time we consider the node to be starting up and avoid certain warnings such as "No connected peers".

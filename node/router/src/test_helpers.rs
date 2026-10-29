@@ -234,6 +234,8 @@ impl<N: Network> Inbound<N> for TestRouter<N> {
     fn block_response(
         &self,
         _peer_ip: SocketAddr,
+        _start_height: u32,
+        _end_height: u32,
         _blocks: Vec<Block<N>>,
         _latest_consensus_version: Option<ConsensusVersion>,
     ) -> bool {

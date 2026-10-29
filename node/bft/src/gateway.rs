@@ -69,7 +69,7 @@ use snarkos_node_network::{
     },
     shorten_snarkos_sha,
 };
-use snarkos_node_sync::{MAX_BLOCKS_BEHIND, communication_service::CommunicationService};
+use snarkos_node_sync::{MAX_BLOCKS_BEHIND, blocks_or_empty, communication_service::CommunicationService};
 use snarkos_node_tcp::{
     Config,
     ConnectError,
@@ -734,11 +734,15 @@ impl<N: Network> Gateway<N> {
 
                 let self_ = self.clone();
                 let blocks = match task::spawn_blocking(move || {
-                    // Retrieve the blocks within the requested range.
-                    match self_.ledger.get_blocks(start_height..end_height) {
-                        Ok(blocks) => Ok(DataBlocks(blocks)),
-                        Err(error) => bail!("Missing blocks {start_height} to {end_height} from ledger - {error}"),
-                    }
+                    blocks_or_empty(
+                        start_height,
+                        end_height,
+                        || self_.ledger.latest_block_height(),
+                        || self_.ledger.get_blocks(start_height..end_height),
+                    )
+                    .map_err(|error| {
+                        error.context(format!("Missing blocks {start_height} to {end_height} from ledger"))
+                    })
                 })
                 .await
                 {
@@ -781,7 +785,16 @@ impl<N: Network> Gateway<N> {
                     // Ensure the block response is well-formed.
                     blocks.ensure_response_is_well_formed(peer_ip, request.start_height, request.end_height)?;
                     // Send the blocks to the sync module.
-                    match sync_sender.insert_block_response(peer_ip, blocks.0, latest_consensus_version).await {
+                    match sync_sender
+                        .insert_block_response(
+                            peer_ip,
+                            request.start_height,
+                            request.end_height,
+                            blocks.0,
+                            latest_consensus_version,
+                        )
+                        .await
+                    {
                         Ok(_) => Ok(true),
                         Err(err) if err.is_benign() => {
                             let err: anyhow::Error = err.into();

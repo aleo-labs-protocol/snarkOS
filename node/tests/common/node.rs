@@ -19,12 +19,19 @@ use snarkos_account::Account;
 use snarkos_node::{Client, Prover, Validator, rest::RestVerificationLimits};
 use snarkos_utilities::{NodeDataDir, SignalHandler};
 
-use snarkvm::prelude::{MainnetV0 as CurrentNetwork, store::helpers::memory::ConsensusMemory};
+use snarkvm::prelude::{MainnetV0 as CurrentNetwork, block::Block, store::helpers::memory::ConsensusMemory};
 
 use aleo_std::StorageMode;
 use std::str::FromStr;
 
 pub async fn client() -> Client<CurrentNetwork, ConsensusMemory<CurrentNetwork>> {
+    client_with_genesis(sample_genesis_block()).await
+}
+
+/// Returns a client whose ledger starts from `genesis`.
+pub async fn client_with_genesis(
+    genesis: Block<CurrentNetwork>,
+) -> Client<CurrentNetwork, ConsensusMemory<CurrentNetwork>> {
     Client::new(
         "127.0.0.1:0".parse().unwrap(),
         None,
@@ -34,7 +41,7 @@ pub async fn client() -> Client<CurrentNetwork, ConsensusMemory<CurrentNetwork>>
         false, // Do not write JSON history.
         Account::<CurrentNetwork>::from_str("APrivateKey1zkp2oVPTci9kKcUprnbzMwq95Di1MQERpYBhEeqvkrDirK1").unwrap(),
         &[],
-        sample_genesis_block(),
+        genesis,
         None, // No CDN.
         StorageMode::new_test(None),
         NodeDataDir::new_test(None),
