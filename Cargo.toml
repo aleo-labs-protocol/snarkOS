@@ -38,6 +38,7 @@ members = [
   "node/sync/communication-service",
   "node/sync/locators",
   "node/tcp",
+  "tx-events-sink",
   "utilities",
 ]
 

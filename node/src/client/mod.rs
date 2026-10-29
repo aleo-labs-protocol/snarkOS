@@ -451,17 +451,16 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
                             _node.num_verifying_deploys.fetch_sub(1, Relaxed);
                             return;
                         };
+                        #[cfg(feature = "metrics")]
+                        let checksum = snarkos_node_metrics::tx_events::get()
+                            .and_then(|_| serialized.transaction.to_checksum::<N>().ok());
                         // Check if the state root is in the ledger.
                         if !_node.ledger().contains_state_root(&state_root).unwrap_or(false) {
                             debug!("Failed to find global state root for deployment from peer_ip {peer_ip}, propagating anyway");
                             // Propagate the `UnconfirmedTransaction`.
                             _node.propagate(Message::UnconfirmedTransaction(serialized), &[peer_ip]);
                             #[cfg(feature = "metrics")]
-                            snarkos_node_metrics::increment_counter_1(
-                                snarkos_node_metrics::router::UNCONFIRMED_TRANSACTIONS_PROPAGATED,
-                                "site",
-                                "client_unverified",
-                            );
+                            snarkos_node_metrics::record_transaction_propagated::<N>("client_unverified", &transaction.id(), checksum);
                             _node.num_verifying_deploys.fetch_sub(1, Relaxed);
                             return;
                             // Also skip the `check_transaction_basic` call if it is already propagated.
@@ -471,17 +470,13 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
                         let timer = snarkos_node_metrics::TransactionCheckTimer::start("client_relay", &transaction);
                         let result = _node.ledger.check_transaction_basic(&transaction, None, &mut rand::rng());
                         #[cfg(feature = "metrics")]
-                        timer.finish(&result);
+                        timer.finish_and_emit::<N, _, _>(&result, &transaction.id(), checksum);
                         match result {
                             Ok(_) => {
                                 // Propagate the `UnconfirmedTransaction`.
                                 _node.propagate(Message::UnconfirmedTransaction(serialized), &[peer_ip]);
                                 #[cfg(feature = "metrics")]
-                                snarkos_node_metrics::increment_counter_1(
-                                    snarkos_node_metrics::router::UNCONFIRMED_TRANSACTIONS_PROPAGATED,
-                                    "site",
-                                    "client_verified",
-                                );
+                                snarkos_node_metrics::record_transaction_propagated::<N>("client_verified", &transaction.id(), checksum);
                             }
                             Err(error) => {
                                 debug!("Failed to verify the deployment from peer_ip {peer_ip} - {error}");
@@ -530,6 +525,9 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
                     let _node = node.clone();
                     // For each execution, spawn a task to verify it.
                     tokio::task::spawn_blocking(move || {
+                        #[cfg(feature = "metrics")]
+                        let checksum = snarkos_node_metrics::tx_events::get()
+                            .and_then(|_| serialized.transaction.to_checksum::<N>().ok());
                         // First collect the state roots.
                         let state_roots = [
                             transaction.execution().map(|t| t.global_state_root()),
@@ -544,11 +542,7 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
                                 // Propagate the `UnconfirmedTransaction`.
                                 _node.propagate(Message::UnconfirmedTransaction(serialized), &[peer_ip]);
                                 #[cfg(feature = "metrics")]
-                                snarkos_node_metrics::increment_counter_1(
-                                    snarkos_node_metrics::router::UNCONFIRMED_TRANSACTIONS_PROPAGATED,
-                                    "site",
-                                    "client_unverified",
-                                );
+                                snarkos_node_metrics::record_transaction_propagated::<N>("client_unverified", &transaction.id(), checksum);
                                 _node.num_verifying_executions.fetch_sub(1, Relaxed);
                                 return;
                                 // Also skip the `check_transaction_basic` call if it is already propagated.
@@ -559,17 +553,13 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
                         let timer = snarkos_node_metrics::TransactionCheckTimer::start("client_relay", &transaction);
                         let result = _node.ledger.check_transaction_basic(&transaction, None, &mut rand::rng());
                         #[cfg(feature = "metrics")]
-                        timer.finish(&result);
+                        timer.finish_and_emit::<N, _, _>(&result, &transaction.id(), checksum);
                         match result {
                             Ok(_) => {
                                 // Propagate the `UnconfirmedTransaction`.
                                 _node.propagate(Message::UnconfirmedTransaction(serialized), &[peer_ip]);
                                 #[cfg(feature = "metrics")]
-                                snarkos_node_metrics::increment_counter_1(
-                                    snarkos_node_metrics::router::UNCONFIRMED_TRANSACTIONS_PROPAGATED,
-                                    "site",
-                                    "client_verified",
-                                );
+                                snarkos_node_metrics::record_transaction_propagated::<N>("client_verified", &transaction.id(), checksum);
                             }
                             Err(error) => {
                                 debug!("Failed to verify the execution from peer_ip {peer_ip} - {error}");

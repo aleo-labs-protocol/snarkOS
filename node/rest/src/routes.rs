@@ -1255,10 +1255,15 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         // The buffer is initially roughly sized to hold a `transfer_public`,
         // most transactions will be smaller and this reduces unnecessary allocations.
         // TODO: Should this be a blocking task?
-        let buffer = Vec::with_capacity(3000);
-        if tx.write_le(LimitedWriter::new(buffer, N::LATEST_MAX_TRANSACTION_SIZE())).is_err() {
+        let mut buffer = Vec::with_capacity(3000);
+        if tx.write_le(LimitedWriter::new(&mut buffer, N::LATEST_MAX_TRANSACTION_SIZE())).is_err() {
             return Err(RestError::bad_request(anyhow!("Transaction size exceeds the byte limit")));
         }
+        #[cfg(feature = "metrics")]
+        let checksum = metrics::tx_events::get()
+            .and_then(|_| Data::<Transaction<N>>::Buffer(buffer.into()).to_checksum::<N>().ok());
+        #[cfg(not(feature = "metrics"))]
+        drop(buffer);
 
         // Prepare the unconfirmed transaction message.
         let tx_id = tx.id();
@@ -1273,7 +1278,8 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         // Determine if we need to check the transaction.
         let check_transaction = check_transaction.check_transaction.unwrap_or(false);
 
-        let tx = if check_transaction {
+        #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
+        let (tx, check_elapsed) = if check_transaction {
             let verification_slot = if tx.is_execute() {
                 rest.verification_slots.executions.acquire().await?
             } else {
@@ -1289,12 +1295,14 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
                 let timer = metrics::TransactionCheckTimer::start("rest", &tx);
                 let result = ledger.check_transaction_basic(&tx, None, &mut rand::rng());
                 #[cfg(feature = "metrics")]
-                timer.finish(&result);
-                result.map(|()| tx)
+                let elapsed = Some(timer.finish(&result));
+                #[cfg(not(feature = "metrics"))]
+                let elapsed = None::<std::time::Duration>;
+                result.map(|()| (tx, elapsed))
             })
             .await
             {
-                Ok(Ok(tx)) => tx,
+                Ok(Ok(checked)) => checked,
                 Ok(Err(err)) => {
                     return match is_within_sync_leniency {
                         // The transaction failed to verify.
@@ -1308,7 +1316,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
                 Err(err) => return Err(RestError::internal_server_error(anyhow!(err).context("Tokio error"))),
             }
         } else {
-            tx
+            (tx, None)
         };
 
         // If the consensus module is enabled, add the unconfirmed transaction to the memory pool.
@@ -1321,6 +1329,19 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         rest.routing.propagate(message, &[]);
         #[cfg(feature = "metrics")]
         metrics::increment_counter_1(metrics::router::UNCONFIRMED_TRANSACTIONS_PROPAGATED, "site", "rest");
+        #[cfg(feature = "metrics")]
+        if let Some(events) = metrics::tx_events::get() {
+            use metrics::tx_events::{Ev, TxEvent, json};
+            let kind = metrics::transaction_kind(&tx);
+            let checked = check_elapsed
+                .map(|elapsed| TxEvent::checked::<N, (), &str>("rest", kind, &tx_id, checksum, &Ok(()), elapsed));
+            let kind = Some(kind);
+            let received =
+                TxEvent { kind, extra: json!({ "via": "rest" }), ..TxEvent::new::<N>(Ev::Received, &tx_id, checksum) };
+            let gossiped =
+                TxEvent { kind, extra: json!({ "site": "rest" }), ..TxEvent::new::<N>(Ev::Gossiped, &tx_id, checksum) };
+            events.emit_all(checked.into_iter().chain([received, gossiped]));
+        }
 
         // Determine if the node is synced and if the transaction was checked.
         match !is_within_sync_leniency && check_transaction {

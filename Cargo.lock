@@ -5243,6 +5243,8 @@ dependencies = [
  "metrics-exporter-prometheus",
  "parking_lot",
  "rayon",
+ "serde",
+ "serde_json",
  "snarkvm",
  "time",
  "tokio",
@@ -5424,6 +5426,21 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "snarkos-tx-events-sink"
+version = "4.12.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "lru 0.19.0",
+ "serde",
+ "serde_json",
+ "snarkos-node-metrics",
+ "snarkvm",
+ "tokio",
 ]
 
 [[package]]

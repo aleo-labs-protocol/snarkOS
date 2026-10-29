@@ -29,6 +29,8 @@ use crate::{
         UnconfirmedTransaction,
     },
 };
+#[cfg(feature = "metrics")]
+use metrics::tx_events::{Ev, Reason};
 use snarkos_node_tcp::protocols::Reading;
 use snarkvm::prelude::{
     ConsensusVersion,
@@ -294,6 +296,8 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
                         "outcome",
                         "syncing",
                     );
+                    #[cfg(feature = "metrics")]
+                    emit_router_transaction::<N>(Ev::RouterDropped, Some(Reason::Syncing), &message.transaction_id);
                     trace!("Skipped processing unconfirmed transaction '{}' (node is syncing)", message.transaction_id);
                     return Ok(true);
                 }
@@ -304,6 +308,8 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
                 if seen_before {
                     #[cfg(feature = "metrics")]
                     metrics::increment_counter_1(metrics::router::UNCONFIRMED_TRANSACTIONS_INBOUND, "outcome", "seen");
+                    #[cfg(feature = "metrics")]
+                    emit_router_transaction::<N>(Ev::RouterDropped, Some(Reason::Seen), &message.transaction_id);
                     trace!("Skipping 'UnconfirmedTransaction' from '{peer_ip}'");
                     return Ok(true);
                 }
@@ -312,10 +318,20 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
                 // Perform the deferred non-blocking deserialization of the transaction.
                 let transaction = match message.transaction.deserialize().await {
                     Ok(transaction) => transaction,
-                    Err(error) => bail!("[UnconfirmedTransaction] {error}"),
+                    Err(error) => {
+                        #[cfg(feature = "metrics")]
+                        emit_router_transaction::<N>(
+                            Ev::RouterDropped,
+                            Some(Reason::BadEncoding),
+                            &message.transaction_id,
+                        );
+                        bail!("[UnconfirmedTransaction] {error}")
+                    }
                 };
                 // Check that the transaction parameters match.
                 if message.transaction_id != transaction.id() {
+                    #[cfg(feature = "metrics")]
+                    emit_router_transaction::<N>(Ev::RouterDropped, Some(Reason::IdMismatch), &message.transaction_id);
                     bail!("Peer '{peer_ip}' is not following the 'UnconfirmedTransaction' protocol")
                 }
                 #[cfg(feature = "metrics")]
@@ -324,6 +340,8 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
                     "outcome",
                     "dispatched",
                 );
+                #[cfg(feature = "metrics")]
+                emit_router_transaction::<N>(Ev::Received, None, &message.transaction_id);
                 // Handle the unconfirmed transaction.
                 match self.unconfirmed_transaction(peer_ip, serialized, transaction).await {
                     true => Ok(true),
@@ -398,4 +416,17 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
         serialized: UnconfirmedTransaction<N>,
         _transaction: Transaction<N>,
     ) -> bool;
+}
+
+/// Emits a transaction event for an `UnconfirmedTransaction` message, keyed by the id the message
+/// claims.
+#[cfg(feature = "metrics")]
+fn emit_router_transaction<N: Network>(ev: Ev, reason: Option<Reason>, transaction_id: &N::TransactionID) {
+    if let Some(events) = metrics::tx_events::get() {
+        events.emit(metrics::tx_events::TxEvent {
+            reason,
+            extra: metrics::tx_events::json!({ "via": "router" }),
+            ..metrics::tx_events::TxEvent::new::<N>(ev, transaction_id, None)
+        });
+    }
 }

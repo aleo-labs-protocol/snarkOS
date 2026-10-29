@@ -1,0 +1,195 @@
+// Copyright (c) 2019-2026 Provable Inc.
+// This file is part of the snarkOS library.
+
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at:
+
+// http://www.apache.org/licenses/LICENSE-2.0
+
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use serde_json::{Value, json};
+use snarkos_node_metrics::tx_events::{self, Ev, Reason, TxEvent};
+use snarkos_tx_events_sink::{Limits, Sink, run};
+use snarkvm::prelude::{MainnetV0, Network};
+use std::{
+    net::{SocketAddr, UdpSocket},
+    num::NonZeroUsize,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream, UdpSocket as TokioUdpSocket},
+};
+
+/// Starts a sink on ephemeral ports and returns its UDP and HTTP addresses.
+async fn start_sink() -> (SocketAddr, SocketAddr) {
+    let udp = TokioUdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addresses = (udp.local_addr().unwrap(), http.local_addr().unwrap());
+    let limits = Limits { max_txs: NonZeroUsize::new(100).unwrap(), max_events_per_tx: NonZeroUsize::new(64).unwrap() };
+    tokio::spawn(run(udp, http, Arc::new(Sink::new(limits))));
+    addresses
+}
+
+/// Sends an HTTP GET and returns the status code and the JSON body.
+async fn get(http: SocketAddr, path: &str) -> (u16, Value) {
+    let mut stream = TcpStream::connect(http).await.unwrap();
+    stream
+        .write_all(format!("GET {path} HTTP/1.1\r\nHost: sink\r\nConnection: close\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await.unwrap();
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
+    (status, serde_json::from_str(body).unwrap())
+}
+
+/// Polls `path` until `done` holds for the body, or panics after five seconds.
+async fn get_until(http: SocketAddr, path: &str, done: impl Fn(&Value) -> bool) -> Value {
+    let started = Instant::now();
+    loop {
+        let (status, body) = get(http, path).await;
+        if status == 200 && done(&body) {
+            return body;
+        }
+        assert!(started.elapsed() < Duration::from_secs(5), "timed out on {path}: {body}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn line(seq: u64, ev: &str, cks: &str, extra: Value) -> String {
+    json!({
+        "v": 1, "net": "testnet", "node": "n1", "ntype": "validator", "boot": "b0", "seq": seq,
+        "ts_ms": 1000 + seq, "height": 10, "ev": ev, "tx": "at1x", "cks": cks, "kind": "execute",
+        "reason": null, "peer": null, "extra": extra,
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn test_udp_ingest_and_http_queries() {
+    let (udp, http) = start_sink().await;
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+
+    let (status, _) = get(http, "/tx/at1x/status").await;
+    assert_eq!(status, 404);
+
+    let batch = [
+        line(0, "received", "1", json!({ "via": "rest" })),
+        line(1, "mempool_inserted", "1", json!({ "prio_fee": 0, "qlen": 1 })),
+        line(2, "checked", "1", json!({ "site": "worker", "outcome": "ok" })),
+    ]
+    .join("\n");
+    socket.send_to(batch.as_bytes(), udp).unwrap();
+    socket.send_to(line(4, "certified", "1", json!({ "round": 7 })).as_bytes(), udp).unwrap();
+
+    let status = get_until(http, "/tx/at1x/status", |body| body["stage"] == "certified").await;
+    assert_eq!(status["status"], "pending");
+    assert_eq!(status["holders"], json!(["n1"]));
+
+    socket.send_to(line(5, "in_block", "1", json!({ "outcome": "accepted", "height": 11 })).as_bytes(), udp).unwrap();
+    let status = get_until(http, "/tx/at1x/status", |body| body["status"] == "accepted").await;
+    assert_eq!(status["final"]["height"], 11);
+    assert_eq!(status["advisory"], true);
+
+    let events = get_until(http, "/tx/at1x/events", |body| body["events"].as_array().unwrap().len() == 5).await;
+    let seqs: Vec<u64> =
+        events["events"].as_array().unwrap().iter().map(|event| event["seq"].as_u64().unwrap()).collect();
+    assert_eq!(seqs, [0, 1, 2, 4, 5]);
+
+    let (_, stats) = get(http, "/stats").await;
+    assert_eq!(stats["nodes"]["n1"]["lost"], 1);
+}
+
+/// Returns an event named `ev` as a node sends it, or `None` for `heartbeat`, which the background
+/// thread sends.
+fn node_event(ev: Ev, transaction_id: &<MainnetV0 as Network>::TransactionID) -> Option<TxEvent> {
+    let (kind, reason, extra) = match ev {
+        Ev::Received => (None, None, json!({ "via": "rest" })),
+        Ev::Checked => {
+            let result: Result<(), &str> = Ok(());
+            let elapsed = Duration::from_micros(10);
+            return Some(TxEvent::checked::<MainnetV0, _, _>(
+                "worker",
+                "execute",
+                transaction_id,
+                Some(5),
+                &result,
+                elapsed,
+            ));
+        }
+        Ev::Gossiped => (None, None, json!({ "site": "validator" })),
+        Ev::RouterDropped => (None, Some(Reason::Seen), json!({ "via": "router" })),
+        Ev::MempoolInserted => (Some("execute"), None, json!({ "prio_fee": 0, "qlen": 1 })),
+        Ev::MempoolRefused => (Some("execute"), Some(Reason::RecentlySeen), Value::Null),
+        Ev::MempoolEvicted => (Some("execute"), Some(Reason::LowerFee), json!({ "by": "at1by", "by_fee": 1 })),
+        Ev::Fetched => (None, None, json!({ "site": "peer_proposal" })),
+        Ev::ProposeDropped => (Some("execute"), Some(Reason::SpendCost), Value::Null),
+        Ev::Proposed => (None, None, json!({ "round": 2 })),
+        Ev::Certified => (None, None, json!({ "round": 2, "author": "aleo1author" })),
+        Ev::Speculated | Ev::InBlock => (Some("execute"), None, json!({ "outcome": "rejected", "height": 3 })),
+        Ev::Heartbeat => return None,
+    };
+    Some(TxEvent { kind, reason, extra, ..TxEvent::new::<MainnetV0>(ev, transaction_id, Some(5)) })
+}
+
+#[tokio::test]
+async fn test_node_emitter_output_is_accepted() {
+    let (udp, http) = start_sink().await;
+    tx_events::initialize(udp, "testnet", "node-a".to_string(), "validator").unwrap();
+    let events = tx_events::get().unwrap();
+
+    let transaction_id = <MainnetV0 as Network>::TransactionID::default();
+    let tx = transaction_id.to_string();
+    let sent: Vec<TxEvent> = Ev::ALL.into_iter().filter_map(|ev| node_event(ev, &transaction_id)).collect();
+    let mut expected: Vec<Value> = sent.iter().map(|event| json!(event.ev)).collect();
+    let mut sent = sent.into_iter();
+    for event in sent.by_ref().take(expected.len() / 2) {
+        events.emit(event);
+    }
+    events.emit_all(sent);
+
+    let path = format!("/tx/{tx}/events");
+    let body =
+        get_until(http, &path, |body| body["events"].as_array().is_some_and(|events| events.len() == expected.len()))
+            .await;
+    let mut received: Vec<Value> =
+        body["events"].as_array().into_iter().flatten().map(|event| event["ev"].clone()).collect();
+    received.sort_by_key(Value::to_string);
+    expected.sort_by_key(Value::to_string);
+    assert_eq!(received, expected);
+    for event in body["events"].as_array().unwrap() {
+        assert_eq!(event["node"], "node-a");
+        assert_eq!(event["cks"], "5");
+    }
+    let status = get_until(http, &format!("/tx/{tx}/status"), |body| body["status"] == "rejected").await;
+    assert_eq!(status["final"]["cks"], "5");
+
+    let stats = get_until(http, "/stats", |body| body["counters"]["heartbeats"] == 1).await;
+    assert_eq!(stats["counters"]["malformed"], 0);
+    assert_eq!(stats["nodes"]["node-a"]["lost"], 0);
+    assert_eq!(stats["nodes"]["node-a"]["last_heartbeat"]["emit_dropped"], 0);
+}
+
+#[test]
+fn test_readme_lists_every_event_and_reason() {
+    let readme = include_str!("../README.md");
+    let section = readme.split("\n### Events\n").nth(1).and_then(|rest| rest.split("\n## ").next()).unwrap_or_default();
+    let rows: Vec<&str> = section.lines().filter(|line| line.starts_with('|')).collect();
+    for ev in Ev::ALL {
+        let row = format!("| `{}` |", json!(ev).as_str().unwrap_or_default());
+        assert!(rows.iter().any(|line| line.starts_with(&row)), "README.md has no row {row} in its events table");
+    }
+    for reason in Reason::ALL {
+        let code = format!("`{}`", reason.as_str());
+        assert!(rows.iter().any(|line| line.contains(&code)), "README.md lists no {code} in its events table");
+    }
+}
