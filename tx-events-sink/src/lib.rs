@@ -27,13 +27,12 @@ use axum::{
     routing::get,
 };
 use lru::LruCache;
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     num::NonZeroUsize,
-    sync::Arc,
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 use tokio::net::{TcpListener, UdpSocket};
 
@@ -227,6 +226,10 @@ impl Sink {
         Self { store: Mutex::new(store), max_events_per_tx: limits.max_events_per_tx.get() }
     }
 
+    fn lock(&self) -> MutexGuard<'_, Store> {
+        self.store.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Ingests one datagram of newline-delimited events.
     pub fn ingest(&self, datagram: &[u8]) {
         let mut events = Vec::new();
@@ -240,7 +243,7 @@ impl Sink {
                 Err(_) => malformed += 1,
             }
         }
-        let mut store = self.store.lock();
+        let mut store = self.lock();
         store.counters.datagrams += 1;
         store.counters.malformed += malformed;
         for event in events {
@@ -292,7 +295,7 @@ impl Sink {
 
     /// Returns the events for the transaction, ordered by time, then node and sequence number.
     pub fn events(&self, tx: &str) -> Option<Value> {
-        let store = self.store.lock();
+        let store = self.lock();
         let entry = store.txs.peek(tx)?;
         let mut events: Vec<&Event> = entry.events.iter().collect();
         events.sort_by(|a, b| (a.ts_ms, &a.node, &a.boot, a.seq).cmp(&(b.ts_ms, &b.node, &b.boot, b.seq)));
@@ -301,14 +304,14 @@ impl Sink {
 
     /// Returns the status of the transaction derived from its events.
     pub fn status(&self, tx: &str) -> Option<TxStatus> {
-        let store = self.store.lock();
+        let store = self.lock();
         let entry = store.txs.peek(tx)?;
         Some(TxStatus::derive(tx, entry.events.iter()))
     }
 
     /// Returns the counters and the per-node sequence statistics.
     pub fn stats(&self) -> Value {
-        let store = self.store.lock();
+        let store = self.lock();
         json!({ "txs": store.txs.len(), "counters": store.counters, "nodes": store.nodes })
     }
 }
