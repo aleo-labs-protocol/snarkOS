@@ -722,7 +722,8 @@ impl<N: Network> BlockSync<N> {
     /// Inserts a new block response from the given peer IP.
     ///
     /// Returns an error if the block was malformed, or we already received a different block for this height.
-    /// This function also removes all block requests from the given peer IP on failure.
+    /// This function also removes all block requests from the given peer IP on failure, except on an
+    /// empty response, which removes only the requests below the peer's new learned floor.
     ///
     /// Note, that this only queues the response. After this, you most likely want to call `Self::try_advancing_block_synchronization`.
     ///
@@ -738,8 +739,11 @@ impl<N: Network> BlockSync<N> {
         // Attempt to insert the block responses, and break if we encounter an error.
         let result = 'outer: {
             let Some(last_height) = blocks.as_slice().last().map(|b| b.height()) else {
-                self.record_empty_block_response(peer_ip, start_height);
-                break 'outer Err(InsertBlockResponseError::EmptyBlockResponse);
+                let floor = self.record_empty_block_response(peer_ip, start_height);
+                // The peer may still answer its requests at or above the floor; re-sending one of
+                // them to it would collide with the reply in flight.
+                self.remove_block_requests_to_peer_below(&peer_ip, floor);
+                return Err(InsertBlockResponseError::EmptyBlockResponse);
             };
 
             let expected_consensus_version =
@@ -789,14 +793,17 @@ impl<N: Network> BlockSync<N> {
     }
 
     /// Raises the learned floor of `peer_ip` above `start_height`, after an empty response to a
-    /// request from `start_height`.
-    fn record_empty_block_response(&self, peer_ip: SocketAddr, start_height: u32) {
+    /// request from `start_height`, and returns the new floor.
+    fn record_empty_block_response(&self, peer_ip: SocketAddr, start_height: u32) -> u32 {
         // Holding `locators` keeps a concurrent `remove_peer` from leaving this peer's entry behind.
         let locators = self.locators.read();
         if locators.contains_key(&peer_ip) {
             let mut learned_floors = self.learned_floors.lock();
             let floor = learned_floors.entry(peer_ip).or_default();
             *floor = (*floor).max(start_height.saturating_add(1));
+            *floor
+        } else {
+            start_height.saturating_add(1)
         }
     }
 
@@ -1565,13 +1572,22 @@ impl<N: Network> BlockSync<N> {
     ///
     /// This is used when disconnecting from a peer or when a peer sends invalid block responses.
     fn remove_block_requests_to_peer(&self, peer_ip: &SocketAddr) {
-        trace!("Block sync is removing all block requests to peer {peer_ip}...");
+        self.remove_block_requests_to_peer_below(peer_ip, u32::MAX);
+    }
+
+    /// Removes the block requests to the given peer IP below `end_height`, as in
+    /// [`Self::remove_block_requests_to_peer`].
+    fn remove_block_requests_to_peer_below(&self, peer_ip: &SocketAddr, end_height: u32) {
+        trace!("Block sync is removing block requests below {end_height} to peer {peer_ip}...");
         let mut heights = vec![];
         let mut removed_requests = vec![];
 
         // Remove the peer IP from the requests map. If any request entry is now empty,
         // and its corresponding response entry is also empty, then remove that request entry altogether.
         self.requests.write().retain(|height, e| {
+            if *height >= end_height {
+                return true;
+            }
             let had_peer = e.sync_ips_mut().swap_remove(peer_ip);
 
             if had_peer && e.response.is_none() {
@@ -2536,7 +2552,7 @@ mod tests {
     }
 
     /// Tests that an empty block response, the peer's explicit "cannot serve this range" signal,
-    /// is treated as benign and re-issues the peer's outstanding requests.
+    /// is treated as benign and re-issues only the peer's outstanding requests below its new floor.
     #[test]
     fn test_empty_block_response_is_benign_and_reissues_requests() {
         let rng = &mut TestRng::default();
@@ -2562,9 +2578,37 @@ mod tests {
         // An explicit "cannot serve" is not a protocol violation.
         assert!(error.is_benign());
 
-        // The requests to the peer were removed and marked for re-issue to other peers.
-        assert!(sync.requests.read().is_empty());
-        assert_eq!(sync.failed_requests.lock().len(), num_requests);
+        // The request for block 1 was removed and marked for re-issue; the peer keeps the others.
+        assert!(!sync.requests.read().contains_key(&1));
+        assert_eq!(sync.requests.read().len(), num_requests - 1);
+        assert_eq!(sync.failed_requests.lock().keys().copied().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(learned_floor(&sync, peer_ip), Some(2));
+    }
+
+    /// Tests that an empty response to one of a peer's in-flight requests leaves it assigned the
+    /// requests at or above its new floor, so none of them is re-sent to it while its reply is in flight.
+    #[test]
+    fn test_empty_block_response_keeps_requests_above_floor() {
+        let sync = sample_sync_at_height(0);
+        let peer_ip = sample_peer_ip(1);
+        sync.update_peer_locators(peer_ip, &sample_block_locators(10)).unwrap();
+
+        // Two in-flight requests to the peer: one for block 3, one for block 7.
+        let (requests, _) = sync.prepare_block_requests().pop().unwrap();
+        for (height, (hash, previous_hash, _)) in requests.into_iter().filter(|(height, _)| [3, 7].contains(height)) {
+            sync.insert_block_request(height, (hash, previous_hash, [peer_ip].into_iter().collect())).unwrap();
+        }
+        assert_eq!(sync.requests.read().len(), 2);
+
+        // The peer answers the lower request empty.
+        assert!(empty_response_to(&sync, peer_ip, 3).is_benign());
+        assert_eq!(learned_floor(&sync, peer_ip), Some(4));
+
+        // The lower request was re-queued; the peer is still assigned the higher one.
+        assert_eq!(sync.failed_requests.lock().keys().copied().collect::<Vec<_>>(), vec![3]);
+        let requests = sync.requests.read();
+        assert!(!requests.contains_key(&3));
+        assert!(requests[&7].sync_ips().contains(&peer_ip));
     }
 
     /// Sends an empty block response from `peer_ip` to a request from `height`.
