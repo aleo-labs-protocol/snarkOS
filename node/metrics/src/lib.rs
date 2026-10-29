@@ -330,28 +330,9 @@ pub fn record_solution_check(site: &'static str, is_ok: bool) {
     increment_counter_2(verification::SOLUTION_CHECKS, "site", site, "outcome", outcome);
 }
 
-/// Records the outcome of offering a transaction to the memory pool. If `emit` is set, a refused
-/// offer (any `outcome` but `accepted`) is also emitted as a `mempool_refused` event.
-pub fn record_mempool_transaction<N: Network>(
-    kind: &'static str,
-    outcome: &'static str,
-    transaction_id: &N::TransactionID,
-    checksum: N::TransmissionChecksum,
-    emit: bool,
-    via: &'static str,
-) {
+/// Records the outcome of offering a transaction to the memory pool.
+pub fn record_mempool_transaction(kind: &'static str, outcome: &'static str) {
     increment_counter_2(consensus::MEMPOOL_TRANSACTIONS, "kind", kind, "outcome", outcome);
-    if emit
-        && outcome != "accepted"
-        && let Some(events) = tx_events::get()
-    {
-        events.emit(tx_events::TxEvent {
-            kind: Some(kind),
-            reason: Some(outcome),
-            extra: tx_events::json!({ "via": via }),
-            ..tx_events::TxEvent::new::<N>("mempool_refused", transaction_id, Some(checksum))
-        });
-    }
 }
 
 /// Records a transaction propagated from `site`, and emits it as a `gossiped` transaction event.

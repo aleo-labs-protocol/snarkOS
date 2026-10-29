@@ -40,6 +40,8 @@ use tokio::net::{TcpListener, UdpSocket};
 const MAX_DATAGRAM_BYTES: usize = 65536;
 /// The number of nodes the sink tracks; events from further nodes are rejected.
 const MAX_NODES: usize = 4096;
+/// The number of previous boots remembered per node.
+const MAX_PREVIOUS_BOOTS: usize = 4;
 /// The checksum key for events that carry no checksum.
 const UNKNOWN_CHECKSUM: &str = "unknown";
 /// The stages a transaction passes through, in order.
@@ -75,11 +77,10 @@ impl Event {
         self.cks.as_deref().unwrap_or(UNKNOWN_CHECKSUM)
     }
 
-    /// Events keyed by an id that a peer claims, before any check, for which the sink creates no new
-    /// entry.
+    /// Events that can carry an id that a peer claims, for which the sink creates no new entry.
     fn is_claimed(&self) -> bool {
-        self.ev == "router_dropped"
-            || (matches!(self.ev.as_str(), "received" | "mempool_refused") && self.extra_str("via") == Some("router"))
+        matches!(self.ev.as_str(), "router_dropped" | "mempool_refused")
+            || (self.ev == "received" && self.extra_str("via") == Some("router"))
     }
 
     fn stage(&self) -> Option<usize> {
@@ -164,6 +165,8 @@ pub struct NodeStats {
     pub lost: u64,
     #[serde(skip)]
     lost_previous_boots: u64,
+    #[serde(skip)]
+    previous_boots: VecDeque<String>,
     pub last_heartbeat: Option<Value>,
 }
 
@@ -179,18 +182,26 @@ impl NodeStats {
             received: 0,
             lost: 0,
             lost_previous_boots: 0,
+            previous_boots: VecDeque::new(),
             last_heartbeat: None,
         }
     }
 
     fn lost_this_boot(&self) -> u64 {
-        (self.max_seq - self.min_seq + 1).saturating_sub(self.received)
+        (self.max_seq - self.min_seq).saturating_add(1).saturating_sub(self.received)
     }
 
-    fn record(&mut self, event: &Event) {
+    /// Records the event, and returns `false` if it is from a previous boot, which it ignores.
+    fn record(&mut self, event: &Event) -> bool {
         if self.boot != event.boot {
-            self.lost_previous_boots += self.lost_this_boot();
-            self.boot = event.boot.clone();
+            if self.previous_boots.contains(&event.boot) {
+                return false;
+            }
+            self.lost_previous_boots = self.lost_previous_boots.saturating_add(self.lost_this_boot());
+            if self.previous_boots.len() >= MAX_PREVIOUS_BOOTS {
+                self.previous_boots.pop_front();
+            }
+            self.previous_boots.push_back(std::mem::replace(&mut self.boot, event.boot.clone()));
             self.boots += 1;
             self.min_seq = event.seq;
             self.max_seq = event.seq;
@@ -199,7 +210,8 @@ impl NodeStats {
         self.min_seq = self.min_seq.min(event.seq);
         self.max_seq = self.max_seq.max(event.seq);
         self.received += 1;
-        self.lost = self.lost_previous_boots + self.lost_this_boot();
+        self.lost = self.lost_previous_boots.saturating_add(self.lost_this_boot());
+        true
     }
 }
 
@@ -252,8 +264,8 @@ impl Sink {
     }
 
     fn insert(&self, store: &mut Store, event: Event) {
-        if let Some(node) = store.nodes.get_mut(&event.node) {
-            node.record(&event);
+        let current_boot = if let Some(node) = store.nodes.get_mut(&event.node) {
+            node.record(&event)
         } else if store.nodes.len() >= MAX_NODES {
             store.counters.rejected_nodes += 1;
             return;
@@ -261,12 +273,13 @@ impl Sink {
             let mut node = NodeStats::new(&event);
             node.record(&event);
             store.nodes.insert(event.node.clone(), node);
-        }
+            true
+        };
         store.counters.events += 1;
 
         if event.ev == "heartbeat" {
             store.counters.heartbeats += 1;
-            if let Some(node) = store.nodes.get_mut(&event.node) {
+            if current_boot && let Some(node) = store.nodes.get_mut(&event.node) {
                 node.last_heartbeat = Some(event.extra);
             }
             return;
@@ -342,6 +355,9 @@ pub struct KeyStatus {
     pub passed_check: bool,
     pub failed_check: bool,
     pub holders: BTreeSet<String>,
+    /// Whether a node held the transaction under this checksum.
+    #[serde(skip)]
+    held: bool,
     pub last_drop: Option<Drop>,
     #[serde(rename = "final")]
     pub final_outcome: Option<Final>,
@@ -352,7 +368,7 @@ pub struct KeyStatus {
 pub struct TxStatus {
     pub tx: String,
     /// `accepted`, `rejected` or `aborted` once a node reports the transaction in a block;
-    /// otherwise `dropped` if no node holds it and one dropped it, else `pending`.
+    /// otherwise `dropped` if a node held it and every node that held it released it, else `pending`.
     pub status: &'static str,
     /// Always `true`: the chain is the source of truth.
     pub advisory: bool,
@@ -387,6 +403,7 @@ impl TxStatus {
             }
             if event.is_hold() {
                 holding.insert((key.clone(), event.node.clone()), true);
+                status.held = true;
             } else if event.is_drop() {
                 holding.insert((key.clone(), event.node.clone()), false);
                 let drop = Drop {
@@ -441,6 +458,7 @@ impl TxStatus {
             .iter()
             .filter_map(|status| status.stage)
             .max_by_key(|stage| STAGES.iter().position(|candidate| candidate == stage));
+        let held = considered.iter().any(|status| status.held);
         let holders: BTreeSet<String> = considered.iter().flat_map(|status| status.holders.iter().cloned()).collect();
         let last_drop =
             considered.iter().filter_map(|status| status.last_drop.as_ref()).max_by_key(|drop| drop.ts_ms).cloned();
@@ -451,7 +469,7 @@ impl TxStatus {
                 "rejected" => "rejected",
                 _ => "aborted",
             },
-            None if holders.is_empty() && last_drop.is_some() => "dropped",
+            None if held && holders.is_empty() => "dropped",
             None => "pending",
         };
         let stage = if final_outcome.is_some() { Some("in_block") } else { stage };
@@ -515,7 +533,7 @@ mod tests {
     fn line(node: &str, seq: u64, ev: &str, tx: &str, cks: Option<&str>, reason: Option<&str>, extra: Value) -> String {
         json!({
             "v": 1, "net": "testnet", "node": node, "ntype": "validator", "boot": "b0", "seq": seq,
-            "ts_ms": 1000 + seq, "height": 10, "ev": ev, "tx": tx, "cks": cks, "kind": "execute",
+            "ts_ms": seq.saturating_add(1000), "height": 10, "ev": ev, "tx": tx, "cks": cks, "kind": "execute",
             "reason": reason, "peer": null, "extra": extra,
         })
         .to_string()
@@ -588,6 +606,35 @@ mod tests {
     }
 
     #[test]
+    fn test_drop_without_holder_is_pending() {
+        let sink = Sink::new(limits(10, 10));
+        let client =
+            |seq, ev, extra| line("c1", seq, ev, "at1x", Some("1"), None, extra).replace("validator", "client");
+        sink.ingest(client(0, "received", json!({ "via": "rest" })).as_bytes());
+        sink.ingest(client(1, "gossiped", json!({ "site": "rest" })).as_bytes());
+        let dropped = line("n1", 0, "router_dropped", "at1x", None, Some("syncing"), json!({ "via": "router" }));
+        sink.ingest(dropped.as_bytes());
+
+        let status = sink.status("at1x").unwrap();
+        assert_eq!(status.status, "pending");
+        assert_eq!(status.last_drop.unwrap().node, "n1");
+    }
+
+    #[test]
+    fn test_dropped_once_every_holder_released() {
+        let sink = Sink::new(limits(10, 10));
+        sink.ingest(line("n1", 0, "mempool_inserted", "at1x", Some("1"), None, json!({})).as_bytes());
+        sink.ingest(worker_check("n2", 0, "1", "ok").as_bytes());
+        sink.ingest(line("n1", 1, "mempool_evicted", "at1x", Some("1"), Some("lower_fee"), json!({})).as_bytes());
+        assert_eq!(sink.status("at1x").unwrap().status, "pending");
+
+        sink.ingest(line("n2", 1, "propose_dropped", "at1x", Some("1"), Some("spend_cost"), json!({})).as_bytes());
+        let status = sink.status("at1x").unwrap();
+        assert_eq!(status.status, "dropped");
+        assert!(status.holders.is_empty());
+    }
+
+    #[test]
     fn test_background_check_failure_keeps_holder() {
         let sink = Sink::new(limits(10, 10));
         sink.ingest(line("n1", 0, "fetched", "at1x", Some("1"), None, json!({ "site": "peer_proposal" })).as_bytes());
@@ -606,10 +653,9 @@ mod tests {
         assert!(sink.status("at1x").is_none());
         assert_eq!(sink.stats()["counters"]["unattached"], 1);
 
-        let refused =
-            line("n2", 0, "mempool_refused", "at1y", Some("1"), Some("recently_seen"), json!({ "via": "rest" }));
-        sink.ingest(refused.as_bytes());
-        assert!(sink.status("at1y").is_some());
+        sink.ingest(line("n2", 0, "mempool_refused", "at1y", Some("1"), Some("recently_seen"), json!({})).as_bytes());
+        assert!(sink.status("at1y").is_none());
+        assert_eq!(sink.stats()["counters"]["unattached"], 2);
 
         sink.ingest(line("n1", 1, "gossiped", "at1x", Some("1"), None, json!({ "site": "rest" })).as_bytes());
         sink.ingest(line("n1", 2, "router_dropped", "at1x", None, Some("seen"), json!({})).as_bytes());
@@ -651,6 +697,45 @@ mod tests {
         let stats = sink.stats();
         assert_eq!(stats["nodes"]["n1"]["boots"], 2);
         assert_eq!(stats["nodes"]["n1"]["lost"], 3);
+    }
+
+    #[test]
+    fn test_extreme_sequence_numbers() {
+        let sink = Sink::new(limits(10, 10));
+        for seq in [0, u64::MAX] {
+            sink.ingest(line("n1", seq, "gossiped", "at1x", Some("1"), None, json!({})).as_bytes());
+        }
+        assert_eq!(sink.stats()["nodes"]["n1"]["lost"], u64::MAX - 2);
+
+        let restarted =
+            line("n1", u64::MAX, "gossiped", "at1x", Some("1"), None, json!({})).replace("\"b0\"", "\"b1\"");
+        sink.ingest(restarted.as_bytes());
+        sink.ingest(
+            line("n1", 0, "gossiped", "at1x", Some("1"), None, json!({})).replace("\"b0\"", "\"b1\"").as_bytes(),
+        );
+        assert_eq!(sink.stats()["nodes"]["n1"]["lost"], u64::MAX);
+    }
+
+    #[test]
+    fn test_delayed_datagram_from_previous_boot() {
+        let sink = Sink::new(limits(10, 10));
+        let event = |boot: &str, seq| {
+            line("n1", seq, "gossiped", "at1x", Some("1"), None, json!({})).replace("\"b0\"", &format!("\"{boot}\""))
+        };
+        for seq in 0..3 {
+            sink.ingest(event("b0", seq).as_bytes());
+        }
+        sink.ingest(event("b1", 0).as_bytes());
+        sink.ingest(event("b0", 5).as_bytes());
+        sink.ingest(event("b1", 1).as_bytes());
+
+        let stats = sink.stats();
+        let node = &stats["nodes"]["n1"];
+        assert_eq!(node["boot"], "b1");
+        assert_eq!(node["boots"], 2);
+        assert_eq!(node["received"], 2);
+        assert_eq!(node["lost"], 0);
+        assert_eq!(sink.events("at1x").unwrap()["events"].as_array().unwrap().len(), 6);
     }
 
     #[test]

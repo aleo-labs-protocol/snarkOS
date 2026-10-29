@@ -1259,11 +1259,9 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         if tx.write_le(LimitedWriter::new(&mut buffer, N::LATEST_MAX_TRANSACTION_SIZE())).is_err() {
             return Err(RestError::bad_request(anyhow!("Transaction size exceeds the byte limit")));
         }
-        // Without consensus, transaction events take the checksum from the serialized transaction.
         #[cfg(feature = "metrics")]
-        let serialized_checksum = (rest.consensus.is_none() && metrics::tx_events::get().is_some())
-            .then(move || Data::<Transaction<N>>::Buffer(buffer.into()).to_checksum::<N>().ok())
-            .flatten();
+        let checksum = metrics::tx_events::get()
+            .and_then(|_| Data::<Transaction<N>>::Buffer(buffer.into()).to_checksum::<N>().ok());
         #[cfg(not(feature = "metrics"))]
         drop(buffer);
 
@@ -1322,12 +1320,10 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         };
 
         // If the consensus module is enabled, add the unconfirmed transaction to the memory pool.
-        #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
-        let checksum = match rest.consensus {
+        if let Some(consensus) = rest.consensus {
             // Add the unconfirmed transaction to the memory pool.
-            Some(consensus) => Some(consensus.add_unconfirmed_transaction(tx.clone(), false).await?),
-            None => None,
-        };
+            consensus.add_unconfirmed_transaction(tx.clone()).await?;
+        }
 
         // Broadcast the transaction.
         rest.routing.propagate(message, &[]);
@@ -1336,7 +1332,6 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         #[cfg(feature = "metrics")]
         if let Some(events) = metrics::tx_events::get() {
             use metrics::tx_events::{TxEvent, json};
-            let checksum = checksum.or(serialized_checksum);
             let kind = metrics::transaction_kind(&tx);
             let checked = check_elapsed
                 .map(|elapsed| TxEvent::checked::<N, (), &str>("rest", kind, &tx_id, checksum, &Ok(()), elapsed));

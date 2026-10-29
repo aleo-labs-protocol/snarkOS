@@ -84,7 +84,7 @@ async fn test_udp_ingest_and_http_queries() {
 
     let batch = [
         line(0, "received", "1", json!({ "via": "rest" })),
-        line(1, "mempool_inserted", "1", json!({ "via": "rest" })),
+        line(1, "mempool_inserted", "1", json!({ "prio_fee": 0, "qlen": 1 })),
         line(2, "checked", "1", json!({ "site": "worker", "outcome": "ok" })),
     ]
     .join("\n");

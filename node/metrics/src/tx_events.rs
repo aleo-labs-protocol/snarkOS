@@ -15,8 +15,8 @@
 
 //! Per-transaction events, sent as JSON lines over UDP to an address set with `--tx-events`.
 //!
-//! Delivery is best-effort: a send that fails is counted in the `emit_dropped` field of the next
-//! heartbeat and is otherwise ignored. Each line carries the process's `boot` id and a `seq`
+//! Delivery is best-effort: an event whose send fails is counted in the `emit_dropped` field of the
+//! next heartbeat and is otherwise ignored. Each line carries the process's `boot` id and a `seq`
 //! number, so a receiver can count lost events.
 
 use serde::Serialize;
@@ -38,9 +38,10 @@ use std::{
     sync::{
         OnceLock,
         atomic::{AtomicU32, AtomicU64, Ordering},
+        mpsc::{self, Receiver, SyncSender, TrySendError},
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 /// The schema version in the `v` field.
@@ -54,6 +55,8 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_ERR_BYTES: usize = 256;
 /// The lowest HTTP status counted in a heartbeat's `rest_status`.
 const MIN_ERROR_STATUS: u16 = 400;
+/// The number of blocks queued for the background thread; the events of further blocks are dropped.
+const MAX_QUEUED_BLOCKS: usize = 256;
 
 static TX_EVENTS: OnceLock<TxEvents> = OnceLock::new();
 static HEIGHT: AtomicU32 = AtomicU32::new(0);
@@ -72,7 +75,13 @@ pub fn set_height(height: u32) {
     HEIGHT.store(height, Ordering::Relaxed);
 }
 
-/// Starts sending events to `target`, and a heartbeat from a background thread.
+/// Returns the `height` and `ts_ms` fields for an event sent now.
+fn stamp() -> (u32, u64) {
+    let ts_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64);
+    (HEIGHT.load(Ordering::Relaxed), ts_ms)
+}
+
+/// Starts sending events to `target`, and a heartbeat and the block events from a background thread.
 pub fn initialize(target: SocketAddr, net: &'static str, node: String, ntype: &'static str) -> io::Result<()> {
     let bind: SocketAddr =
         if target.is_ipv4() { (Ipv4Addr::UNSPECIFIED, 0).into() } else { (Ipv6Addr::UNSPECIFIED, 0).into() };
@@ -81,6 +90,7 @@ pub fn initialize(target: SocketAddr, net: &'static str, node: String, ntype: &'
     socket.set_nonblocking(true)?;
 
     let boot = format!("{:016x}", RandomState::new().hash_one(SystemTime::now()));
+    let (blocks, queued_blocks) = mpsc::sync_channel(MAX_QUEUED_BLOCKS);
     let mut fresh = false;
     let events = TX_EVENTS.get_or_init(|| {
         fresh = true;
@@ -93,16 +103,18 @@ pub fn initialize(target: SocketAddr, net: &'static str, node: String, ntype: &'
             seq: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             rest_status: std::array::from_fn(|_| AtomicU64::new(0)),
+            blocks,
         }
     });
     if !fresh {
         return Err(io::Error::new(io::ErrorKind::AlreadyExists, "transaction events are already initialized"));
     }
-    thread::Builder::new().name("tx-events".to_string()).spawn(move || events.run_heartbeat())?;
+    thread::Builder::new().name("tx-events".to_string()).spawn(move || events.run(queued_blocks))?;
     Ok(())
 }
 
 /// One transaction event. The envelope fields are added when it is sent.
+#[derive(Clone)]
 pub struct TxEvent {
     pub ev: &'static str,
     pub tx: Option<String>,
@@ -181,6 +193,15 @@ struct Envelope<'a> {
     extra: &'a Value,
 }
 
+/// The events of one block, for the background thread.
+struct BlockJob {
+    ev: &'static str,
+    hash: String,
+    num_events: u64,
+    stamp: (u32, u64),
+    outcomes: Box<dyn FnOnce() -> Vec<TxEvent> + Send>,
+}
+
 /// The process-wide event emitter.
 pub struct TxEvents {
     socket: UdpSocket,
@@ -191,6 +212,7 @@ pub struct TxEvents {
     seq: AtomicU64,
     dropped: AtomicU64,
     rest_status: [AtomicU64; 200],
+    blocks: SyncSender<BlockJob>,
 }
 
 impl TxEvents {
@@ -198,23 +220,28 @@ impl TxEvents {
     pub fn emit(&self, event: TxEvent) {
         LINE.with_borrow_mut(|line| {
             line.clear();
-            self.encode(&event, line);
-            self.send(line);
+            self.encode(&event, stamp(), line);
+            self.send(line, 1);
         });
     }
 
     /// Sends the events, packed into as few datagrams as fit.
     pub fn emit_all(&self, events: impl IntoIterator<Item = TxEvent>) {
+        self.emit_all_at(events, stamp());
+    }
+
+    fn emit_all_at(&self, events: impl IntoIterator<Item = TxEvent>, stamp: (u32, u64)) {
         let mut datagram = Vec::with_capacity(MAX_DATAGRAM_BYTES);
+        let mut lines = 0;
         LINE.with_borrow_mut(|line| {
             for event in events {
                 line.clear();
-                self.encode(&event, line);
-                self.pack(&mut datagram, line);
+                self.encode(&event, stamp, line);
+                self.pack(&mut datagram, &mut lines, line);
             }
         });
-        if !datagram.is_empty() {
-            self.send(&datagram);
+        if lines > 0 {
+            self.send(&datagram, lines);
         }
     }
 
@@ -225,7 +252,7 @@ impl TxEvents {
         }
     }
 
-    fn encode(&self, event: &TxEvent, out: &mut Vec<u8>) {
+    fn encode(&self, event: &TxEvent, (height, ts_ms): (u32, u64), out: &mut Vec<u8>) {
         let envelope = Envelope {
             v: SCHEMA_VERSION,
             net: self.net,
@@ -233,8 +260,8 @@ impl TxEvents {
             ntype: self.ntype,
             boot: &self.boot,
             seq: self.seq.fetch_add(1, Ordering::Relaxed),
-            ts_ms: SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64),
-            height: HEIGHT.load(Ordering::Relaxed),
+            ts_ms,
+            height,
             ev: event.ev,
             tx: event.tx.as_deref(),
             cks: event.cks.as_deref(),
@@ -249,21 +276,32 @@ impl TxEvents {
         }
     }
 
-    /// Appends `line` to `datagram`, first sending `datagram` if `line` would not fit.
-    fn pack(&self, datagram: &mut Vec<u8>, line: &[u8]) {
+    /// Appends `line` to `datagram`, which holds `lines` lines, first sending `datagram` if `line`
+    /// would not fit.
+    fn pack(&self, datagram: &mut Vec<u8>, lines: &mut u64, line: &[u8]) {
         if !datagram.is_empty() && datagram.len() + 1 + line.len() > MAX_DATAGRAM_BYTES {
-            self.send(datagram);
+            self.send(datagram, *lines);
             datagram.clear();
+            *lines = 0;
         }
         if !datagram.is_empty() {
             datagram.push(b'\n');
         }
         datagram.extend_from_slice(line);
+        *lines += 1;
     }
 
-    fn send(&self, datagram: &[u8]) {
+    /// Sends `datagram`, which holds `lines` lines, or counts them as dropped.
+    fn send(&self, datagram: &[u8], lines: u64) {
         if datagram.is_empty() || self.socket.send(datagram).is_err() {
-            self.dropped.fetch_add(1, Ordering::Relaxed);
+            self.dropped.fetch_add(lines, Ordering::Relaxed);
+        }
+    }
+
+    /// Queues the block for the background thread, or counts its events as dropped.
+    fn queue_block(&self, job: BlockJob) {
+        if let Err(TrySendError::Full(job) | TrySendError::Disconnected(job)) = self.blocks.try_send(job) {
+            self.dropped.fetch_add(job.num_events, Ordering::Relaxed);
         }
     }
 
@@ -284,10 +322,26 @@ impl TxEvents {
         self.emit(TxEvent { ev: "heartbeat", tx: None, cks: None, kind: None, reason: None, extra });
     }
 
-    fn run_heartbeat(&self) {
+    /// Sends a heartbeat every `HEARTBEAT_INTERVAL`, and the events of the queued blocks. The
+    /// outcomes of the last block are reused for the next job of the same block.
+    fn run(&self, blocks: Receiver<BlockJob>) {
+        let mut last_block: Option<(String, Vec<TxEvent>)> = None;
+        let mut next_heartbeat = Instant::now();
         loop {
-            self.heartbeat();
-            thread::sleep(HEARTBEAT_INTERVAL);
+            if Instant::now() >= next_heartbeat {
+                self.heartbeat();
+                next_heartbeat = Instant::now() + HEARTBEAT_INTERVAL;
+            }
+            // The sender lives as long as `self`, so this fails only on a timeout.
+            let Ok(job) = blocks.recv_timeout(next_heartbeat.saturating_duration_since(Instant::now())) else {
+                continue;
+            };
+            let outcomes = match last_block.take() {
+                Some((hash, outcomes)) if hash == job.hash => outcomes,
+                _ => (job.outcomes)(),
+            };
+            self.emit_all_at(outcomes.iter().map(|event| TxEvent { ev: job.ev, ..event.clone() }), job.stamp);
+            last_block = Some((job.hash, outcomes));
         }
     }
 }
@@ -298,14 +352,15 @@ pub fn transaction_checksum<N: Network>(transaction: &Transaction<N>) -> Option<
 }
 
 /// Emits one event named `ev` per transaction in the block, including aborted transactions, with
-/// `extra.outcome` set to `accepted`, `rejected` or `aborted`.
+/// `extra.outcome` set to `accepted`, `rejected` or `aborted`. This copies the ids and checksums, and
+/// clones only the transactions whose id or checksum is costly to find. The background thread builds
+/// and sends the events.
 pub fn emit_block_outcomes<N: Network>(ev: &'static str, block: &Block<N>) {
     let Some(events) = get() else {
         return;
     };
-    let num_transactions = block.transactions().len() + block.aborted_transaction_ids().len();
     let mut checksums: HashMap<N::TransactionID, Vec<N::TransmissionChecksum>> =
-        HashMap::with_capacity(num_transactions);
+        HashMap::with_capacity(block.transactions().len() + block.aborted_transaction_ids().len());
     if let Authority::Quorum(subdag) = block.authority() {
         for transmission_id in subdag.transmission_ids() {
             if let TransmissionID::Transaction(transaction_id, checksum) = transmission_id {
@@ -313,42 +368,71 @@ pub fn emit_block_outcomes<N: Network>(ev: &'static str, block: &Block<N>) {
             }
         }
     }
+    // A rejected transaction, or an id that appears with several checksums, needs the transaction.
+    let confirmed: Vec<_> = block
+        .transactions()
+        .iter()
+        .map(|confirmed| {
+            let (kind, outcome, transaction_id) = match confirmed {
+                ConfirmedTransaction::AcceptedDeploy(_, transaction, _) => {
+                    ("deploy", "accepted", Some(transaction.id()))
+                }
+                ConfirmedTransaction::AcceptedExecute(_, transaction, _) => {
+                    ("execute", "accepted", Some(transaction.id()))
+                }
+                ConfirmedTransaction::RejectedDeploy(..) => ("deploy", "rejected", None),
+                ConfirmedTransaction::RejectedExecute(..) => ("execute", "rejected", None),
+            };
+            let needs_transaction = transaction_id.is_none_or(|transaction_id| {
+                checksums.get(&transaction_id).is_some_and(|candidates| candidates.len() > 1)
+            });
+            (kind, outcome, transaction_id, needs_transaction.then(|| confirmed.clone()))
+        })
+        .collect();
+    let aborted = block.aborted_transaction_ids().clone();
     let height = block.height();
-    let mut out = Vec::with_capacity(num_transactions);
-    for confirmed in block.transactions().iter() {
-        let Ok(transaction_id) = confirmed.to_unconfirmed_transaction_id() else {
-            continue;
-        };
-        let (kind, outcome) = match confirmed {
-            ConfirmedTransaction::AcceptedDeploy(..) => ("deploy", "accepted"),
-            ConfirmedTransaction::AcceptedExecute(..) => ("execute", "accepted"),
-            ConfirmedTransaction::RejectedDeploy(..) => ("deploy", "rejected"),
-            ConfirmedTransaction::RejectedExecute(..) => ("execute", "rejected"),
-        };
-        // An id that appears with several checksums is resolved by hashing the transaction.
-        let checksum = match checksums.get_mut(&transaction_id) {
-            Some(candidates) if candidates.len() > 1 => {
-                let checksum = confirmed.to_unconfirmed_transaction().ok().and_then(|tx| transaction_checksum(&tx));
-                candidates.retain(|candidate| Some(*candidate) != checksum);
-                checksum
-            }
-            Some(_) => checksums.remove(&transaction_id).and_then(|candidates| candidates.first().copied()),
-            None => None,
-        };
-        let extra = json!({ "outcome": outcome, "height": height });
-        out.push(TxEvent { kind: Some(kind), extra, ..TxEvent::new::<N>(ev, &transaction_id, checksum) });
-    }
-    for transaction_id in block.aborted_transaction_ids() {
-        let extra = json!({ "outcome": "aborted", "height": height });
-        match checksums.remove(transaction_id) {
-            Some(candidates) if !candidates.is_empty() => out.extend(candidates.into_iter().map(|checksum| TxEvent {
-                extra: extra.clone(),
-                ..TxEvent::new::<N>(ev, transaction_id, Some(checksum))
-            })),
-            _ => out.push(TxEvent { extra, ..TxEvent::new::<N>(ev, transaction_id, None) }),
+    let num_events = confirmed.len() + aborted.len();
+    let outcomes = move || {
+        let mut out = Vec::with_capacity(num_events);
+        for (kind, outcome, transaction_id, confirmed) in confirmed {
+            let Some(transaction_id) =
+                transaction_id.or_else(|| confirmed.as_ref()?.to_unconfirmed_transaction_id().ok())
+            else {
+                continue;
+            };
+            // An id that appears with several checksums is resolved by hashing the transaction.
+            let checksum = match checksums.get_mut(&transaction_id) {
+                Some(candidates) if candidates.len() > 1 => {
+                    let checksum = confirmed
+                        .and_then(|confirmed| confirmed.to_unconfirmed_transaction().ok())
+                        .and_then(|tx| transaction_checksum(&tx));
+                    candidates.retain(|candidate| Some(*candidate) != checksum);
+                    checksum
+                }
+                Some(_) => checksums.remove(&transaction_id).and_then(|candidates| candidates.first().copied()),
+                None => None,
+            };
+            let extra = json!({ "outcome": outcome, "height": height });
+            out.push(TxEvent { kind: Some(kind), extra, ..TxEvent::new::<N>(ev, &transaction_id, checksum) });
         }
-    }
-    events.emit_all(out);
+        for transaction_id in &aborted {
+            let extra = json!({ "outcome": "aborted", "height": height });
+            match checksums.remove(transaction_id) {
+                Some(candidates) if !candidates.is_empty() => out.extend(candidates.into_iter().map(|checksum| {
+                    TxEvent { extra: extra.clone(), ..TxEvent::new::<N>(ev, transaction_id, Some(checksum)) }
+                })),
+                _ => out.push(TxEvent { extra, ..TxEvent::new::<N>(ev, transaction_id, None) }),
+            }
+        }
+        out
+    };
+    events.queue_block(BlockJob {
+        ev,
+        hash: block.hash().to_string(),
+        num_events: num_events as u64,
+        stamp: stamp(),
+        outcomes: Box::new(outcomes),
+    });
 }
 
 #[cfg(test)]
@@ -370,6 +454,7 @@ mod tests {
             seq: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             rest_status: std::array::from_fn(|_| AtomicU64::new(0)),
+            blocks: mpsc::sync_channel(1).0,
         }
     }
 
@@ -382,7 +467,7 @@ mod tests {
     fn test_encode_envelope() {
         let events = sample_events((Ipv4Addr::LOCALHOST, 9).into());
         let mut line = Vec::new();
-        events.encode(&sample_event("mempool_inserted"), &mut line);
+        events.encode(&sample_event("mempool_inserted"), stamp(), &mut line);
         let value: Value = serde_json::from_slice(&line).unwrap();
         for field in
             ["v", "net", "node", "ntype", "boot", "seq", "ts_ms", "height", "ev", "tx", "cks", "kind", "reason", "peer"]

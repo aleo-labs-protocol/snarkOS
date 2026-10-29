@@ -68,7 +68,7 @@ use locktick::parking_lot::{Mutex, RwLock};
 use lru::LruCache;
 #[cfg(not(feature = "locktick"))]
 use parking_lot::{Mutex, RwLock};
-use std::{future::Future, net::SocketAddr, num::NonZeroUsize, sync::Arc};
+use std::{fmt, future::Future, net::SocketAddr, num::NonZeroUsize, sync::Arc};
 use tokio::{
     sync::{Notify, oneshot},
     task::JoinHandle,
@@ -91,6 +91,22 @@ const CAPACITY_FOR_SOLUTIONS: usize = 1 << 10;
 const MAX_DEPLOYMENTS_PER_INTERVAL: usize = 1;
 
 type BftRunArgs<N> = Arc<Mutex<Option<(ConsensusSender<N>, PrimaryReceiver<N>)>>>;
+
+/// The error of [`Consensus::add_unconfirmed_transaction`] for a transaction that the memory pool refused.
+#[derive(Debug)]
+pub struct MempoolRefused {
+    /// The `outcome` label of the memory pool metric.
+    pub outcome: &'static str,
+    message: String,
+}
+
+impl fmt::Display for MempoolRefused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for MempoolRefused {}
 
 /// Wrapper around `BFT` that adds additional functionality, such as a mempool.
 ///
@@ -391,61 +407,61 @@ impl<N: Network> Consensus<N> {
     }
 
     /// Adds the given unconfirmed transaction to the memory pool, which will then eventually be passed
-    /// to the BFT layer for inclusion in a batch, and returns its transmission checksum.
-    /// `from_router` is set when a peer sent the transaction, and unset when the caller receives any
-    /// error this returns.
-    #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
-    pub async fn add_unconfirmed_transaction(
-        &self,
-        transaction: Transaction<N>,
-        from_router: bool,
-    ) -> Result<N::TransmissionChecksum> {
+    /// to the BFT layer for inclusion in a batch. A refusal is returned as a [`MempoolRefused`] error.
+    pub async fn add_unconfirmed_transaction(&self, transaction: Transaction<N>) -> Result<()> {
         // Calculate the transmission checksum.
         let checksum = Data::<Transaction<N>>::Buffer(transaction.to_bytes_le()?.into()).to_checksum::<N>()?;
         #[cfg(feature = "metrics")]
         let kind = metrics::transaction_kind(&transaction);
-        #[cfg(feature = "metrics")]
-        let via = if from_router { "router" } else { "rest" };
         // Queue the unconfirmed transaction.
         {
             let transaction_id = transaction.id();
-            // Records the memory pool outcome; `returns_ok` is set if the caller receives `Ok`.
+            // Records a refusal that returns `Ok`, and emits it.
             #[cfg(feature = "metrics")]
-            let record = |outcome, returns_ok: bool| {
-                metrics::record_mempool_transaction::<N>(
-                    kind,
-                    outcome,
-                    &transaction_id,
-                    checksum,
-                    from_router || returns_ok,
-                    via,
-                )
+            let refused = |outcome| {
+                metrics::record_mempool_transaction(kind, outcome);
+                if let Some(events) = metrics::tx_events::get() {
+                    events.emit(metrics::tx_events::TxEvent {
+                        kind: Some(kind),
+                        reason: Some(outcome),
+                        ..metrics::tx_events::TxEvent::new::<N>("mempool_refused", &transaction_id, Some(checksum))
+                    });
+                }
             };
 
             // Check that the transaction is not a fee transaction.
             if transaction.is_fee() {
                 #[cfg(feature = "metrics")]
-                record("rejected_fee_transaction", false);
-                bail!("Transaction '{}' is a fee transaction (skipping)", fmt_id(transaction_id));
+                metrics::record_mempool_transaction(kind, "rejected_fee_transaction");
+                bail!(MempoolRefused {
+                    outcome: "rejected_fee_transaction",
+                    message: format!("Transaction '{}' is a fee transaction (skipping)", fmt_id(transaction_id)),
+                });
             }
             // Check if the transaction was recently seen.
             if self.seen_transactions.lock().put(transaction_id, ()).is_some() {
                 #[cfg(feature = "metrics")]
-                record("recently_seen", true);
+                refused("recently_seen");
                 // If the transaction was recently seen, return early.
-                return Ok(checksum);
+                return Ok(());
             }
             // Check if the transaction already exists in the ledger.
             if self.ledger.contains_transmission(&TransmissionID::Transaction(transaction_id, checksum))? {
                 #[cfg(feature = "metrics")]
-                record("in_ledger", false);
-                bail!("Transaction '{}' exists in the ledger (skipping)", fmt_id(transaction_id));
+                metrics::record_mempool_transaction(kind, "in_ledger");
+                bail!(MempoolRefused {
+                    outcome: "in_ledger",
+                    message: format!("Transaction '{}' exists in the ledger (skipping)", fmt_id(transaction_id)),
+                });
             }
             // Check that the transaction is not in the mempool.
             if self.contains_transaction(&transaction_id) {
                 #[cfg(feature = "metrics")]
-                record("already_queued", false);
-                bail!("Transaction '{}' exists in the memory pool", fmt_id(transaction_id));
+                metrics::record_mempool_transaction(kind, "already_queued");
+                bail!(MempoolRefused {
+                    outcome: "already_queued",
+                    message: format!("Transaction '{}' exists in the memory pool", fmt_id(transaction_id)),
+                });
             }
             // Add the transaction to the memory pool.
             let priority_fee = transaction.priority_fee_amount()?;
@@ -457,7 +473,7 @@ impl<N: Network> Consensus<N> {
             #[cfg(feature = "metrics")]
             match &insertion {
                 Ok((QueueInsertion::Inserted | QueueInsertion::InsertedWithEviction, evicted)) => {
-                    record("accepted", false);
+                    metrics::record_mempool_transaction(kind, "accepted");
                     metrics::increment_counter(metrics::consensus::UNCONFIRMED_TRANSACTIONS);
                     let timestamp = snarkos_node_bft::helpers::now();
                     self.transmissions_tracker
@@ -479,23 +495,22 @@ impl<N: Network> Consensus<N> {
                         }
                         events.emit(metrics::tx_events::TxEvent {
                             kind: Some(kind),
-                            extra: metrics::tx_events::json!({ "via": via, "prio_fee": *priority_fee, "qlen": qlen }),
+                            extra: metrics::tx_events::json!({ "prio_fee": *priority_fee, "qlen": qlen }),
                             ..metrics::tx_events::TxEvent::new::<N>("mempool_inserted", &transaction_id, Some(checksum))
                         });
                     }
                 }
                 // A duplicate was counted and tracked when its first copy was queued.
-                Ok((QueueInsertion::Duplicate, _)) => record("already_queued", true),
+                Ok((QueueInsertion::Duplicate, _)) => refused("already_queued"),
                 // The queue returns an error only when it is full.
-                Err(_) => record("rejected_pool_full", false),
+                Err(_) => metrics::record_mempool_transaction(kind, "rejected_pool_full"),
             }
-            insertion?;
+            insertion.map_err(|err| MempoolRefused { outcome: "rejected_pool_full", message: err.to_string() })?;
             trace!("Received unconfirmed transaction '{}' in the queue", fmt_id(transaction_id));
         }
 
         // Try to process the unconfirmed transactions in the memory pool.
-        self.process_unconfirmed_transactions().await?;
-        Ok(checksum)
+        self.process_unconfirmed_transactions().await
     }
 
     /// Processes unconfirmed transactions in the mempool, and passes them to the BFT layer
@@ -711,8 +726,6 @@ impl<N: Network> Consensus<N> {
         trace!("prepare_advance_to_next_quorum_block took {:.3}s", prepare_elapsed.as_secs_f64());
         #[cfg(feature = "metrics")]
         metrics::histogram(metrics::consensus::PREPARE_ADVANCE_SECS, prepare_elapsed.as_secs_f64());
-        #[cfg(feature = "metrics")]
-        metrics::tx_events::emit_block_outcomes("speculated", &block);
 
         let check_instant = std::time::Instant::now();
         cfg_if! {
@@ -757,6 +770,8 @@ impl<N: Network> Consensus<N> {
         // returned `Ok(false)` above, which lets the BFT mark it as committed.
         self.bft.primary().gateway().ensure_block_may_be_built(block_height)?;
 
+        #[cfg(feature = "metrics")]
+        metrics::tx_events::emit_block_outcomes("speculated", &block);
         // Advance to the next block.
         let advance_instant = std::time::Instant::now();
         ledger_update.advance_to_next_block(&block)?;

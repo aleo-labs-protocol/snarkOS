@@ -31,7 +31,7 @@ Bind the sink to an address that only your nodes can reach.
 | `--tx-events <addr>` | Send events as JSON over UDP to `<addr>`. Off by default. |
 
 The node never waits for the sink.
-If a send fails, the node counts the event in `emit_dropped` and continues.
+If a send fails, or block events queue up faster than the node sends them, the node counts the lost events in `emit_dropped` and continues.
 
 ## Event schema
 
@@ -74,8 +74,8 @@ Before a node checks a transaction, its id is only what the bytes claim.
 | `checked` | REST, client relay, worker, proposer, peer-proposal and ping fetches | `check_failed` on failure | `site`: `rest`, `client_relay`, `worker`, `propose_batch`, `peer_proposal` or `worker_ping`; `outcome`: `ok` or `err`; `dur_us`; `err` (truncated text) |
 | `gossiped` | REST, client, validator | | `site`: `rest`, `client_unverified`, `client_verified` or `validator` |
 | `router_dropped` | router | `syncing`, `seen`, `bad_encoding` or `id_mismatch` | `via`: `router` |
-| `mempool_inserted` | validator | | `via`; `prio_fee`; `qlen` |
-| `mempool_refused` | validator | `recently_seen`, `already_queued`, `in_ledger`, `rejected_pool_full` or `rejected_fee_transaction` | `via`: `rest` or `router` |
+| `mempool_inserted` | validator | | `prio_fee`; `qlen` |
+| `mempool_refused` | validator | `recently_seen`, `already_queued`, `in_ledger`, `rejected_pool_full` or `rejected_fee_transaction` | |
 | `mempool_evicted` | validator | `oldest_zero_fee` or `lower_fee` | `by` (the id that took the place); `by_fee` |
 | `fetched` | validator | | `site`: `peer_proposal` or `worker_ping` |
 | `propose_dropped` | validator | `spend_cost` or `spend_overflow` | |
@@ -83,7 +83,7 @@ Before a node checks a transaction, its id is only what the bytes claim.
 | `certified` | validator | | `round`; `author` |
 | `speculated` | validator | | `outcome`: `accepted`, `rejected` or `aborted`; `height` |
 | `in_block` | validator, client | | `outcome`: `accepted`, `rejected` or `aborted`; `height` |
-| `heartbeat` | all, every 10 s | | `emit_dropped`; `rest_status` (error responses of `POST /transaction/broadcast`, by status) |
+| `heartbeat` | all, every 10 s | | `emit_dropped` (lost events); `rest_status` (error responses of `POST /transaction/broadcast`, by status) |
 
 `site` and `outcome` values match the labels of the Prometheus metrics at the same points.
 Each event is one datagram, except that the events of one REST call, batch, certificate or block are packed into as few datagrams as fit.
@@ -91,6 +91,8 @@ Each event is one datagram, except that the events of one REST call, batch, cert
 The node sends no event for a REST request that returns an error status.
 The caller already has that answer.
 A `recently_seen` or `already_queued` refusal can return success to the caller, so the node sends it.
+A validator sends every refusal of a transaction from a peer.
+The source of a `mempool_inserted` or `mempool_refused` event is in the preceding `received` event of the same node.
 
 `in_block` is sent when a node adds a block to its ledger, from consensus or from block sync.
 Blocks loaded from the CDN at startup send no events.
@@ -121,7 +123,7 @@ Returns `404` if the sink has no events for the id.
 
 | field | meaning |
 |---|---|
-| `status` | `accepted`, `rejected` or `aborted` after an `in_block` event. Otherwise `dropped` if no node holds the transaction and a node dropped it, else `pending`. |
+| `status` | `accepted`, `rejected` or `aborted` after an `in_block` event. Otherwise `dropped`: every reporting node that held the transaction has released it, and at least one held it. Else `pending`. A drop from a node that never held the transaction appears only in `last_drop`. |
 | `final` | The outcome, height, checksum and reporting nodes of the `in_block` event. `accepted` has priority over `rejected`, and `rejected` over `aborted`. |
 | `stage` | The furthest stage: `seen`, `checked`, `mempool`, `proposed`, `certified`, `speculated` or `in_block`. |
 | `holders` | The nodes whose last event shows that they hold the transaction. |
@@ -134,7 +136,8 @@ A failure under a different checksum does not change them.
 ### `GET /stats`
 
 Returns the counters of the sink, and for each node its `boot`, the `seq` range, the events received, the events lost, and the last heartbeat.
+A late event from a previous `boot` of a node does not change these statistics.
 
-`router_dropped`, and `received` and `mempool_refused` with `via: router`, are keyed by the id that a peer claims.
+`router_dropped`, `mempool_refused`, and `received` with `via: router` can carry an id that a peer claims.
 The sink does not create an entry for such an event of an unknown id.
 It counts the event in `unattached`.

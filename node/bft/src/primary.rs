@@ -898,10 +898,9 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
         {
             *self.batch_propose_start.lock() = Some(Instant::now());
         }
+        drop(lock_guard);
         #[cfg(feature = "metrics")]
         if let Some((events, transmission_ids)) = proposed {
-            // Emit outside the proposal lock.
-            drop(lock_guard);
             let extra = metrics::tx_events::json!({ "round": round });
             events.emit_all(transmission_ids.iter().filter_map(|transmission_id| {
                 metrics::tx_events::TxEvent::for_transmission("proposed", transmission_id, extra.clone())
