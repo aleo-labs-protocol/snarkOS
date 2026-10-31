@@ -177,6 +177,7 @@ impl TestNetwork {
                     false,
                     NodeDataDir::new_test(None),
                     None,
+                    1,
                 )
                 .unwrap();
                 (bft.primary().clone(), Some(bft))
@@ -191,6 +192,7 @@ impl TestNetwork {
                     false,
                     NodeDataDir::new_test(None),
                     None,
+                    1,
                 )
                 .unwrap();
                 (primary, None)

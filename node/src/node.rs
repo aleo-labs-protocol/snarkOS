@@ -107,6 +107,7 @@ impl<N: Network> Node<N> {
         dev_txs: bool,
         dev: Option<u16>,
         dev_hotswap_config: Option<DevHotswapConfig>,
+        proposal_spent_limit_multiplier: u64,
         signal_handler: Arc<SignalHandler>,
     ) -> Result<Self> {
         let validator = Arc::new(
@@ -129,6 +130,7 @@ impl<N: Network> Node<N> {
                 dev_txs,
                 dev,
                 dev_hotswap_config,
+                proposal_spent_limit_multiplier,
                 signal_handler,
             )
             .await?,
