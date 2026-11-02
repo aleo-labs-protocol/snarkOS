@@ -26,11 +26,25 @@ pub const DIRECTORY_NAME: &str = "v0/";
 /// The number of blocks to store in each chunk.
 pub const NUM_BLOCKS_PER_CHUNK: u32 = 50;
 
+/// The path of the file that describes the bucket's highest chunk.
+const LATEST_STATE_PATH: &str = "v0/latest.json";
+
 #[derive(Deserialize, Serialize, Debug, PartialEq, Eq)]
 pub struct LatestState<N: Network> {
     pub exclusive_height: u32,
     pub inclusive_height: u32,
     pub hash: N::BlockHash,
+}
+
+impl<N: Network> LatestState<N> {
+    /// Returns the state of a bucket whose highest chunk ends with `latest_block`.
+    pub fn from_block(latest_block: &Block<N>) -> Self {
+        Self {
+            exclusive_height: latest_block.height().saturating_add(1),
+            inclusive_height: latest_block.height(),
+            hash: latest_block.hash(),
+        }
+    }
 }
 
 /// The files of one chunk that are present in the bucket.
@@ -47,6 +61,12 @@ impl ChunkFiles {
     pub fn is_complete(&self) -> bool {
         self.blocks && self.checksum
     }
+}
+
+/// Returns the path of the `.blocks` file of the chunk starting at `start_height`. Its checksum is
+/// at the same path with `.sum` appended.
+pub fn chunk_path(start_height: u32) -> String {
+    format!("{DIRECTORY_NAME}{}.{}.blocks", start_height, start_height + NUM_BLOCKS_PER_CHUNK)
 }
 
 /// Returns the start height of the chunk that a `.blocks` or `.blocks.sum` path belongs to, and
@@ -100,9 +120,10 @@ impl<N: Network> BlocksBucket<N> {
         for file in self.bucket.list_files().await? {
             if let Some((start_height, is_checksum)) = parse_chunk_path(&file.file_path)? {
                 let files = chunks.entry(start_height).or_default();
-                match is_checksum {
-                    true => files.checksum = true,
-                    false => files.blocks = true,
+                if is_checksum {
+                    files.checksum = true;
+                } else {
+                    files.blocks = true;
                 }
             }
         }
@@ -122,22 +143,13 @@ impl<N: Network> BlocksBucket<N> {
 
     /// Removes `latest.json`, if it exists.
     pub async fn remove_latest_state(&self) -> Result<()> {
-        let latest_state_file_path = format!("{DIRECTORY_NAME}latest.json");
-        info!("Removing {latest_state_file_path} from the bucket.");
-        self.bucket.remove(&latest_state_file_path).await
+        info!("Removing {LATEST_STATE_PATH} from the bucket.");
+        self.bucket.remove(LATEST_STATE_PATH).await
     }
 
     /// Update the latest state of the bucket.
     pub async fn update_latest_state(&self, latest_block: &Block<N>) -> Result<()> {
-        // Prepare the latest state file path.
-        let latest_state_file_path = format!("{DIRECTORY_NAME}latest.json");
-
-        // Prepare the latest state.
-        let latest_state = LatestState::<N> {
-            exclusive_height: latest_block.height().saturating_add(1),
-            inclusive_height: latest_block.height(),
-            hash: latest_block.hash(),
-        };
+        let latest_state = LatestState::<N>::from_block(latest_block);
 
         ensure!(
             latest_state.exclusive_height.is_multiple_of(NUM_BLOCKS_PER_CHUNK),
@@ -149,22 +161,19 @@ impl<N: Network> BlocksBucket<N> {
         let json_object = serde_json::to_string(&latest_state)?;
         let json_bytes = bincode::serialize(&json_object)?;
 
-        if self.bucket.exists(&latest_state_file_path).await? {
-            info!("Updating {latest_state_file_path} to the bucket.");
+        if self.bucket.exists(LATEST_STATE_PATH).await? {
+            info!("Updating {LATEST_STATE_PATH} to the bucket.");
         } else {
-            info!("Inserting {latest_state_file_path} to the bucket.");
+            info!("Inserting {LATEST_STATE_PATH} to the bucket.");
         }
 
-        self.bucket.insert_or_update(&latest_state_file_path, &json_bytes).await
+        self.bucket.insert_or_update(LATEST_STATE_PATH, &json_bytes).await
     }
 
     /// Fetch the latest state of the bucket.
     pub async fn get_latest_state(&self) -> Result<LatestState<N>> {
-        // Prepare the latest state file path.
-        let latest_state_file_path = format!("{DIRECTORY_NAME}latest.json");
-
-        debug!("Fetching {latest_state_file_path} from the bucket.");
-        let latest_state_bytes = self.bucket.get(&latest_state_file_path).await?;
+        debug!("Fetching {LATEST_STATE_PATH} from the bucket.");
+        let latest_state_bytes = self.bucket.get(LATEST_STATE_PATH).await?;
         let json_string: String = bincode::deserialize(&latest_state_bytes)?;
 
         // Return the result
@@ -174,10 +183,7 @@ impl<N: Network> BlocksBucket<N> {
     /// Returns `true` if the given block height exists in the bucket.
     pub async fn contains_block(&self, height: u32) -> Result<bool> {
         let height_start = height - height % NUM_BLOCKS_PER_CHUNK;
-        let height_end = height_start + NUM_BLOCKS_PER_CHUNK;
-
-        // Prepare the block file path.
-        let file_path = format!("{DIRECTORY_NAME}{height_start}.{height_end}.blocks");
+        let file_path = chunk_path(height_start);
 
         // Return the result.
         self.bucket.exists(&file_path).await
@@ -210,10 +216,7 @@ impl<N: Network> BlocksBucket<N> {
             "Blocks must start at a multiple of {NUM_BLOCKS_PER_CHUNK}"
         );
 
-        let end_height = start_height + NUM_BLOCKS_PER_CHUNK;
-
-        // Prepare the blocks file path.
-        let blocks_file_path = format!("{DIRECTORY_NAME}{}.{}.blocks", start_height, end_height);
+        let blocks_file_path = chunk_path(start_height);
         // Prepare the blocks checksum file path.
         let blocks_checksum_file_path = format!("{}.sum", blocks_file_path);
 
@@ -257,16 +260,13 @@ impl<N: Network> BlocksBucket<N> {
 
         // Specify the inclusive start height.
         let start_height = blocks[0].height();
-        // Specify the exclusive end height.
-        let end_height = previous_block_height.saturating_add(1);
 
         // Prepare the blocks.
         let block_bytes = bincode::serialize(blocks)?;
         // Prepare the blocks checksum.
         let checksum = sha256(&block_bytes);
 
-        // Prepare the blocks file path.
-        let blocks_file_path = format!("{DIRECTORY_NAME}{}.{}.blocks", start_height, end_height);
+        let blocks_file_path = chunk_path(start_height);
         // Prepare the blocks checksum file path.
         let blocks_checksum_file_path = format!("{}.sum", blocks_file_path);
 
@@ -296,10 +296,7 @@ impl<N: Network> BlocksBucket<N> {
             "Blocks must start at a multiple of {NUM_BLOCKS_PER_CHUNK}"
         );
 
-        let end_height = start_height + NUM_BLOCKS_PER_CHUNK;
-
-        // Prepare the blocks file path.
-        let blocks_file_path = format!("{DIRECTORY_NAME}{}.{}.blocks", start_height, end_height);
+        let blocks_file_path = chunk_path(start_height);
         // Prepare the blocks checksum file path.
         let blocks_checksum_file_path = format!("{}.sum", blocks_file_path);
 

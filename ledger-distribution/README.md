@@ -69,7 +69,8 @@ behind, and checks that one pass repairs each.
 
 1. Catches up with the node's ledger, and checks its latest block height.
 2. Repairs the bucket, so that it holds complete chunks from height 0 that match the ledger:
-    - A chunk that is missing, or missing either of its files, below the bucket's highest file is uploaded again, as is a highest chunk that cannot be read back.
+    - If the bucket goes past the ledger, it is left as it is until the ledger catches up.
+    - A chunk that is missing, or missing either of its files, up to the bucket's highest file is uploaded again, as is a highest chunk that cannot be read back.
     - After a rollback of the ledger, `latest.json` is lowered to the last chunk that still matches, and the chunks above it are removed from the highest down.
 3. If the ledger is ahead of the bucket by 50 blocks or more, reads 50 blocks at a time from the ledger.
 4. Uploads the 50 blocks and their checksum to the bucket.

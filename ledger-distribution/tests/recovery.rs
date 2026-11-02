@@ -22,14 +22,8 @@ use common::*;
 
 use snarkos_ledger_distribution::{BlocksBucket, Bucket, LatestState, LedgerReader, sync_with_ledger};
 use snarkvm::{
-    ledger::{
-        Ledger,
-        block::Block,
-        store::{ConsensusStore, helpers::memory::ConsensusMemory},
-    },
+    ledger::{block::Block, store::helpers::memory::ConsensusMemory},
     prelude::*,
-    synthesizer::VM,
-    utilities::TestRng,
 };
 
 use aleo_std::StorageMode;
@@ -39,23 +33,12 @@ use std::sync::{Arc, atomic::AtomicBool};
 const SYNCED_PATHS: [&str; 5] =
     ["v0/0.50.blocks", "v0/0.50.blocks.sum", "v0/50.100.blocks", "v0/50.100.blocks.sum", "v0/latest.json"];
 
-/// Returns the blocks of a chain other than the node's, from its own genesis block up to height 99.
+/// Returns the blocks of a chain other than the node's, from its own genesis block up to height
+/// 149, which is past the node's ledger.
 fn fork_blocks() -> Vec<Block<CurrentNetwork>> {
-    let rng = &mut TestRng::default();
-    let private_key = PrivateKey::<CurrentNetwork>::new(rng).unwrap();
-    let store = ConsensusStore::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>::open(StorageMode::new_test(None));
-    let genesis = VM::from(store.unwrap()).unwrap().genesis_beacon(&private_key, rng).unwrap();
-    let ledger =
-        Ledger::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>::load(genesis.clone(), StorageMode::new_test(None))
-            .unwrap();
-
-    let mut blocks = vec![genesis];
-    while ledger.latest_height() < 99 {
-        let block = ledger.prepare_advance_to_next_beacon_block(&private_key, vec![], vec![], vec![], rng).unwrap();
-        ledger.advance_to_next_block(&block).unwrap();
-        blocks.push(block);
-    }
-    blocks
+    let mut chain = Chain::<ConsensusMemory<CurrentNetwork>>::new(StorageMode::new_test(None));
+    chain.advance_to(149);
+    (0..150).map(|height| chain.ledger.get_block(height).unwrap()).collect()
 }
 
 /// The node's ledger, and the S3 server the cases' buckets live on.
@@ -95,8 +78,7 @@ impl Fixture {
         assert_eq!(object_paths(bucket).await, SYNCED_PATHS, "{case}");
         assert_eq!(blocks_bucket.get_blocks(0).await.unwrap(), self.blocks[0..50], "{case}");
         assert_eq!(blocks_bucket.get_blocks(50).await.unwrap(), self.blocks[50..100], "{case}");
-        let expected =
-            LatestState::<CurrentNetwork> { exclusive_height: 100, inclusive_height: 99, hash: self.blocks[99].hash() };
+        let expected = LatestState::from_block(&self.blocks[99]);
         assert_eq!(blocks_bucket.get_latest_state().await.unwrap(), expected, "{case}");
     }
 }
@@ -113,12 +95,9 @@ async fn sync_repairs_interrupted_and_stale_buckets() {
     let ledger_dir = tempfile::tempdir().unwrap();
     let secondary_dir = tempfile::tempdir().unwrap();
     let mut node = Node::spawn(ledger_dir.path());
-    for (index, height) in NODE_HEIGHTS.into_iter().enumerate() {
-        if index > 0 {
-            node.resume().await;
-        }
-        node.wait_for_height(height).await;
-    }
+    node.wait_for_height(NODE_HEIGHTS[0]).await;
+    node.resume().await;
+    node.wait_for_height(NODE_HEIGHTS[1]).await;
     let fork = tokio::task::spawn_blocking(fork_blocks).await.unwrap();
 
     let ledger = LedgerReader::<CurrentNetwork>::open(ledger_dir.path(), secondary_dir.path()).unwrap();
@@ -162,12 +141,11 @@ async fn sync_repairs_interrupted_and_stale_buckets() {
     // Chunks of a chain the ledger has left, all the way back to the genesis block.
     let case = "rollback";
     let (bucket, blocks_bucket) = fixture.bucket("rollback");
-    insert_chunks(&blocks_bucket, &fork).await;
+    insert_chunks(&blocks_bucket, &fork[..100]).await;
     blocks_bucket.update_latest_state(&fork[99]).await.unwrap();
     fixture.assert_sync_repairs(case, &bucket, &blocks_bucket).await;
 
-    // The same rollback, stopped after removing the lowest stale chunk, as the removal used to run
-    // from the lowest chunk up.
+    // The same rollback, stopped after removing the lowest stale chunk: a stale chunk above a hole.
     let case = "rollback interrupted";
     let (bucket, blocks_bucket) = fixture.bucket("rollback-interrupted");
     insert_chunks(&blocks_bucket, &fork[50..100]).await;
@@ -179,6 +157,16 @@ async fn sync_repairs_interrupted_and_stale_buckets() {
     let (bucket, blocks_bucket) = fixture.bucket("latest-without-chunks");
     blocks_bucket.update_latest_state(&fork[49]).await.unwrap();
     fixture.assert_sync_repairs(case, &bucket, &blocks_bucket).await;
+
+    // Chunks past the ledger are left as they are until the ledger reaches them.
+    let (bucket, blocks_bucket) = fixture.bucket("past-the-ledger");
+    insert_chunks(&blocks_bucket, &fork).await;
+    blocks_bucket.update_latest_state(&fork[149]).await.unwrap();
+    let paths = object_paths(&bucket).await;
+    fixture.sync(&blocks_bucket).await.unwrap();
+    assert_eq!(object_paths(&bucket).await, paths);
+    assert_eq!(blocks_bucket.get_blocks(100).await.unwrap(), fork[100..150]);
+    assert_eq!(blocks_bucket.get_latest_state().await.unwrap(), LatestState::from_block(&fork[149]));
 
     // A `.blocks` name that is not a chunk is reported, rather than panicking.
     let (bucket, blocks_bucket) = fixture.synced_bucket("unexpected-name").await;

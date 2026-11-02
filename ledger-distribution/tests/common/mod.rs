@@ -22,6 +22,7 @@ use snarkvm::{
     ledger::{
         Ledger,
         store::{
+            ConsensusStorage,
             ConsensusStore,
             helpers::{memory::ConsensusMemory, rocksdb::ConsensusDB},
         },
@@ -65,6 +66,37 @@ pub const BUCKET_NAME: &str = "blocks";
 pub const ACCESS_KEY: &str = "access-key";
 pub const SECRET_KEY: &str = "secret-key";
 
+/// A chain with a genesis block of its own, and the key and randomness that extend it.
+pub struct Chain<C: ConsensusStorage<CurrentNetwork>> {
+    pub ledger: Ledger<CurrentNetwork, C>,
+    private_key: PrivateKey<CurrentNetwork>,
+    rng: TestRng,
+}
+
+impl<C: ConsensusStorage<CurrentNetwork>> Chain<C> {
+    /// Starts a chain, with its ledger in `storage`.
+    pub fn new(storage: StorageMode) -> Self {
+        let mut rng = TestRng::default();
+        let private_key = PrivateKey::<CurrentNetwork>::new(&mut rng).unwrap();
+        let store =
+            ConsensusStore::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>::open(StorageMode::new_test(None));
+        let genesis = VM::from(store.unwrap()).unwrap().genesis_beacon(&private_key, &mut rng).unwrap();
+        let ledger = Ledger::load(genesis, storage).unwrap();
+        Self { ledger, private_key, rng }
+    }
+
+    /// Extends the chain with empty blocks up to `height`.
+    pub fn advance_to(&mut self, height: u32) {
+        while self.ledger.latest_height() < height {
+            let block = self
+                .ledger
+                .prepare_advance_to_next_beacon_block(&self.private_key, vec![], vec![], vec![], &mut self.rng)
+                .unwrap();
+            self.ledger.advance_to_next_block(&block).unwrap();
+        }
+    }
+}
+
 /// Plays the node: writes a ledger to the directory in `LEDGER_DIR_VAR`, up to each height in
 /// `NODE_HEIGHTS` in turn. After each, it prints the height and waits for a line on stdin.
 ///
@@ -77,22 +109,10 @@ fn node_writing_a_ledger() {
         return;
     };
 
-    let rng = &mut TestRng::default();
-    let private_key = PrivateKey::<CurrentNetwork>::new(rng).unwrap();
-    let store = ConsensusStore::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>::open(StorageMode::new_test(None));
-    let genesis = VM::from(store.unwrap()).unwrap().genesis_beacon(&private_key, rng).unwrap();
-    let ledger = Ledger::<CurrentNetwork, ConsensusDB<CurrentNetwork>>::load(
-        genesis,
-        StorageMode::Custom(ledger_dir.into(), None),
-    )
-    .unwrap();
-
+    let mut chain = Chain::<ConsensusDB<CurrentNetwork>>::new(StorageMode::Custom(ledger_dir.into(), None));
     let mut stdin = std::io::stdin().lock().lines();
     for height in NODE_HEIGHTS {
-        while ledger.latest_height() < height {
-            let block = ledger.prepare_advance_to_next_beacon_block(&private_key, vec![], vec![], vec![], rng).unwrap();
-            ledger.advance_to_next_block(&block).unwrap();
-        }
+        chain.advance_to(height);
         println!("{NODE_HEIGHT_PREFIX} {height}");
         stdin.next();
     }
