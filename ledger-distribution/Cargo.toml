@@ -21,48 +21,31 @@ publish = false
 name = "ledger-distribution"
 path = "src/main.rs"
 
+[dependencies.aleo-std]
+workspace = true
+features = [ "storage" ]
+
 [dependencies.anyhow]
 workspace = true
 
 [dependencies.axum]
-version = "0.4.8"
-
-[dependencies.backoff]
-version = "0.4"
-features = [ "tokio" ]
+workspace = true
 
 [dependencies.bincode]
 workspace = true
 
-[dependencies.colored]
-workspace = true
-
-[dependencies.dotenv]
+[dependencies.dotenvy]
 version = "0.15"
 
 [dependencies.futures]
 workspace = true
 
-[dependencies.hyper]
-version = "0.14"
-
-[dependencies.hyper-tls]
-version = "0.5"
-
 [dependencies.num_cpus]
 workspace = true
 
-[dependencies.rayon]
-workspace = true
-
-[dependencies.reqwest]
-version = "0.11"
-
-[dependencies.rusoto_core]
-version = "0.48"
-
-[dependencies.rusoto_s3]
-version = "0.48"
+[dependencies.object_store]
+version = "0.14"
+features = [ "aws", "gcp" ]
 
 [dependencies.serde]
 workspace = true
@@ -77,14 +60,14 @@ default-features = false
 
 [dependencies.snarkvm]
 workspace = true
-features = [ "console", "ledger", "utilities" ]
+features = [ "console", "ledger", "rocks", "utilities" ]
 
 [dependencies.tokio]
 workspace = true
 features = [ "full" ]
 
 [dependencies.tower-http]
-version = "0.2.5"
+version = "0.7"
 features = [ "trace" ]
 
 [dependencies.tracing]
@@ -93,10 +76,6 @@ workspace = true
 [dependencies.tracing-subscriber]
 workspace = true
 features = [ "env-filter", "parking_lot" ]
-
-[dev-dependencies.aleo-std]
-workspace = true
-features = [ "storage" ]
 
 [dev-dependencies.async-trait]
 workspace = true

@@ -18,11 +18,11 @@
 #[macro_use]
 extern crate tracing;
 
-use snarkos_ledger_distribution::{Beacon, BlocksBucket, Bucket, initialize_rest_server, sync_with_beacon};
+use snarkos_ledger_distribution::{BlocksBucket, Bucket, LedgerReader, initialize_rest_server, sync_with_ledger};
 use snarkvm::{ledger::block::Block, prelude::*};
 
 use anyhow::Result;
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use std::{
     env,
     fs,
@@ -34,14 +34,13 @@ use std::{
     time::Duration,
 };
 
-/// The bucket region, unless `BLOCKS_REGION` is set.
-const DEFAULT_BLOCKS_REGION: &str = "auto";
-/// The S3-compatible endpoint, unless `BLOCKS_ENDPOINT` is set.
-const DEFAULT_BLOCKS_ENDPOINT: &str = "storage.googleapis.com";
-
-/// The base URL of the node REST API that blocks are fetched from, read from `EXPLORER_URL`.
-fn explorer_url() -> String {
-    env::var("EXPLORER_URL").expect("EXPLORER_URL must be set")
+/// Opens the node's ledger read-only: the ledger directory at `LEDGER_PATH`, with the read-only
+/// instance's own files in `LEDGER_SECONDARY_PATH`.
+fn open_ledger<N: Network>() -> Result<LedgerReader<N>> {
+    let ledger_path = env::var("LEDGER_PATH").expect("LEDGER_PATH must be set");
+    let secondary_path = env::var("LEDGER_SECONDARY_PATH").expect("LEDGER_SECONDARY_PATH must be set");
+    info!("Reading the ledger at '{ledger_path}'");
+    LedgerReader::open(ledger_path, secondary_path)
 }
 
 /// The genesis block the bucket must start with: the block in the file at `GENESIS_PATH` if it
@@ -67,7 +66,6 @@ pub fn initialize_logger(verbosity: u8) {
         .add_directive("hyper::proto=off".parse().unwrap())
         .add_directive("jsonrpsee=off".parse().unwrap())
         .add_directive("mio=off".parse().unwrap())
-        .add_directive("rusoto_core=off".parse().unwrap())
         .add_directive("tokio_util=off".parse().unwrap())
         .add_directive("want=off".parse().unwrap());
 
@@ -103,17 +101,10 @@ async fn main() -> Result<()> {
         info!("Running in DRY-RUN mode - no chunks will be removed from the bucket");
     }
 
-    info!("Loading bucket keys...\n");
-
-    let key = env::var("BUCKETS_KEY").expect("BUCKETS_KEY must be set");
-    let secret = env::var("BUCKETS_SECRET").expect("BUCKETS_SECRET must be set");
-
     // Initialize the bucket.
-    let region = env::var("BLOCKS_REGION").unwrap_or_else(|_| DEFAULT_BLOCKS_REGION.to_string());
-    let endpoint = env::var("BLOCKS_ENDPOINT").unwrap_or_else(|_| DEFAULT_BLOCKS_ENDPOINT.to_string());
-    let bucket_name = env::var("BUCKET_NAME").expect("BUCKET_NAME must be set");
-    info!("Using bucket '{bucket_name}' at endpoint '{endpoint}' (region '{region}')");
-    let bucket = Bucket::new(&region, &endpoint, &bucket_name, key, secret);
+    let bucket_url = env::var("BUCKET_URL").expect("BUCKET_URL must be set");
+    info!("Using bucket '{bucket_url}'");
+    let bucket = Bucket::from_url(&bucket_url)?;
 
     // Run the fast sync server.
     match network {
@@ -128,7 +119,7 @@ async fn main() -> Result<()> {
 async fn run_fast_sync<N: Network>(bucket: Bucket, dry_run: bool) -> Result<()> {
     // Initialize the blocks bucket.
     let blocks_bucket = BlocksBucket::<N>::new(bucket);
-    let beacon = Beacon::<N>::new(explorer_url());
+    let ledger = open_ledger::<N>()?;
     let genesis = genesis_block::<N>()?;
 
     let (_rest_runtime, _rest_handle) = initialize_rest_server(blocks_bucket.clone()).unwrap();
@@ -139,11 +130,11 @@ async fn run_fast_sync<N: Network>(bucket: Bucket, dry_run: bool) -> Result<()> 
     handle_ctrl_c(shutdown_started.clone());
 
     loop {
-        // Sync with the beacon.
+        // Sync with the ledger.
         if let Err(err) =
-            sync_with_beacon::<N>(&blocks_bucket, &beacon, &genesis, shutdown_started.clone(), dry_run).await
+            sync_with_ledger::<N>(&blocks_bucket, &ledger, &genesis, shutdown_started.clone(), dry_run).await
         {
-            error!("Failed to sync with the beacon: {}", err);
+            error!("Failed to sync with the ledger: {}", err);
         }
 
         // Shut down the script if the shutdown signal has been received.

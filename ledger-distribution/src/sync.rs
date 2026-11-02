@@ -13,89 +13,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{BlocksBucket, NUM_BLOCKS_PER_CHUNK};
+use crate::{BlocksBucket, LedgerReader, NUM_BLOCKS_PER_CHUNK};
 use snarkvm::{ledger::block::Block, prelude::*};
 
-use core::marker::PhantomData;
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Instant,
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
 };
-
-/// The node REST API that blocks are fetched from.
-pub struct Beacon<N: Network> {
-    /// The base URL of the REST API, without the network name.
-    base_url: String,
-    client: reqwest::Client,
-    _phantom: PhantomData<N>,
-}
-
-impl<N: Network> Beacon<N> {
-    /// Initializes a beacon at the given base URL.
-    pub fn new(base_url: impl Into<String>) -> Self {
-        Self { base_url: base_url.into(), client: reqwest::Client::new(), _phantom: PhantomData }
-    }
-
-    /// Returns the network name used in the REST API paths.
-    fn network() -> Result<&'static str> {
-        Ok(match N::ID {
-            MainnetV0::ID => "mainnet",
-            TestnetV0::ID => "testnet",
-            CanaryV0::ID => "canary",
-            unknown_id => bail!("Unknown network ID ({unknown_id})"),
-        })
-    }
-
-    /// Get the latest block height of the beacon.
-    pub async fn latest_height(&self) -> Result<u32> {
-        let network = Self::network()?;
-        let response = self.client.get(format!("{}/{network}/block/height/latest", self.base_url)).send().await?;
-
-        Ok(response.text().await?.parse::<u32>()?)
-    }
-
-    /// Fetch a range of blocks from the beacon REST API endpoint.
-    pub async fn get_blocks(&self, start_height: u32, end_height: u32) -> Result<Vec<Block<N>>> {
-        ensure!(end_height - start_height <= 50, "Cannot fetch more than 50 blocks at a time");
-
-        let network = Self::network()?;
-
-        info!("Fetching blocks {} to {} from the beacon", start_height, end_height);
-
-        let timer = Instant::now();
-        let response = self
-            .client
-            .get(format!("{}/{network}/blocks?start={start_height}&end={end_height}", self.base_url))
-            .send()
-            .await?;
-
-        debug!("\tFetched blocks {start_height} to {end_height} in {}ms", timer.elapsed().as_millis());
-
-        let timer = Instant::now();
-        let json_array: Vec<serde_json::Value> = serde_json::from_str(&response.text().await?)?;
-        let blocks: Vec<Block<N>> =
-            json_array.into_par_iter().map(serde_json::from_value::<Block<N>>).collect::<Result<Vec<_>, _>>()?;
-        debug!("\tDeserialized blocks {start_height} to {end_height} in {}ms", timer.elapsed().as_millis());
-
-        Ok(blocks)
-    }
-
-    /// Fetch a single block from the beacon REST API endpoint.
-    pub async fn get_block(&self, height: u32) -> Result<Block<N>> {
-        let blocks = self.get_blocks(height, height + 1).await?;
-        ensure!(blocks.len() == 1, "Expected exactly 1 block, got {}", blocks.len());
-        Ok(blocks[0].clone())
-    }
-}
 
 /// Detect and recover from a blockchain rollback.
 async fn detect_and_recover_from_rollback<N: Network>(
     blocks_bucket: &BlocksBucket<N>,
-    beacon: &Beacon<N>,
+    ledger: &LedgerReader<N>,
     latest_bucket_height: u32,
     dry_run: bool,
 ) -> Result<u32> {
@@ -114,9 +43,9 @@ async fn detect_and_recover_from_rollback<N: Network>(
         let blocks = blocks_bucket.get_blocks(chunk_start).await?;
         let bucket_block = blocks.last().unwrap().clone();
         let bucket_block_height = bucket_block.height();
-        let beacon_block = beacon.get_block(bucket_block_height).await?;
+        let ledger_block = ledger.get_block(bucket_block_height).await?;
 
-        if bucket_block.hash() == beacon_block.hash() {
+        if bucket_block.hash() == ledger_block.hash() {
             info!("Found fork point at height {}", bucket_block_height);
             break;
         }
@@ -163,33 +92,36 @@ async fn detect_and_recover_from_rollback<N: Network>(
     Ok(new_latest_height)
 }
 
-/// Sync the bucket blocks with the beacon.
+/// Sync the bucket blocks with the ledger.
 ///
 /// `genesis` is the block the bucket must start with when it is empty.
-pub async fn sync_with_beacon<N: Network>(
+pub async fn sync_with_ledger<N: Network>(
     blocks_bucket: &BlocksBucket<N>,
-    beacon: &Beacon<N>,
+    ledger: &LedgerReader<N>,
     genesis: &Block<N>,
     shutdown_started: Arc<AtomicBool>,
     dry_run: bool,
 ) -> Result<()> {
-    info!("Fetching latest beacon height...");
-    // Get the latest height of the beacon.
-    let latest_beacon_height = beacon.latest_height().await?;
+    // Read the blocks the node has written since the last pass.
+    ledger.catch_up().await?;
+
+    info!("Fetching latest ledger height...");
+    // Get the latest height of the ledger.
+    let latest_ledger_height = ledger.latest_height().await?;
 
     info!("Fetching latest bucket height...\n");
     // Get the latest height of the stored blocks.
     let latest_bucket_height = blocks_bucket.latest_height().await?;
 
-    info!("Latest bucket height {}, latest beacon height {}\n", latest_bucket_height, latest_beacon_height);
+    info!("Latest bucket height {}, latest ledger height {}\n", latest_bucket_height, latest_ledger_height);
 
     // Detect and recover from any blockchain rollback
     let latest_bucket_height =
-        detect_and_recover_from_rollback::<N>(blocks_bucket, beacon, latest_bucket_height, dry_run).await?;
+        detect_and_recover_from_rollback::<N>(blocks_bucket, ledger, latest_bucket_height, dry_run).await?;
 
     info!("Latest bucket height after rollback check: {}\n", latest_bucket_height);
 
-    // Update the blocks bucket with the latest blocks from the beacon.
+    // Update the blocks bucket with the latest blocks from the ledger.
     let mut start_height = latest_bucket_height;
     ensure!(
         start_height.is_multiple_of(NUM_BLOCKS_PER_CHUNK),
@@ -207,21 +139,21 @@ pub async fn sync_with_beacon<N: Network>(
 
     info!("Uploading blocks to bucket...\n");
     // Upload the blocks chunks to the S3 bucket.
-    while start_height <= latest_beacon_height {
-        info!("Latest bucket height {}, latest beacon height {}", start_height, latest_beacon_height);
+    while start_height <= latest_ledger_height {
+        info!("Latest bucket height {}, latest ledger height {}", start_height, latest_ledger_height);
         // Fetch the end height of the block range.
         let end_height = start_height + NUM_BLOCKS_PER_CHUNK;
 
-        if end_height > latest_beacon_height {
+        if end_height > latest_ledger_height {
             info!(
-                "Block bucket is up to date with the beacon. (To the closest block chunk of {})",
+                "Block bucket is up to date with the ledger. (To the closest block chunk of {})",
                 NUM_BLOCKS_PER_CHUNK
             );
             break;
         }
 
-        // Fetch the blocks from the beacon.
-        let blocks = beacon.get_blocks(start_height, end_height).await?;
+        // Fetch the blocks from the ledger.
+        let blocks = ledger.get_blocks(start_height, end_height).await?;
         ensure!(
             blocks.len() == NUM_BLOCKS_PER_CHUNK as usize,
             "The number of blocks fetched must be {NUM_BLOCKS_PER_CHUNK}"
@@ -250,8 +182,8 @@ pub async fn sync_with_beacon<N: Network>(
 
         // Check that the inserted blocks are correct.
         let blocks_from_bucket = blocks_bucket.get_blocks(start_height).await?;
-        debug!("Checking that the bucket and beacon blocks match...");
-        ensure!(blocks == blocks_from_bucket, "The blocks from the bucket do not match the blocks from the beacon");
+        debug!("Checking that the bucket and ledger blocks match...");
+        ensure!(blocks == blocks_from_bucket, "The blocks from the bucket do not match the blocks from the ledger");
 
         // Update the latest state.
         blocks_bucket.update_latest_state(&latest_block_in_bucket).await?;
