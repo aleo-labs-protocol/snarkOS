@@ -58,7 +58,7 @@ workspace = true
 
 [dependencies.reqwest]
 workspace = true
-features = [ "rustls" ]
+features = [ "rustls", "zstd" ]
 
 [dependencies.serde]
 workspace = true
@@ -83,10 +83,13 @@ workspace = true
 
 [dev-dependencies.tokio]
 workspace = true
-features = [ "rt", "rt-multi-thread" ]
+features = [ "io-util", "net", "rt", "rt-multi-thread" ]
 
 [dev-dependencies.tokio-test]
 version = "0.4"
+
+[dev-dependencies.zstd]
+version = "0.14"
 
 [package.metadata.cargo-machete]
 ignored = ["serde"]
