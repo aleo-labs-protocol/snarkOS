@@ -242,11 +242,12 @@ pub struct BlockSync<N: Network> {
     /// Tracks failed requests that need to be re-issued.
     failed_requests: Mutex<FailedRequests<N::BlockHash>>,
 
-    /// Tracks the last time each peer delivered a successful block response.
+    /// Tracks, for each peer, the last time it delivered a successful block response,
+    /// and the latest timestamp of any request it answered.
     ///
     /// Used in `handle_block_request_timeouts` to avoid banning peers that are actively
     /// responding but cannot keep up with the request rate.
-    last_response_at: Mutex<HashMap<SocketAddr, Instant>>,
+    last_response_at: Mutex<HashMap<SocketAddr, (Instant, Instant)>>,
 }
 
 impl<N: Network> BlockSync<N> {
@@ -1202,6 +1203,7 @@ impl<N: Network> BlockSync<N> {
 
         // Retrieve the request entry for the candidate block.
         let (expected_hash, expected_previous_hash, sync_ips) = &entry.request;
+        let request_timestamp = entry.timestamp;
 
         // Ensure the candidate block hash matches the expected hash.
         if let Some(expected_hash) = expected_hash
@@ -1244,9 +1246,17 @@ impl<N: Network> BlockSync<N> {
 
         trace!("Received a new and valid block response for height {height}");
 
-        // Record that this peer is actively responding. Used by `handle_block_request_timeouts`
-        // to avoid banning peers that are slow but making progress.
-        self.last_response_at.lock().insert(peer_ip, Instant::now());
+        // Record that this peer is actively responding, and the latest request it answered.
+        // Used by `handle_block_request_timeouts` to avoid banning peers that are slow but making progress.
+        let now = Instant::now();
+        self.last_response_at
+            .lock()
+            .entry(peer_ip)
+            .and_modify(|(received_at, answered_at)| {
+                *received_at = now;
+                *answered_at = (*answered_at).max(request_timestamp);
+            })
+            .or_insert((now, request_timestamp));
 
         // Notify the sync loop that something changed.
         self.response_notify.notify_one();
@@ -1345,16 +1355,20 @@ impl<N: Network> BlockSync<N> {
     ///
     /// Timed-out requests will be marked as "failed" and re-issued on the next call to `prepare_block_requests`.
     pub fn handle_block_request_timeouts(&self) {
-        // Snapshot last-response times before locking `requests`. A request whose assigned peer
-        // has responded within `BLOCK_REQUEST_TIMEOUT` is not timed out, even if its own timer
-        // has elapsed — the peer is keeping up with a backlog and timing this request out would
-        // just churn it through `failed_requests` and lose its place in the queue.
-        let responsive_peers: HashSet<SocketAddr> = {
+        // Snapshot, before locking `requests`, the peers that responded within `BLOCK_REQUEST_TIMEOUT`
+        // and the latest timestamp of any request each one answered. A request is not timed out, even
+        // if its own timer has elapsed, while an assigned peer is responsive and has not answered a
+        // request sent after it — the peer is keeping up with a backlog and timing this request out
+        // would just churn it through `failed_requests` and lose its place in the queue. A peer that
+        // answered a later request has skipped this one.
+        let responsive_peers: HashMap<SocketAddr, Instant> = {
             let last_response_at = self.last_response_at.lock();
             let now = Instant::now();
             last_response_at
                 .iter()
-                .filter_map(|(peer, t)| (now.duration_since(*t) <= BLOCK_REQUEST_TIMEOUT).then_some(*peer))
+                .filter_map(|(peer, (received_at, answered_at))| {
+                    (now.duration_since(*received_at) <= BLOCK_REQUEST_TIMEOUT).then_some((*peer, *answered_at))
+                })
                 .collect()
         };
 
@@ -1382,8 +1396,10 @@ impl<N: Network> BlockSync<N> {
                 let timer_elapsed = now.duration_since(e.timestamp) > BLOCK_REQUEST_TIMEOUT;
                 // Determine if the request is complete.
                 let is_complete = e.sync_ips().is_empty() && e.response.is_some();
-                // If any assigned peer is still actively responding, the request is not stuck.
-                let has_responsive_peer = e.sync_ips().iter().any(|ip| responsive_peers.contains(ip));
+                // If any assigned peer is still actively responding and has not skipped this request, it is not stuck.
+                let has_responsive_peer = e.sync_ips().iter().any(|ip| {
+                    responsive_peers.get(ip).is_some_and(|answered_at| *answered_at <= e.timestamp)
+                });
 
                 // Determine if the request has timed out.
                 let is_timeout = timer_elapsed && !is_complete && !has_responsive_peer;
@@ -1401,9 +1417,9 @@ impl<N: Network> BlockSync<N> {
                     trace!("Block request at height {height} became obsolete (current_height={current_height})");
                 }
 
-                // If the request timed out, also remove and ban given peer.
+                // If the request timed out, also remove and ban the unresponsive peers.
                 if is_timeout {
-                    for peer_ip in e.sync_ips().iter() {
+                    for peer_ip in e.sync_ips().iter().filter(|ip| !responsive_peers.contains_key(*ip)) {
                         peers_to_ban.insert(*peer_ip);
                     }
                 }
@@ -1435,9 +1451,8 @@ impl<N: Network> BlockSync<N> {
             }
         }
 
-        // Remove and ban the unresponsive peers. The `has_responsive_peer` check inside `retain`
-        // above already guarantees that a request only counts as timed out when none of its
-        // assigned peers have responded recently, so every peer in this set is unresponsive.
+        // Remove and ban the unresponsive peers. Peers that responded recently, but skipped a request,
+        // are not in this set.
         for peer_ip in peers_to_ban {
             self.remove_peer(&peer_ip);
             // TODO: Uncomment this when we have a more rigorous analysis and testing of peer banning.
@@ -2275,6 +2290,98 @@ mod tests {
 
         assert!(sync.requests.read().is_empty());
         assert!(sync.locators.read().is_empty());
+    }
+
+    #[test]
+    fn test_reissue_skipped_block_request() {
+        let sync = sample_sync_at_height(0);
+        let peer_ip = sample_peer_ip(1);
+        let locators = sample_block_locators(10);
+        let block_hash = locators.get_hash(1);
+
+        sync.update_peer_locators(peer_ip, &locators).unwrap();
+
+        let timestamp = Instant::now() - BLOCK_REQUEST_TIMEOUT - Duration::from_secs(1);
+
+        // Add a timed-out request that the peer never answers.
+        sync.requests.write().insert(1, OutstandingRequest {
+            request: (block_hash, None, [peer_ip].into()),
+            timestamp,
+            response: None,
+        });
+
+        // The peer recently answered a request that was sent after the one above.
+        sync.last_response_at.lock().insert(peer_ip, (Instant::now(), timestamp + Duration::from_millis(1)));
+
+        sync.handle_block_request_timeouts();
+
+        // The skipped request is marked as failed, but the responsive peer is kept.
+        assert!(sync.requests.read().is_empty());
+        assert_eq!(sync.locators.read().len(), 1);
+        assert_eq!(sync.failed_requests.lock().keys().copied().collect::<Vec<_>>(), vec![1]);
+
+        // The skipped request is re-issued.
+        let (requests, _) = sync.prepare_block_requests().pop().unwrap();
+        assert_eq!(requests.iter().map(|(height, _)| *height).collect::<Vec<_>>(), vec![1]);
+        assert!(sync.failed_requests.lock().is_empty());
+    }
+
+    #[test]
+    fn test_retain_block_request_to_backlogged_peer() {
+        let sync = sample_sync_at_height(0);
+        let peer_ip = sample_peer_ip(1);
+        let locators = sample_block_locators(10);
+        let block_hash = locators.get_hash(1);
+
+        sync.update_peer_locators(peer_ip, &locators).unwrap();
+
+        let timestamp = Instant::now() - BLOCK_REQUEST_TIMEOUT - Duration::from_secs(1);
+
+        // Add a timed-out request.
+        sync.requests.write().insert(1, OutstandingRequest {
+            request: (block_hash, None, [peer_ip].into()),
+            timestamp,
+            response: None,
+        });
+
+        // The peer recently answered a request that was sent before the one above.
+        sync.last_response_at.lock().insert(peer_ip, (Instant::now(), timestamp - Duration::from_millis(1)));
+
+        sync.handle_block_request_timeouts();
+
+        // The request and the peer are kept.
+        assert_eq!(sync.requests.read().len(), 1);
+        assert_eq!(sync.locators.read().len(), 1);
+        assert!(sync.failed_requests.lock().is_empty());
+    }
+
+    #[test]
+    fn test_retain_recent_block_request_to_skipping_peer() {
+        let sync = sample_sync_at_height(0);
+        let peer_ip = sample_peer_ip(1);
+        let locators = sample_block_locators(10);
+        let block_hash = locators.get_hash(1);
+
+        sync.update_peer_locators(peer_ip, &locators).unwrap();
+
+        let timestamp = Instant::now() - Duration::from_secs(1);
+
+        // Add a request that has not timed out yet.
+        sync.requests.write().insert(1, OutstandingRequest {
+            request: (block_hash, None, [peer_ip].into()),
+            timestamp,
+            response: None,
+        });
+
+        // The peer recently answered a request that was sent after the one above.
+        sync.last_response_at.lock().insert(peer_ip, (Instant::now(), Instant::now()));
+
+        sync.handle_block_request_timeouts();
+
+        // The request and the peer are kept.
+        assert_eq!(sync.requests.read().len(), 1);
+        assert_eq!(sync.locators.read().len(), 1);
+        assert!(sync.failed_requests.lock().is_empty());
     }
 
     #[test]
