@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use futures::TryStreamExt;
 use object_store::{
     Attribute,
@@ -60,13 +60,24 @@ impl Bucket {
     ///
     /// The credentials and other settings are read from the environment variables that the
     /// `object_store` builders read, such as `GOOGLE_SERVICE_ACCOUNT` or `AWS_ENDPOINT`.
+    ///
+    /// A URL with a path, query or fragment is an error. The `object_store` builders take only the
+    /// bucket from the URL and ignore the rest, so a path would not keep the objects apart from
+    /// others in the same bucket.
     pub fn from_url(url: &str) -> Result<Self> {
-        let store: Arc<dyn ObjectStore> = match url.split_once("://") {
-            Some(("gs", _)) => Arc::new(GoogleCloudStorageBuilder::from_env().with_url(url).build()?),
-            Some(("s3", _)) => Arc::new(AmazonS3Builder::from_env().with_url(url).build()?),
-            _ => bail!("Unsupported bucket URL '{url}': expected 'gs://<bucket>' or 's3://<bucket>'"),
+        let unsupported = || anyhow!("Unsupported bucket URL '{url}': expected 'gs://<bucket>' or 's3://<bucket>'");
+
+        let (scheme, rest) = url.split_once("://").ok_or_else(unsupported)?;
+        let bucket_name = rest.strip_suffix('/').unwrap_or(rest);
+        if bucket_name.is_empty() || bucket_name.contains(['/', '?', '#']) {
+            return Err(unsupported());
+        }
+
+        let store: Arc<dyn ObjectStore> = match scheme {
+            "gs" => Arc::new(GoogleCloudStorageBuilder::from_env().with_url(url).build()?),
+            "s3" => Arc::new(AmazonS3Builder::from_env().with_url(url).build()?),
+            _ => return Err(unsupported()),
         };
-        let bucket_name = url.split_once("://").map(|(_, rest)| rest.trim_end_matches('/')).unwrap_or_default();
         Ok(Self::new(store, bucket_name))
     }
 
@@ -128,5 +139,29 @@ impl Bucket {
         self.store.delete(&Path::from(file_path)).await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Bucket;
+
+    #[test]
+    fn from_url_takes_only_a_bucket() {
+        assert_eq!(Bucket::from_url("s3://blocks").unwrap().name(), "blocks");
+        assert_eq!(Bucket::from_url("s3://blocks/").unwrap().name(), "blocks");
+
+        for url in [
+            "gs://blocks/testnet",
+            "s3://blocks/testnet/",
+            "s3://blocks?prefix=testnet",
+            "gs://blocks#testnet",
+            "gs://",
+            "s3:///blocks",
+            "https://blocks",
+            "blocks",
+        ] {
+            assert!(Bucket::from_url(url).is_err(), "{url} was accepted");
+        }
     }
 }

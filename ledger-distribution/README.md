@@ -27,7 +27,7 @@ The binary reads its credentials and its targets from the environment:
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
-| `BUCKET_URL` | yes | — | Target bucket: `gs://<bucket>` for Google Cloud Storage, or `s3://<bucket>` for an S3-compatible service |
+| `BUCKET_URL` | yes | — | Target bucket: `gs://<bucket>` for Google Cloud Storage, or `s3://<bucket>` for an S3-compatible service. Objects go under `v0/` at the bucket's root; a path in the URL is rejected |
 | `EXPLORER_URL` | yes | — | Base URL of the node REST API that blocks are fetched from |
 | `GENESIS_PATH` | no | the network's genesis block | File holding the genesis block (as written by `snarkos start --dev`) that an empty bucket must start with |
 
