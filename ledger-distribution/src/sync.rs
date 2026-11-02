@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{BlocksBucket, LedgerReader, NUM_BLOCKS_PER_CHUNK};
+use crate::{BlocksBucket, LatestState, LedgerReader, NUM_BLOCKS_PER_CHUNK};
 use snarkvm::{ledger::block::Block, prelude::*};
 
 use std::sync::{
@@ -21,75 +21,160 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-/// Detect and recover from a blockchain rollback.
-async fn detect_and_recover_from_rollback<N: Network>(
+/// Replaces the chunk starting at `start_height` with the ledger's blocks.
+async fn reupload_chunk<N: Network>(
     blocks_bucket: &BlocksBucket<N>,
     ledger: &LedgerReader<N>,
-    latest_bucket_height: u32,
+    start_height: u32,
+) -> Result<()> {
+    blocks_bucket.remove_blocks_chunk(start_height).await?;
+    let blocks = ledger.get_blocks(start_height, start_height + NUM_BLOCKS_PER_CHUNK).await?;
+    blocks_bucket.insert_blocks(&blocks).await?;
+    ensure!(
+        blocks_bucket.get_blocks(start_height).await? == blocks,
+        "The blocks from the bucket do not match the blocks from the ledger"
+    );
+    Ok(())
+}
+
+/// Repairs what an interrupted pass or a rollback of the ledger leaves in the bucket, and returns
+/// the exclusive height up to which the bucket then holds complete chunks that match the ledger.
+///
+/// The repairs, in order:
+/// - A chunk that is missing, or missing either of its files, below the bucket's highest chunk
+///   file is uploaded again if the ledger has its blocks, and has any remaining file removed
+///   otherwise.
+/// - The highest chunk is uploaded again if its blocks cannot be read back.
+/// - Chunks that no longer match the ledger are removed, from the highest down, once `latest.json`
+///   no longer points at them.
+///
+/// With `dry_run`, it reports the first repair it would make instead, and returns `None`.
+async fn reconcile_bucket<N: Network>(
+    blocks_bucket: &BlocksBucket<N>,
+    ledger: &LedgerReader<N>,
+    latest_ledger_height: u32,
     dry_run: bool,
-) -> Result<u32> {
-    if latest_bucket_height == 0 {
-        return Ok(0);
+) -> Result<Option<u32>> {
+    let ledger_has_chunk = |start_height: u32| start_height + NUM_BLOCKS_PER_CHUNK <= latest_ledger_height + 1;
+
+    let chunks = blocks_bucket.chunks().await?;
+    let top = chunks.last_key_value().map(|(start_height, _)| start_height + NUM_BLOCKS_PER_CHUNK).unwrap_or(0);
+    for start_height in (0..top).step_by(NUM_BLOCKS_PER_CHUNK as usize) {
+        let files = chunks.get(&start_height).copied().unwrap_or_default();
+        if files.is_complete() {
+            continue;
+        }
+        warn!("The chunk at height {start_height} is incomplete ({files:?})");
+        if dry_run {
+            warn!("DRY-RUN: would replace it");
+            return Ok(None);
+        }
+        match ledger_has_chunk(start_height) {
+            true => reupload_chunk(blocks_bucket, ledger, start_height).await?,
+            false => blocks_bucket.remove_blocks_chunk(start_height).await?,
+        }
+    }
+
+    // Uploads are the only writes that can stop partway, and the highest chunk is the last one uploaded.
+    let mut top = blocks_bucket.latest_height().await?;
+    if top > 0 {
+        let start_height = top - NUM_BLOCKS_PER_CHUNK;
+        if let Err(error) = blocks_bucket.get_blocks(start_height).await {
+            warn!("The chunk at height {start_height} cannot be read back: {error}");
+            if dry_run {
+                warn!("DRY-RUN: would replace it");
+                return Ok(None);
+            }
+            match ledger_has_chunk(start_height) {
+                true => reupload_chunk(blocks_bucket, ledger, start_height).await?,
+                false => {
+                    blocks_bucket.remove_blocks_chunk(start_height).await?;
+                    top = start_height;
+                }
+            }
+        }
     }
 
     info!("Checking for blockchain rollback...");
 
-    let mut current_height = latest_bucket_height;
-    let mut chunks_to_remove = Vec::new();
-
-    loop {
-        let chunk_start = current_height.saturating_sub(NUM_BLOCKS_PER_CHUNK);
-
-        let blocks = blocks_bucket.get_blocks(chunk_start).await?;
-        let bucket_block = blocks.last().unwrap().clone();
-        let bucket_block_height = bucket_block.height();
-        let ledger_block = ledger.get_block(bucket_block_height).await?;
+    // The start heights of the chunks that no longer match the ledger, highest first.
+    let mut stale_chunks = Vec::new();
+    // The last block of the highest chunk that matches the ledger.
+    let mut fork_block = None;
+    let mut fork_height = top;
+    while fork_height > 0 {
+        let start_height = fork_height - NUM_BLOCKS_PER_CHUNK;
+        let blocks = blocks_bucket.get_blocks(start_height).await?;
+        let bucket_block = blocks.last().unwrap();
+        let ledger_block = ledger.get_block(bucket_block.height()).await?;
 
         if bucket_block.hash() == ledger_block.hash() {
-            info!("Found fork point at height {}", bucket_block_height);
+            info!("Found fork point at height {}", bucket_block.height());
+            fork_block = Some(bucket_block.clone());
             break;
         }
 
-        warn!("Hash mismatch at height {}.", bucket_block_height);
-        chunks_to_remove.push(chunk_start);
-        if chunk_start == 0 {
-            break;
-        }
-        current_height = chunk_start;
+        warn!("Hash mismatch at height {}.", bucket_block.height());
+        stale_chunks.push(start_height);
+        fork_height = start_height;
     }
 
-    if chunks_to_remove.is_empty() {
-        return Ok(latest_bucket_height);
+    if stale_chunks.is_empty() {
+        return Ok(Some(top));
     }
-
-    let new_latest_height = if chunks_to_remove.contains(&0) { 0 } else { *chunks_to_remove.last().unwrap() };
 
     if dry_run {
-        warn!("DRY-RUN: would remove {} stale chunk(s):", chunks_to_remove.len());
-        for chunk_start in chunks_to_remove.iter().rev() {
-            let chunk_end = chunk_start + NUM_BLOCKS_PER_CHUNK;
-            warn!("  - v0/{}.{}.blocks", chunk_start, chunk_end);
+        warn!("DRY-RUN: would remove {} stale chunk(s):", stale_chunks.len());
+        for start_height in &stale_chunks {
+            warn!("  - v0/{}.{}.blocks", start_height, start_height + NUM_BLOCKS_PER_CHUNK);
         }
-        warn!("DRY-RUN: latest bucket height would change from {} to {}", latest_bucket_height, new_latest_height);
-        return Ok(latest_bucket_height);
+        warn!("DRY-RUN: latest bucket height would change from {top} to {fork_height}");
+        return Ok(None);
     }
 
-    info!("Removing {} stale chunk(s)...", chunks_to_remove.len());
-    for chunk_start in chunks_to_remove.iter().rev() {
-        blocks_bucket.remove_blocks_chunk(*chunk_start).await?;
+    // Lowered first, so that `latest.json` never points at a removed chunk.
+    match &fork_block {
+        Some(block) => blocks_bucket.update_latest_state(block).await?,
+        None => blocks_bucket.remove_latest_state().await?,
+    }
+    // From the highest down, so that an interruption leaves the remaining chunks unbroken.
+    info!("Removing {} stale chunk(s)...", stale_chunks.len());
+    for start_height in stale_chunks {
+        blocks_bucket.remove_blocks_chunk(start_height).await?;
+    }
+    info!("New latest bucket height: {fork_height}");
+
+    Ok(Some(fork_height))
+}
+
+/// Makes `latest.json` describe the bucket, whose chunks end at `exclusive_height` with
+/// `latest_block`, or removes it if the bucket has no chunks.
+async fn reconcile_latest_state<N: Network>(
+    blocks_bucket: &BlocksBucket<N>,
+    exclusive_height: u32,
+    latest_block: &Block<N>,
+    dry_run: bool,
+) -> Result<()> {
+    if exclusive_height == 0 {
+        if !dry_run {
+            blocks_bucket.remove_latest_state().await?;
+        }
+        return Ok(());
     }
 
-    if new_latest_height > 0 {
-        info!("New latest bucket height: {}", new_latest_height);
+    let expected =
+        LatestState::<N> { exclusive_height, inclusive_height: latest_block.height(), hash: latest_block.hash() };
+    let current = blocks_bucket.get_latest_state().await.ok();
+    if current.as_ref() == Some(&expected) {
+        return Ok(());
     }
 
-    if new_latest_height > 0 {
-        let blocks = blocks_bucket.get_blocks(new_latest_height.saturating_sub(NUM_BLOCKS_PER_CHUNK)).await?;
-        let latest_block = blocks[blocks.len() - 1].clone();
-        blocks_bucket.update_latest_state(&latest_block).await?;
+    warn!("latest.json is {current:?}, but the bucket ends at height {exclusive_height}");
+    if dry_run {
+        warn!("DRY-RUN: would correct it");
+        return Ok(());
     }
-
-    Ok(new_latest_height)
+    blocks_bucket.update_latest_state(latest_block).await
 }
 
 /// Sync the bucket blocks with the ledger.
@@ -109,17 +194,13 @@ pub async fn sync_with_ledger<N: Network>(
     // Get the latest height of the ledger.
     let latest_ledger_height = ledger.latest_height().await?;
 
-    info!("Fetching latest bucket height...\n");
-    // Get the latest height of the stored blocks.
-    let latest_bucket_height = blocks_bucket.latest_height().await?;
+    info!("Checking the bucket against the ledger...\n");
+    let Some(latest_bucket_height) = reconcile_bucket(blocks_bucket, ledger, latest_ledger_height, dry_run).await?
+    else {
+        return Ok(());
+    };
 
     info!("Latest bucket height {}, latest ledger height {}\n", latest_bucket_height, latest_ledger_height);
-
-    // Detect and recover from any blockchain rollback
-    let latest_bucket_height =
-        detect_and_recover_from_rollback::<N>(blocks_bucket, ledger, latest_bucket_height, dry_run).await?;
-
-    info!("Latest bucket height after rollback check: {}\n", latest_bucket_height);
 
     // Update the blocks bucket with the latest blocks from the ledger.
     let mut start_height = latest_bucket_height;
@@ -212,5 +293,7 @@ pub async fn sync_with_ledger<N: Network>(
         }
     }
 
-    Ok(())
+    // An interruption between uploading a chunk and updating `latest.json` leaves it behind the
+    // bucket, and nothing else corrects it until another chunk is uploaded.
+    reconcile_latest_state(blocks_bucket, start_height, &latest_block_in_bucket, dry_run).await
 }

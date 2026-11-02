@@ -18,7 +18,7 @@ use snarkvm::{ledger::block::Block, prelude::*};
 
 use core::marker::PhantomData;
 use sha2::{Digest, Sha256};
-use std::time::Instant;
+use std::{collections::BTreeMap, time::Instant};
 
 /// The name of the directory containing blocks in the bucket.
 pub const DIRECTORY_NAME: &str = "v0/";
@@ -26,11 +26,53 @@ pub const DIRECTORY_NAME: &str = "v0/";
 /// The number of blocks to store in each chunk.
 pub const NUM_BLOCKS_PER_CHUNK: u32 = 50;
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, PartialEq, Eq)]
 pub struct LatestState<N: Network> {
     pub exclusive_height: u32,
     pub inclusive_height: u32,
     pub hash: N::BlockHash,
+}
+
+/// The files of one chunk that are present in the bucket.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChunkFiles {
+    /// The `.blocks` file, holding the chunk's blocks.
+    pub blocks: bool,
+    /// The `.blocks.sum` file, holding the checksum of the `.blocks` file.
+    pub checksum: bool,
+}
+
+impl ChunkFiles {
+    /// Returns `true` if both of the chunk's files are present.
+    pub fn is_complete(&self) -> bool {
+        self.blocks && self.checksum
+    }
+}
+
+/// Returns the start height of the chunk that a `.blocks` or `.blocks.sum` path belongs to, and
+/// whether the path is the checksum, or `None` for any other path.
+///
+/// A chunk path that does not name a whole chunk, such as `v0/foo.blocks`, is an error.
+fn parse_chunk_path(path: &str) -> Result<Option<(u32, bool)>> {
+    let Some(name) = path.strip_prefix(DIRECTORY_NAME) else {
+        return Ok(None);
+    };
+    let (range, is_checksum) = match (name.strip_suffix(".blocks.sum"), name.strip_suffix(".blocks")) {
+        (Some(range), _) => (range, true),
+        (None, Some(range)) => (range, false),
+        (None, None) => return Ok(None),
+    };
+
+    let parsed =
+        range.split_once('.').and_then(|(start, end)| Some((start.parse::<u32>().ok()?, end.parse::<u32>().ok()?)));
+    match parsed {
+        Some((start, end))
+            if start.is_multiple_of(NUM_BLOCKS_PER_CHUNK) && Some(end) == start.checked_add(NUM_BLOCKS_PER_CHUNK) =>
+        {
+            Ok(Some((start, is_checksum)))
+        }
+        _ => bail!("Unexpected chunk file in the bucket: '{path}'"),
+    }
 }
 
 #[derive(Clone)]
@@ -52,29 +94,37 @@ impl<N: Network> BlocksBucket<N> {
         self.bucket.name()
     }
 
-    /// Fetches the latest block height.
+    /// Returns the files present for each chunk in the bucket, by the chunk's start height.
+    pub async fn chunks(&self) -> Result<BTreeMap<u32, ChunkFiles>> {
+        let mut chunks = BTreeMap::<u32, ChunkFiles>::new();
+        for file in self.bucket.list_files().await? {
+            if let Some((start_height, is_checksum)) = parse_chunk_path(&file.file_path)? {
+                let files = chunks.entry(start_height).or_default();
+                match is_checksum {
+                    true => files.checksum = true,
+                    false => files.blocks = true,
+                }
+            }
+        }
+        Ok(chunks)
+    }
+
+    /// Fetches the latest block height: the exclusive end height of the highest `.blocks` file.
     pub async fn latest_height(&self) -> Result<u32> {
-        // List all of the files.
-        let files = self.bucket.list_files().await?;
-
-        // Parse the block heights.
-        let block_heights = files
+        let chunks = self.chunks().await?;
+        Ok(chunks
             .iter()
-            .filter(|file| file.file_path.starts_with(DIRECTORY_NAME))
-            .filter(|file| file.file_path.ends_with(".blocks"))
-            .map(|file| {
-                let sanitized_path = file.file_path.replace(DIRECTORY_NAME, "").replace(".blocks", "");
-                let block_range: Vec<_> = sanitized_path.split('.').collect();
+            .rev()
+            .find(|(_, files)| files.blocks)
+            .map(|(start_height, _)| start_height + NUM_BLOCKS_PER_CHUNK)
+            .unwrap_or_default())
+    }
 
-                block_range[1].parse::<u32>()
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        // Find the latest height of the stored blocks.
-        let latest_height = block_heights.iter().max().cloned().unwrap_or_default();
-
-        // Return the latest height.
-        Ok(latest_height)
+    /// Removes `latest.json`, if it exists.
+    pub async fn remove_latest_state(&self) -> Result<()> {
+        let latest_state_file_path = format!("{DIRECTORY_NAME}latest.json");
+        info!("Removing {latest_state_file_path} from the bucket.");
+        self.bucket.remove(&latest_state_file_path).await
     }
 
     /// Update the latest state of the bucket.
@@ -238,7 +288,8 @@ impl<N: Network> BlocksBucket<N> {
         Ok(())
     }
 
-    /// Removes a single block chunk from the bucket.
+    /// Removes a single block chunk from the bucket: whichever of its `.blocks` and `.blocks.sum`
+    /// files exist, in that order, so that a removal interrupted between them can be retried.
     pub async fn remove_blocks_chunk(&self, start_height: u32) -> Result<()> {
         ensure!(
             start_height.is_multiple_of(NUM_BLOCKS_PER_CHUNK),

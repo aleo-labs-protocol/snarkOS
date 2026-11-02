@@ -60,17 +60,22 @@ touching the bucket.
 cargo test -p snarkos-ledger-distribution
 ```
 
-The test reads a ledger that another process keeps writing, uploads it to an in-process S3 server,
-then loads it back with `snarkos-node-cdn`, the client snarkOS nodes sync from the CDN with.
+`round_trip` reads a ledger that another process keeps writing, uploads it to an in-process S3
+server, then loads it back with `snarkos-node-cdn`, the client snarkOS nodes sync from the CDN with.
+`recovery` sets up the bucket states that an interrupted pass or a rollback of the ledger leaves
+behind, and checks that one pass repairs each.
 
 ## Procedure
 
-1. Catches up with the node's ledger, and checks its latest block height and that of the stored blocks in the bucket.
-    - If the ledger is ahead by more than 50 blocks, then continue.
-2. Read 50 blocks at a time from the ledger.
-3. Upload the 50 blocks and their checksum to the bucket.
+1. Catches up with the node's ledger, and checks its latest block height.
+2. Repairs the bucket, so that it holds complete chunks from height 0 that match the ledger:
+    - A chunk that is missing, or missing either of its files, below the bucket's highest file is uploaded again, as is a highest chunk that cannot be read back.
+    - After a rollback of the ledger, `latest.json` is lowered to the last chunk that still matches, and the chunks above it are removed from the highest down.
+3. If the ledger is ahead of the bucket by 50 blocks or more, reads 50 blocks at a time from the ledger.
+4. Uploads the 50 blocks and their checksum to the bucket.
     - e.g. 0.50.blocks and 0.50.blocks.sum
     - Checksum is sha256(block_bytes)
-4. Fetch the newly uploaded blocks and checksum from the bucket and check that they are equivalent to the ledger's blocks.
+5. Fetches the newly uploaded blocks and checksum from the bucket, checks that they are equivalent to the ledger's blocks, and updates `latest.json`.
+6. Corrects `latest.json` if it does not describe the bucket's highest chunk, even when nothing was uploaded.
 
 When the bucket has caught up to the ledger, it checks every 30 seconds whether it needs to upload more block chunks.
