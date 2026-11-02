@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
     // Check for dry-run flag
     let dry_run = args.iter().any(|arg| arg == "--dry-run");
     if dry_run {
-        info!("Running in DRY-RUN mode - no chunks will be removed from the bucket");
+        info!("Running in DRY-RUN mode - the bucket will not be repaired, and no chunks will be removed from it");
     }
 
     // Initialize the bucket.

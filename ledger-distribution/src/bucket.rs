@@ -130,15 +130,12 @@ impl Bucket {
         Ok(())
     }
 
-    /// Removes the object corresponding to the given file path.
+    /// Removes the object at the given file path, if it exists.
     pub async fn remove(&self, file_path: &str) -> Result<()> {
-        if !self.exists(file_path).await? {
-            bail!("File does not exist: {file_path}")
+        match self.store.delete(&Path::from(file_path)).await {
+            Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Err(error) => Err(error.into()),
         }
-
-        self.store.delete(&Path::from(file_path)).await?;
-
-        Ok(())
     }
 }
 
