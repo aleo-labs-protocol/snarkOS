@@ -70,7 +70,7 @@ jobs:
       # staging's advisories are bumped nightly by bump-advisories.yml, which
       # does not cover the release line.
       - if: github.base_ref != 'staging' && github.ref_name != 'staging'
-        run: cargo deny check advisories
+        run: cargo deny --workspace check advisories
 
   shellcheck:
     runs-on: ubuntu-latest
