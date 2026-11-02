@@ -22,6 +22,7 @@ members = [
   "account",
   "cli",
   "display",
+  "ledger-distribution",
   "node",
   "node/bft",
   "node/bft/events",

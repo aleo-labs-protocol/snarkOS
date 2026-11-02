@@ -15,6 +15,8 @@ validator-*
 # Data created when running a node
 *ledger-*/
 *node-data-*/
+# The `snarkos-ledger-distribution` crate, which `*ledger-*/` would otherwise match.
+!/ledger-distribution/
 
 # Legacy files created by a running snarkOS node
 **.current-proposal-cache-*
