@@ -55,7 +55,7 @@ workspace = true
 features = [ "preserve_order" ]
 
 [dependencies.sha2]
-version = "0.10"
+version = "0.11"
 default-features = false
 
 [dependencies.snarkvm]
