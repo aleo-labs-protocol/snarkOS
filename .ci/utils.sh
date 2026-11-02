@@ -860,7 +860,7 @@ function download_and_build_latest_snarkos() {
 
   mkdir -p "${SNARKOS_RELEASE_DIR}"
 
-  local repo="ProvableHQ/snarkOS"
+  local repo="aleo-labs-protocol/snarkOS"
   local latest_url latest_tag tar_url
   local tmpdir srcdir
   local existing_tag=""
