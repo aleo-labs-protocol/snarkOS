@@ -15,7 +15,7 @@
 # file on staging can assume, the Instance Connect Endpoint, and these variables:
 #   STRESS_ROLE_ARN              the role
 #   STRESS_MANAGER_INSTANCE_ID   the Gauntlet host
-#   STRESS_MANAGER_HOST_KEY      optional: the Gauntlet host's ssh host key line
+#   STRESS_MANAGER_HOST_KEY      the Gauntlet host's ssh host key line
 #   STRESS_RELEASE_TESTS / STRESS_RELEASE_MODE   what a release runs
 # and, optionally, the secret ANTHROPIC_API_KEY for the comparison summary.
 name: Stress test
@@ -110,6 +110,12 @@ jobs:
           else
             [[ -z "$IN_CHECK" ]] || exit 1
           fi
+          for value in "$commit" "$tests" "$mode" "$network" "$params" "$run_id" "$IN_CHECK" "$ACTOR"; do
+            [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || {
+              echo "::error::request values must be single-line"
+              exit 1
+            }
+          done
           {
             echo "commit=$commit"; echo "tests=$tests"; echo "mode=$mode"; echo "network=$network"
             echo "params=$params"; echo "run_id=$run_id"; echo "check_id=$IN_CHECK"
@@ -123,7 +129,8 @@ jobs:
           # that lives 60 seconds, through the Instance Connect Endpoint.
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/stress
-          if [[ -n "$HOST_KEY" ]]; then echo "$MANAGER $HOST_KEY" > ~/.ssh/known_hosts; fi
+          : "${HOST_KEY:?STRESS_MANAGER_HOST_KEY must be configured}"
+          printf '%s %s\n' "$MANAGER" "$HOST_KEY" > ~/.ssh/known_hosts
           cat > "$RUNNER_TEMP/gate.sh" <<'EOF'
           # AWS credentials from GitHub's OIDC token, fresh for every call: a run
           # can outlast the role's one-hour session.
@@ -142,9 +149,7 @@ jobs:
             aws_login
             aws ec2-instance-connect send-ssh-public-key --instance-id "$MANAGER" \
               --instance-os-user gha-gauntlet --ssh-public-key "file://$HOME/.ssh/stress.pub" >/dev/null
-            local strict=accept-new
-            [[ -s ~/.ssh/known_hosts ]] && strict=yes
-            ssh -i ~/.ssh/stress -o BatchMode=yes -o StrictHostKeyChecking="$strict" \
+            ssh -i ~/.ssh/stress -o BatchMode=yes -o StrictHostKeyChecking=yes \
               -o "ProxyCommand=aws ec2-instance-connect open-tunnel --instance-id $MANAGER" \
               "gha-gauntlet@$MANAGER" "$@"
           }
