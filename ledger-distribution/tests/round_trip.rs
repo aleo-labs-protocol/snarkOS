@@ -40,7 +40,7 @@ async fn uploaded_blocks_load_through_the_cdn_client() {
     let genesis = ledger.get_block(0).await.unwrap();
 
     let s3_root = tempfile::tempdir().unwrap();
-    let s3_url = serve_s3(s3_root.path()).await;
+    let (s3_url, _) = serve_s3(s3_root.path()).await;
 
     let (store, bucket) = new_bucket(s3_root.path(), &s3_url, BUCKET_NAME);
     let blocks_bucket = BlocksBucket::<CurrentNetwork>::new(bucket.clone());

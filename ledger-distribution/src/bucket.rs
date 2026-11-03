@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use futures::TryStreamExt;
 use object_store::{
     Attribute,
@@ -110,13 +110,13 @@ impl Bucket {
         Ok(self.store.get(&Path::from(file_path)).await?.bytes().await?.to_vec())
     }
 
-    /// Inserts a new file at the given file path, if it does not exist.
-    pub async fn insert(&self, file_path: &str, file: &[u8]) -> Result<()> {
-        if self.exists(file_path).await? {
-            bail!("File already exists: {file_path}")
+    /// Returns a copy of an object at the given file path, or `None` if it does not exist.
+    pub async fn get_if_exists(&self, file_path: &str) -> Result<Option<Vec<u8>>> {
+        match self.get(file_path).await {
+            Ok(file) => Ok(Some(file)),
+            Err(error) if matches!(error.downcast_ref(), Some(object_store::Error::NotFound { .. })) => Ok(None),
+            Err(error) => Err(error),
         }
-
-        self.insert_or_update(file_path, file).await
     }
 
     /// Updates a file at the given file path, if it does not exist, create one.

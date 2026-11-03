@@ -39,14 +39,26 @@ use hyper_util::{
 };
 use object_store::aws::{AmazonS3, AmazonS3Builder};
 use s3s::{
+    S3Request,
     S3Result,
     access::{S3Access, S3AccessContext},
     auth::SimpleAuth,
+    dto::DeleteObjectsInput,
+    path::S3Path,
     s3_error,
     service::S3ServiceBuilder,
 };
 use s3s_fs::FileSystem;
-use std::{io::BufRead, path::Path, process::Stdio, sync::Arc};
+use std::{
+    io::BufRead,
+    path::Path,
+    process::Stdio,
+    sync::{
+        Arc,
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
     process::{Child, ChildStdout, Command},
@@ -66,7 +78,10 @@ pub const BUCKET_NAME: &str = "blocks";
 pub const ACCESS_KEY: &str = "access-key";
 pub const SECRET_KEY: &str = "secret-key";
 
-/// A chain with a genesis block of its own, and the key and randomness that extend it.
+/// The seed of the genesis block of the node's chain, and of the forks of it.
+pub const NODE_GENESIS_SEED: u64 = 1;
+
+/// A chain, and the key and randomness that extend it.
 pub struct Chain<C: ConsensusStorage<CurrentNetwork>> {
     pub ledger: Ledger<CurrentNetwork, C>,
     private_key: PrivateKey<CurrentNetwork>,
@@ -74,15 +89,16 @@ pub struct Chain<C: ConsensusStorage<CurrentNetwork>> {
 }
 
 impl<C: ConsensusStorage<CurrentNetwork>> Chain<C> {
-    /// Starts a chain, with its ledger in `storage`.
-    pub fn new(storage: StorageMode) -> Self {
-        let mut rng = TestRng::default();
+    /// Starts a chain, with its ledger in `storage`. Chains with the same `genesis_seed` start with
+    /// the same genesis block, and then differ.
+    pub fn new(storage: StorageMode, genesis_seed: u64) -> Self {
+        let mut rng = TestRng::fixed(genesis_seed);
         let private_key = PrivateKey::<CurrentNetwork>::new(&mut rng).unwrap();
         let store =
             ConsensusStore::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>::open(StorageMode::new_test(None));
         let genesis = VM::from(store.unwrap()).unwrap().genesis_beacon(&private_key, &mut rng).unwrap();
         let ledger = Ledger::load(genesis, storage).unwrap();
-        Self { ledger, private_key, rng }
+        Self { ledger, private_key, rng: TestRng::default() }
     }
 
     /// Extends the chain with empty blocks up to `height`.
@@ -109,7 +125,8 @@ fn node_writing_a_ledger() {
         return;
     };
 
-    let mut chain = Chain::<ConsensusDB<CurrentNetwork>>::new(StorageMode::Custom(ledger_dir.into(), None));
+    let mut chain =
+        Chain::<ConsensusDB<CurrentNetwork>>::new(StorageMode::Custom(ledger_dir.into(), None), NODE_GENESIS_SEED);
     let mut stdin = std::io::stdin().lock().lines();
     for height in NODE_HEIGHTS {
         chain.advance_to(height);
@@ -155,26 +172,55 @@ impl Node {
     }
 }
 
+/// The requests the S3 server refuses, with an error that `object_store` does not retry.
+#[derive(Default)]
+pub struct S3Faults {
+    /// Refuses to read the object with this key.
+    pub fail_get_of: Mutex<Option<String>>,
+    /// Refuses to delete a chunk's files.
+    pub fail_chunk_deletes: AtomicBool,
+}
+
 /// Admits signed requests, and unsigned requests that only read an object, as a bucket whose
-/// objects are public does.
-struct PublicRead;
+/// objects are public does, apart from the requests in `faults`.
+struct PublicRead {
+    faults: Arc<S3Faults>,
+}
 
 #[async_trait::async_trait]
 impl S3Access for PublicRead {
     async fn check(&self, cx: &mut S3AccessContext<'_>) -> S3Result<()> {
-        if cx.credentials().is_some() || matches!(cx.s3_op().name(), "GetObject" | "HeadObject") {
+        let op = cx.s3_op().name();
+        if let S3Path::Object { key, .. } = cx.s3_path()
+            && op == "GetObject"
+            && self.faults.fail_get_of.lock().unwrap().as_deref() == Some(key.as_ref())
+        {
+            return Err(s3_error!(AccessDenied, "Refused by the test"));
+        }
+        if cx.credentials().is_some() || matches!(op, "GetObject" | "HeadObject") {
             Ok(())
         } else {
             Err(s3_error!(AccessDenied, "Signature is required"))
         }
     }
+
+    /// The request through which `object_store` deletes objects from an S3 bucket.
+    async fn delete_objects(&self, req: &mut S3Request<DeleteObjectsInput>) -> S3Result<()> {
+        let deletes_chunk_file = req.input.delete.objects.iter().any(|object| object.key.contains(".blocks"));
+        if deletes_chunk_file && self.faults.fail_chunk_deletes.load(Ordering::Relaxed) {
+            return Err(s3_error!(AccessDenied, "Refused by the test"));
+        }
+        Ok(())
+    }
 }
 
-/// Serves an S3 API that stores objects under `root`, and returns its base URL.
-pub async fn serve_s3(root: &Path) -> String {
+/// Serves an S3 API that stores objects under `root`, and returns its base URL and the switches
+/// that make it refuse requests.
+pub async fn serve_s3(root: &Path) -> (String, Arc<S3Faults>) {
+    let faults = Arc::new(S3Faults::default());
     let mut builder = S3ServiceBuilder::new(FileSystem::new(root).unwrap());
     builder.set_auth(SimpleAuth::from_single(ACCESS_KEY, SECRET_KEY));
-    builder.set_access(PublicRead);
+    builder.set_access(PublicRead { faults: faults.clone() });
     let service = builder.build();
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -188,7 +234,7 @@ pub async fn serve_s3(root: &Path) -> String {
             });
         }
     });
-    format!("http://{addr}")
+    (format!("http://{addr}"), faults)
 }
 
 /// Returns the paths of the objects in the bucket, sorted.

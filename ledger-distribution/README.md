@@ -31,7 +31,7 @@ The binary reads its credentials and its targets from the environment:
 | `BUCKET_URL` | yes | — | Target bucket: `gs://<bucket>` for Google Cloud Storage, or `s3://<bucket>` for an S3-compatible service. Objects go under `v0/` at the bucket's root; a path in the URL is rejected |
 | `LEDGER_PATH` | yes | — | The node's ledger directory, e.g. `~/.aleo/storage/ledger-0` |
 | `LEDGER_SECONDARY_PATH` | yes | — | A directory of its own, where RocksDB keeps the files of the read-only instance |
-| `GENESIS_PATH` | no | the network's genesis block | File holding the genesis block (as written by `snarkos start --dev`) that an empty bucket must start with |
+| `GENESIS_PATH` | no | the network's genesis block | File holding the genesis block (as written by `snarkos start --dev`) that the ledger and the bucket must start with |
 
 The bucket's credentials and other settings come from the environment variables that the
 [`object_store`](https://docs.rs/object_store) builders read:
@@ -70,9 +70,11 @@ behind, and checks that one pass repairs each.
 1. Catches up with the node's ledger, and checks its latest block height.
 2. Repairs the bucket, so that it holds complete chunks from height 0 that match the ledger:
     - If the bucket goes past the ledger, it is left as it is until the ledger catches up.
-    - A chunk that is missing, or missing either of its files, up to the bucket's highest file is uploaded again, as is a highest chunk that cannot be read back.
-    - After a rollback of the ledger, `latest.json` is lowered to the last chunk that still matches, and the chunks above it are removed from the highest down.
-3. If the ledger is ahead of the bucket by 50 blocks or more, reads 50 blocks at a time from the ledger.
+    - Looks down from the bucket's highest chunk file for the highest chunk that can be read and matches the ledger.
+    - If there are chunks above that one (stale after a rollback of the ledger, or broken), lowers `latest.json` to it. The upload steps below then replace those chunks in place.
+    - Uploads again any chunk below it that is missing, or missing either of its files.
+    - Fails, and changes nothing, if the ledger's first block is not the genesis block. The same goes when no chunk above the bucket's first chunk matches, if that chunk is complete and either starts with another block or cannot be read. A bucket without a complete first chunk has nothing to check, so its chunks are replaced from the ledger. An error fetching from the bucket also fails the pass, which the next pass retries.
+3. If the ledger is ahead of the chunks that match it by 50 blocks or more, reads 50 blocks at a time from the ledger.
 4. Uploads the 50 blocks and their checksum to the bucket.
     - e.g. 0.50.blocks and 0.50.blocks.sum
     - Checksum is sha256(block_bytes)

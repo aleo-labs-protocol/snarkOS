@@ -83,11 +83,12 @@ fn parse_chunk_path(path: &str) -> Result<Option<(u32, bool)>> {
         (None, None) => return Ok(None),
     };
 
-    let parsed =
-        range.split_once('.').and_then(|(start, end)| Some((start.parse::<u32>().ok()?, end.parse::<u32>().ok()?)));
-    match parsed {
-        Some((start, end))
-            if start.is_multiple_of(NUM_BLOCKS_PER_CHUNK) && Some(end) == start.checked_add(NUM_BLOCKS_PER_CHUNK) =>
+    let start = range.split_once('.').and_then(|(start, _)| start.parse::<u32>().ok());
+    match start {
+        Some(start)
+            if start.is_multiple_of(NUM_BLOCKS_PER_CHUNK)
+                && start.checked_add(NUM_BLOCKS_PER_CHUNK).is_some()
+                && path.strip_suffix(".sum").unwrap_or(path) == chunk_path(start) =>
         {
             Ok(Some((start, is_checksum)))
         }
@@ -174,9 +175,19 @@ impl<N: Network> BlocksBucket<N> {
     pub async fn get_latest_state(&self) -> Result<LatestState<N>> {
         debug!("Fetching {LATEST_STATE_PATH} from the bucket.");
         let latest_state_bytes = self.bucket.get(LATEST_STATE_PATH).await?;
-        let json_string: String = bincode::deserialize(&latest_state_bytes)?;
+        Self::decode_latest_state(&latest_state_bytes)
+    }
 
-        // Return the result
+    /// Returns `true` if `latest.json` holds `expected`, or does not exist when `expected` is `None`.
+    pub async fn latest_state_is(&self, expected: Option<&LatestState<N>>) -> Result<bool> {
+        Ok(match self.bucket.get_if_exists(LATEST_STATE_PATH).await? {
+            Some(bytes) => Self::decode_latest_state(&bytes).is_ok_and(|state| Some(&state) == expected),
+            None => expected.is_none(),
+        })
+    }
+
+    fn decode_latest_state(bytes: &[u8]) -> Result<LatestState<N>> {
+        let json_string: String = bincode::deserialize(bytes)?;
         serde_json::from_str(&json_string).map_err(Into::into)
     }
 
@@ -192,7 +203,20 @@ impl<N: Network> BlocksBucket<N> {
     /// Fetches the block chunk with the given starting block height from the bucket.
     pub async fn get_blocks(&self, start_height: u32) -> Result<Vec<Block<N>>> {
         let block_bytes = self.get_blocks_bytes(start_height).await?;
-        let blocks: Vec<Block<N>> = bincode::deserialize(&block_bytes)?;
+        Self::decode_blocks(&block_bytes)
+    }
+
+    /// Fetches the block chunk with the given starting block height from the bucket, or returns
+    /// `None` if what it holds does not match its checksum or does not decode. Failing to fetch
+    /// the chunk is an error.
+    pub async fn get_blocks_if_valid(&self, start_height: u32) -> Result<Option<Vec<Block<N>>>> {
+        let (block_bytes, blocks_checksum) = self.fetch_chunk_files(start_height).await?;
+        let blocks = check_checksum(&block_bytes, &blocks_checksum).and_then(|()| Self::decode_blocks(&block_bytes));
+        Ok(blocks.inspect_err(|error| warn!("The chunk at height {start_height} cannot be read: {error}")).ok())
+    }
+
+    fn decode_blocks(block_bytes: &[u8]) -> Result<Vec<Block<N>>> {
+        let blocks: Vec<Block<N>> = bincode::deserialize(block_bytes)?;
 
         ensure!(blocks.len() == NUM_BLOCKS_PER_CHUNK as usize, "Blocks must be in chunks of {NUM_BLOCKS_PER_CHUNK}");
 
@@ -211,6 +235,18 @@ impl<N: Network> BlocksBucket<N> {
 
     /// Fetches the block chunk's bytes with the given starting block height from the bucket.
     pub async fn get_blocks_bytes(&self, start_height: u32) -> Result<Vec<u8>> {
+        let (block_bytes, blocks_checksum) = self.fetch_chunk_files(start_height).await?;
+
+        // Check that the checksum is accurate.
+        let timer = Instant::now();
+        check_checksum(&block_bytes, &blocks_checksum)?;
+        debug!("\tVerified checksum in {}ms", timer.elapsed().as_millis());
+
+        Ok(block_bytes)
+    }
+
+    /// Fetches the contents of the `.blocks` and `.blocks.sum` files of the given chunk.
+    async fn fetch_chunk_files(&self, start_height: u32) -> Result<(Vec<u8>, Vec<u8>)> {
         ensure!(
             start_height.is_multiple_of(NUM_BLOCKS_PER_CHUNK),
             "Blocks must start at a multiple of {NUM_BLOCKS_PER_CHUNK}"
@@ -232,15 +268,10 @@ impl<N: Network> BlocksBucket<N> {
             timer_2.elapsed().as_millis()
         );
 
-        // Check that the checksum is accurate.
-        let timer_3 = Instant::now();
-        ensure!(sha256(&block_bytes).to_vec() == blocks_checksum, "Blocks checksum does not match");
-        debug!("\tVerified checksum in {}ms", timer_3.elapsed().as_millis());
-
-        Ok(block_bytes)
+        Ok((block_bytes, blocks_checksum))
     }
 
-    /// Inserts the given blocks into the bucket.
+    /// Writes the given blocks into the bucket, replacing any files of their chunk already there.
     pub async fn insert_blocks(&self, blocks: &[Block<N>]) -> Result<()> {
         ensure!(blocks.len() == NUM_BLOCKS_PER_CHUNK as usize, "Blocks must be in chunks of {NUM_BLOCKS_PER_CHUNK}");
         ensure!(
@@ -273,40 +304,20 @@ impl<N: Network> BlocksBucket<N> {
         // Upload the blocks.
         info!("Inserting {blocks_file_path} to the bucket.");
         let timer = Instant::now();
-        self.bucket.insert(&blocks_file_path, &block_bytes).await?;
+        self.bucket.insert_or_update(&blocks_file_path, &block_bytes).await?;
         // Upload the blocks_checksum.
         info!("Inserting {blocks_checksum_file_path} to the bucket.");
-        if let Err(err) = self.bucket.insert_or_update(&blocks_checksum_file_path, &checksum).await {
-            warn!("Error uploading {blocks_checksum_file_path}. Removing {blocks_file_path} from the bucket...");
-            self.bucket.remove(&blocks_file_path).await?;
-
-            return Err(err);
-        }
+        self.bucket.insert_or_update(&blocks_checksum_file_path, &checksum).await?;
         debug!("\tInserted objects to the bucket in {}ms", timer.elapsed().as_millis());
 
         // Return.
         Ok(())
     }
+}
 
-    /// Removes a single block chunk from the bucket: whichever of its `.blocks` and `.blocks.sum`
-    /// files exist, in that order, so that a removal interrupted between them can be retried.
-    pub async fn remove_blocks_chunk(&self, start_height: u32) -> Result<()> {
-        ensure!(
-            start_height.is_multiple_of(NUM_BLOCKS_PER_CHUNK),
-            "Blocks must start at a multiple of {NUM_BLOCKS_PER_CHUNK}"
-        );
-
-        let blocks_file_path = chunk_path(start_height);
-        // Prepare the blocks checksum file path.
-        let blocks_checksum_file_path = format!("{}.sum", blocks_file_path);
-
-        info!("Removing {blocks_file_path} from the bucket.");
-        self.bucket.remove(&blocks_file_path).await?;
-        info!("Removing {blocks_checksum_file_path} from the bucket.");
-        self.bucket.remove(&blocks_checksum_file_path).await?;
-
-        Ok(())
-    }
+fn check_checksum(block_bytes: &[u8], blocks_checksum: &[u8]) -> Result<()> {
+    ensure!(sha256(block_bytes).as_slice() == blocks_checksum, "Blocks checksum does not match");
+    Ok(())
 }
 
 pub fn sha256(data: &[u8]) -> [u8; 32] {
@@ -314,4 +325,30 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     let mut ret = [0u8; 32];
     ret.copy_from_slice(&digest);
     ret
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_chunk_path;
+
+    #[test]
+    fn parse_chunk_path_takes_only_whole_chunks() {
+        assert_eq!(parse_chunk_path("v0/50.100.blocks").unwrap(), Some((50, false)));
+        assert_eq!(parse_chunk_path("v0/50.100.blocks.sum").unwrap(), Some((50, true)));
+        assert_eq!(parse_chunk_path("v0/latest.json").unwrap(), None);
+        assert_eq!(parse_chunk_path("other/foo.blocks").unwrap(), None);
+
+        for path in [
+            "v0/foo.blocks",
+            "v0/50.blocks",
+            "v0/50.99.blocks",
+            "v0/51.101.blocks",
+            "v0/050.100.blocks",
+            "v0/+50.100.blocks.sum",
+            "v0/50.0100.blocks",
+            "v0/4294967250.4294967300.blocks",
+        ] {
+            assert!(parse_chunk_path(path).is_err(), "{path} was accepted");
+        }
+    }
 }
