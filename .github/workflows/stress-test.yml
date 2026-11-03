@@ -1,0 +1,292 @@
+# Copy to aleo-labs-protocol/snarkOS as .github/workflows/stress-test.yml.
+#
+# Runs snarkOS stress tests on the Gauntlet host (aleo-labs-protocol/
+# aws-dev-infra/gauntlet) and reports them as the "stress-test" check on the
+# commit, so anyone looking at the commit or its PR sees the result.
+#
+#   start   "Run workflow" (or a release whose CI passed): approval in the
+#           stress-test environment, then queue the run on the Gauntlet host.
+#   follow  poll the Gauntlet host every 5 minutes and keep the check up to date.
+#           GitHub stops a job at 6h, so a longer run hands off to a fresh
+#           dispatch of this workflow, which follows the same run without
+#           asking for approval again.
+#
+# Setup lives in aws-dev-infra (setup-gauntlet-ci.sh): the IAM role that only this
+# file on staging can assume, the Instance Connect Endpoint, and these variables:
+#   STRESS_ROLE_ARN              the role
+#   STRESS_MANAGER_INSTANCE_ID   the Gauntlet host
+#   STRESS_MANAGER_HOST_KEY      the Gauntlet host's ssh host key line
+#   STRESS_RELEASE_TESTS / STRESS_RELEASE_MODE   what a release runs
+# and, optionally, the secret ANTHROPIC_API_KEY for the comparison summary.
+name: Stress test
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "snarkOS commit (full SHA). Empty: the commit this is run from."
+        required: false
+        default: ""
+      tests:
+        description: "Tests, sets (prerelease, network, sync) or all, comma separated"
+        default: prerelease
+      mode:
+        description: "Network size"
+        type: choice
+        options: [light, heavy, prerelease]
+        default: light
+      network:
+        description: "snarkOS network"
+        type: choice
+        options: [testnet, mainnet]
+        default: testnet
+      params:
+        description: "Test parameter overrides, e.g. target_tps=50,exec_tx_count=40"
+        default: ""
+      follow_run_id:
+        description: "Internal: keep following this run"
+        default: ""
+      check_run_id:
+        description: "Internal: the check to update"
+        default: ""
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [testnet, mainnet]
+
+permissions:
+  contents: read
+
+jobs:
+  stress:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    # Approval gates starting a run; following one needs none.
+    environment: ${{ inputs.follow_run_id == '' && 'stress-test' || 'stress-test-status' }}
+    timeout-minutes: 355
+    permissions:
+      id-token: write
+      checks: write
+      actions: write
+      contents: read
+    env:
+      AWS_REGION: us-west-2
+      GH_TOKEN: ${{ github.token }}
+      MANAGER: ${{ vars.STRESS_MANAGER_INSTANCE_ID }}
+      ROLE_ARN: ${{ vars.STRESS_ROLE_ARN }}
+      HOST_KEY: ${{ vars.STRESS_MANAGER_HOST_KEY }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Resolve the request
+        id: req
+        env:
+          EVENT: ${{ github.event_name }}
+          IN_COMMIT: ${{ inputs.commit }}
+          IN_TESTS: ${{ inputs.tests }}
+          IN_MODE: ${{ inputs.mode }}
+          IN_NETWORK: ${{ inputs.network }}
+          IN_PARAMS: ${{ inputs.params }}
+          IN_FOLLOW: ${{ inputs.follow_run_id }}
+          IN_CHECK: ${{ inputs.check_run_id }}
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+          RELEASE_TESTS: ${{ vars.STRESS_RELEASE_TESTS }}
+          RELEASE_MODE: ${{ vars.STRESS_RELEASE_MODE }}
+          ACTOR: ${{ github.triggering_actor }}
+        run: |
+          if [[ "$EVENT" == workflow_run ]]; then
+            commit="$RELEASE_SHA"; tests="${RELEASE_TESTS:-prerelease}"; mode="${RELEASE_MODE:-light}"
+            network=testnet; params=""
+          else
+            commit="${IN_COMMIT:-$GITHUB_SHA}"; tests="$IN_TESTS"; mode="$IN_MODE"; network="$IN_NETWORK"; params="$IN_PARAMS"
+          fi
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::commit must be a full 40-character SHA"; exit 1; }
+          run_id="${IN_FOLLOW:-gh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}}"
+          [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || exit 1
+          if [[ -n "$IN_FOLLOW" ]]; then
+            [[ "$IN_CHECK" =~ ^[0-9]+$ ]] || exit 1
+            gh api "repos/$GITHUB_REPOSITORY/check-runs/$IN_CHECK" > check.json
+            jq -e --arg run "$run_id" --arg sha "$commit" \
+              '.name == "stress-test" and .external_id == $run and .head_sha == $sha' check.json >/dev/null
+          else
+            [[ -z "$IN_CHECK" ]] || exit 1
+          fi
+          for value in "$commit" "$tests" "$mode" "$network" "$params" "$run_id" "$IN_CHECK" "$ACTOR"; do
+            [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || {
+              echo "::error::request values must be single-line"
+              exit 1
+            }
+          done
+          {
+            echo "commit=$commit"; echo "tests=$tests"; echo "mode=$mode"; echo "network=$network"
+            echo "params=$params"; echo "run_id=$run_id"; echo "check_id=$IN_CHECK"
+            echo "actor=$ACTOR"; echo "follow=$([[ -n "$IN_FOLLOW" ]] && echo true || echo false)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Connect to the Gauntlet host
+        run: |
+          # The Gauntlet host's gha-gauntlet user can only run the gate (aws-dev-infra/gauntlet/
+          # host/gate.sh): enqueue, status and cancel. Each connection pushes a key
+          # that lives 60 seconds, through the Instance Connect Endpoint.
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/stress
+          : "${HOST_KEY:?STRESS_MANAGER_HOST_KEY must be configured}"
+          printf '%s %s\n' "$MANAGER" "$HOST_KEY" > ~/.ssh/known_hosts
+          cat > "$RUNNER_TEMP/gate.sh" <<'EOF'
+          # AWS credentials from GitHub's OIDC token, fresh for every call: a run
+          # can outlast the role's one-hour session.
+          aws_login() {
+            local token creds
+            token="$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)"
+            creds="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" \
+              --role-session-name "stress-$GITHUB_RUN_ID" --web-identity-token "$token" \
+              --duration-seconds 3600 --query Credentials --output json)"
+            export AWS_ACCESS_KEY_ID="$(jq -r .AccessKeyId <<<"$creds")"
+            export AWS_SECRET_ACCESS_KEY="$(jq -r .SecretAccessKey <<<"$creds")"
+            export AWS_SESSION_TOKEN="$(jq -r .SessionToken <<<"$creds")"
+          }
+          gate() {
+            aws_login
+            aws ec2-instance-connect send-ssh-public-key --instance-id "$MANAGER" \
+              --instance-os-user gha-gauntlet --ssh-public-key "file://$HOME/.ssh/stress.pub" >/dev/null
+            ssh -i ~/.ssh/stress -o BatchMode=yes -o StrictHostKeyChecking=yes \
+              -o "ProxyCommand=aws ec2-instance-connect open-tunnel --instance-id $MANAGER" \
+              "gha-gauntlet@$MANAGER" "$@"
+          }
+          EOF
+
+      - name: Open the check
+        id: check
+        env:
+          COMMIT: ${{ steps.req.outputs.commit }}
+          RUN_ID: ${{ steps.req.outputs.run_id }}
+          CHECK_ID: ${{ steps.req.outputs.check_id }}
+        run: |
+          if [[ -z "$CHECK_ID" ]]; then
+            CHECK_ID="$(gh api "repos/$GITHUB_REPOSITORY/check-runs" \
+              -f name=stress-test -f head_sha="$COMMIT" -f status=in_progress \
+              -f details_url="$RUN_URL" -f external_id="$RUN_ID" \
+              -f 'output[title]=Queued' -f "output[summary]=Run \`$RUN_ID\` is queued on the Gauntlet host." \
+              --jq .id)"
+          fi
+          echo "id=$CHECK_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Queue the run
+        if: steps.req.outputs.follow == 'false'
+        env:
+          COMMIT: ${{ steps.req.outputs.commit }}
+          TESTS: ${{ steps.req.outputs.tests }}
+          MODE: ${{ steps.req.outputs.mode }}
+          NETWORK: ${{ steps.req.outputs.network }}
+          PARAMS: ${{ steps.req.outputs.params }}
+          RUN_ID: ${{ steps.req.outputs.run_id }}
+          ACTOR: ${{ steps.req.outputs.actor }}
+        run: |
+          source "$RUNNER_TEMP/gate.sh"
+          gate enqueue "$RUN_ID" "$COMMIT" "$TESTS" "$MODE" "$NETWORK" "$ACTOR" "$PARAMS"
+
+      - name: Follow the run
+        id: follow
+        env:
+          RUN_ID: ${{ steps.req.outputs.run_id }}
+          CHECK_ID: ${{ steps.check.outputs.id }}
+          COMMIT: ${{ steps.req.outputs.commit }}
+        run: |
+          source "$RUNNER_TEMP/gate.sh"
+          deadline=$(( $(date +%s) + 5 * 3600 + 30 * 60 ))
+          while :; do
+            if gate status "$RUN_ID" > status.json 2> status.err && jq -e .state status.json >/dev/null; then
+              jq -e --arg run "$RUN_ID" --arg sha "$COMMIT" \
+                '.run_id == $run and .result.commit == $sha' status.json >/dev/null
+              jq '{output: {title: .title, summary: .summary}}' status.json \
+                | gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_ID" --input - >/dev/null
+              [[ "$(jq -r .state status.json)" == finished ]] && break
+            else
+              echo "::warning::could not read the run's status: $(cat status.err)"
+            fi
+            if (( $(date +%s) > deadline )); then
+              echo "handoff=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 300
+          done
+          echo "handoff=false" >> "$GITHUB_OUTPUT"
+
+      - name: Hand off to a fresh job
+        if: steps.follow.outputs.handoff == 'true'
+        env:
+          RUN_ID: ${{ steps.req.outputs.run_id }}
+          CHECK_ID: ${{ steps.check.outputs.id }}
+          COMMIT: ${{ steps.req.outputs.commit }}
+        run: |
+          gh workflow run stress-test.yml --repo "$GITHUB_REPOSITORY" --ref "${{ github.event.repository.default_branch }}" \
+            -f follow_run_id="$RUN_ID" -f check_run_id="$CHECK_ID" -f commit="$COMMIT"
+          echo "Still running after 5h30m; a new run of this workflow keeps following \`$RUN_ID\`." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Compare with the last passing run (Claude)
+        id: claude
+        continue-on-error: true
+        if: steps.follow.outputs.handoff == 'false'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          [[ -n "$ANTHROPIC_API_KEY" ]] || { echo "No ANTHROPIC_API_KEY; skipping."; exit 0; }
+          [[ "$(jq -r '.previous != null' status.json)" == true ]] || { echo "No earlier passing run to compare with."; exit 0; }
+          jq -n --slurpfile s status.json '{
+            model: "claude-opus-5-5",
+            max_tokens: 16000,
+            output_config: {effort: "medium"},
+            fallbacks: "default",
+            system: "You review snarkOS stress test results for the engineers deciding whether to tag a release. Compare this run with the last passing run of the same tests. Point out regressions, notable changes in durations or metrics, and anything that looks suspicious even if it passed. Do not restate the results table. Use at most 150 words of GitHub markdown, bullets preferred.",
+            messages: [{role: "user", content: ("This run:\n" + ($s[0].result | tojson) + "\n\nLast passing run:\n" + ($s[0].previous | tojson))}]
+          }' > request.json
+          curl --fail --connect-timeout 15 --max-time 120 -sS https://api.anthropic.com/v1/messages \
+            -H "content-type: application/json" \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2026-10-21" \
+            -H "anthropic-beta: server-side-fallback-2026-07-01" \
+            -d @request.json > response.json || { echo "::warning::Claude request failed"; exit 0; }
+          if [[ "$(jq -r .stop_reason response.json)" != end_turn ]]; then
+            echo "::warning::no summary (stop_reason: $(jq -r '.stop_reason // .error.message' response.json))"
+            exit 0
+          fi
+          jq -r '[.content[] | select(.type == "text") | .text] | join("\n")' response.json > claude.md
+
+      - name: Close the check
+        if: steps.follow.outputs.handoff == 'false'
+        env:
+          CHECK_ID: ${{ steps.check.outputs.id }}
+        run: |
+          summary="$(jq -r .summary status.json)"
+          if [[ -s claude.md ]]; then
+            summary="$summary"$'\n\n### Compared with the last passing run (Claude)\n\n'"$(cat claude.md)"
+          fi
+          jq -n --arg summary "$summary" --slurpfile s status.json \
+            '{status: "completed", conclusion: $s[0].conclusion, output: {title: $s[0].title, summary: $summary}}' \
+            | gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_ID" --input - >/dev/null
+          echo "$summary" >> "$GITHUB_STEP_SUMMARY"
+          [[ "$(jq -r .verdict status.json)" == pass ]]
+
+      - name: Report orchestration failure
+        if: failure() && steps.check.outputs.id != '' && steps.follow.outputs.handoff != 'false'
+        env:
+          CHECK_ID: ${{ steps.check.outputs.id }}
+        run: |
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_ID" \
+            -f status=completed -f conclusion=action_required \
+            -f 'output[title]=Orchestration interrupted' \
+            -f "output[summary]=GitHub could not queue or follow this run. The Gauntlet host may still be running it; inspect its status before retrying. See $RUN_URL." >/dev/null
+
+      - name: Cancel on the Gauntlet host
+        if: cancelled()
+        env:
+          RUN_ID: ${{ steps.req.outputs.run_id }}
+          CHECK_ID: ${{ steps.check.outputs.id }}
+        run: |
+          source "$RUNNER_TEMP/gate.sh"
+          gate cancel "$RUN_ID" || true
+          if [[ -n "$CHECK_ID" ]]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_ID" \
+              -f status=completed -f conclusion=cancelled \
+              -f 'output[title]=Cancelled' -f "output[summary]=Cancelled from GitHub; the Gauntlet host tears the devnet down." >/dev/null || true
+          fi
