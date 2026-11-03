@@ -38,40 +38,21 @@ use snarkvm::prelude::{
     store::helpers::{memory::ConsensusMemory, rocksdb::ConsensusDB},
 };
 
-use aleo_std::{StorageMode, aleo_ledger_dir};
-use anyhow::{Result, bail};
+use aleo_std::StorageMode;
+use anyhow::Result;
 
 #[cfg(feature = "locktick")]
 use locktick::parking_lot::RwLock;
 #[cfg(not(feature = "locktick"))]
 use parking_lot::RwLock;
-use std::{
-    cmp,
-    collections::HashMap,
-    fs,
-    net::SocketAddr,
-    path::{Path, PathBuf},
-    str::FromStr,
-    sync::Arc,
-    time::Duration,
-};
+#[cfg(feature = "metrics")]
+use std::time::Duration;
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::task;
-
-/// The number of blocks between automatic database checkpoints.
-const CHECKPOINT_BLOCK_FREQUENCY: u32 = 1000;
-
-/// The maximum number of automatic database checkpoints kept at any time.
-const MAX_AUTO_CHECKPOINTS: usize = 5;
 
 /// How often to publish RocksDB internal metrics to Prometheus.
 #[cfg(feature = "metrics")]
 const ROCKSDB_METRICS_INTERVAL: Duration = Duration::from_secs(15);
-
-fn existing_startup_checkpoint_height(auto_checkpoint_path: &Path, startup_height: u32) -> Option<u32> {
-    let mut checkpoint_path = auto_checkpoint_path.to_path_buf();
-    checkpoint_path.push(format!("checkpoint_{startup_height}"));
-    checkpoint_path.is_dir().then_some(startup_height)
-}
 
 #[derive(Clone)]
 pub enum Node<N: Network> {
@@ -383,161 +364,9 @@ impl<N: Network> Node<N> {
 
     /// Periodically creates automated ledger checkpoints.
     pub fn perform_auto_checkpoints(&self, auto_checkpoint_path: PathBuf) -> Result<Option<task::JoinHandle<()>>> {
-        // Only perform checkpoints if there's a database involved.
-        let Some(ledger) = self.ledger().cloned() else {
-            return Ok(None);
-        };
-
-        // Ensure that the target path exists as a folder or create it.
-        if !auto_checkpoint_path.exists() {
-            if let Err(e) = fs::create_dir_all(&auto_checkpoint_path) {
-                bail!("Couldn't create the specified path for the automatic ledger checkpoints: {e}");
-            }
-        } else if auto_checkpoint_path.exists() && !auto_checkpoint_path.is_dir() {
-            bail!("The specified path for automatic ledger checkpoints is not a directory");
-        }
-
-        // Spawn a loop that will periodically create the checkpoints.
-        let handle = tokio::spawn(async move {
-            info!("Starting the automatic ledger checkpoint routine...");
-
-            // Prepare some object that will be useful throughout the routine.
-            let startup_height = ledger.vm().block_store().current_block_height();
-            let mut last_checkpoint_height =
-                existing_startup_checkpoint_height(auto_checkpoint_path.as_path(), startup_height);
-            let mut existing_checkpoints = Vec::with_capacity(MAX_AUTO_CHECKPOINTS + 1);
-            let mut block_tree_path = aleo_ledger_dir(N::ID, ledger.vm().block_store().storage_mode());
-            block_tree_path.push("block_tree");
-
-            loop {
-                // A small delay that's smaller than block time. There are technically situations when
-                // blocks can be inserted one after the other more quickly (syncing, multiple blocks in
-                // a Subdag), those are edge cases unlikely to be encountered under normal conditions.
-                tokio::time::sleep(Duration::from_millis(500)).await;
-
-                // Skip if we've already created a checkpoint during this run, and the
-                // number of blocks baked since then is lower than the configured threshold.
-                let current_height = ledger.vm().block_store().current_block_height();
-                if last_checkpoint_height.is_some_and(|checkpoint_height| {
-                    current_height.saturating_sub(checkpoint_height) < CHECKPOINT_BLOCK_FREQUENCY
-                }) {
-                    continue;
-                }
-
-                // Create a checkpoint.
-                let mut checkpoint_path = auto_checkpoint_path.clone();
-                checkpoint_path.push(format!("checkpoint_{current_height}"));
-                if let Err(e) = ledger.backup_database(&checkpoint_path) {
-                    warn!("Couldn't automatically store a checkpoint at {}: {e}", checkpoint_path.display());
-                    continue;
-                }
-                last_checkpoint_height = Some(current_height);
-
-                // Immediately procure and copy the applicable block tree in the background.
-                let ledger_clone = ledger.clone();
-                let source_block_tree_path = block_tree_path.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = ledger_clone.cache_block_tree() {
-                        warn!("Couldn't cache the block tree for a ledger checkpoint: {e}");
-                        return;
-                    }
-
-                    // Copy the block tree file to the new checkpoint.
-                    checkpoint_path.push("block_tree");
-                    if let Err(e) = fs::copy(source_block_tree_path, checkpoint_path) {
-                        warn!("Couldn't copy the block tree file to a ledger checkpoint: {e}");
-                    }
-                });
-
-                // Count the existing auto checkpoints.
-                existing_checkpoints.clear();
-                let checkpoint_dir = match auto_checkpoint_path.read_dir() {
-                    Ok(dir) => dir,
-                    Err(e) => {
-                        warn!("IO error while accessing the automatic checkpoints: {e}");
-                        continue;
-                    }
-                };
-                for entry in checkpoint_dir {
-                    // Handle possible IO errors.
-                    let entry = match entry {
-                        Ok(entry) => entry,
-                        Err(e) => {
-                            warn!("IO error while counting the automatic checkpoints: {e}");
-                            continue;
-                        }
-                    };
-
-                    // Skip non-directories.
-                    let path = entry.path();
-                    if !path.is_dir() {
-                        continue;
-                    }
-
-                    // Recognize checkpoints by the "checkpoint_height" name.
-                    let file_name = entry.file_name().into_string().unwrap(); // can't fail - we create Unicode filenames
-                    let mut name_iter = file_name.split("_");
-                    if name_iter.next() != Some("checkpoint") {
-                        continue;
-                    }
-                    let Some(height) = name_iter.next() else {
-                        continue;
-                    };
-                    let Ok(height) = u32::from_str(height) else {
-                        continue;
-                    };
-                    existing_checkpoints.push((path, height));
-                }
-                existing_checkpoints.sort_unstable_by_key(|(_, height)| cmp::Reverse(*height));
-
-                // If we have a sufficient number of checkpoints, delete the oldest one(s).
-                let surplus_checkpoints = existing_checkpoints.len().saturating_sub(MAX_AUTO_CHECKPOINTS);
-                for _ in 0..surplus_checkpoints {
-                    if let Some((checkpoint_path, _)) = existing_checkpoints.pop()
-                        && let Err(e) = fs::remove_dir_all(checkpoint_path)
-                    {
-                        warn!("Couldn't remove an automatic ledger checkpoint: {e}");
-                    }
-                }
-            }
-        });
-
-        Ok(Some(handle))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::existing_startup_checkpoint_height;
-    use std::{
-        fs,
-        time::{SystemTime, UNIX_EPOCH},
-    };
-
-    #[test]
-    fn seeds_last_checkpoint_height_when_startup_checkpoint_directory_exists() {
-        let startup_height = 42;
-        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let base_path = std::env::temp_dir().join(format!("snarkos_checkpoint_seed_test_{unique}"));
-        let checkpoint_path = base_path.join(format!("checkpoint_{startup_height}"));
-        fs::create_dir_all(&checkpoint_path).unwrap();
-
-        let seeded_height = existing_startup_checkpoint_height(base_path.as_path(), startup_height);
-        assert_eq!(seeded_height, Some(startup_height));
-
-        fs::remove_dir_all(base_path).unwrap();
-    }
-
-    #[test]
-    fn does_not_seed_last_checkpoint_height_when_startup_checkpoint_directory_missing() {
-        let startup_height = 42;
-        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let base_path = std::env::temp_dir().join(format!("snarkos_checkpoint_seed_test_{unique}"));
-        fs::create_dir_all(&base_path).unwrap();
-
-        let seeded_height = existing_startup_checkpoint_height(base_path.as_path(), startup_height);
-        assert_eq!(seeded_height, None);
-
-        fs::remove_dir_all(base_path).unwrap();
+        self.ledger()
+            .cloned()
+            .map(|ledger| crate::checkpoints::spawn_auto_checkpoints(ledger, auto_checkpoint_path))
+            .transpose()
     }
 }
