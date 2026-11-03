@@ -1717,8 +1717,13 @@ impl<N: Network> Primary<N> {
             while fast_forward_round < next_round.saturating_sub(1) {
                 // Update to the next round in storage.
                 fast_forward_round = self.storage.increment_to_next_round(fast_forward_round)?;
-                // Clear the proposed batch.
-                *self.proposed_batch.write() = ProposedBatchState::None;
+                // Clear the proposed batch, and return a pending proposal's transmissions to the workers.
+                // The lock is released before reinserting, since this acquires the workers' locks in turn.
+                let cleared = std::mem::take(&mut *self.proposed_batch.write());
+                if let ProposedBatchState::Certifying(proposal) = cleared {
+                    debug!("Cleared proposal for round {} while fast-forwarding", proposal.round());
+                    self.reinsert_transmissions_into_workers(proposal.into_transmissions())?;
+                }
             }
         }
 
@@ -2912,6 +2917,41 @@ mod tests {
         assert!(primary.proposed_batch.read().is_none());
         for transmission_id in transmission_ids {
             assert!(primary.workers()[0].contains_transmission(transmission_id));
+        }
+    }
+
+    /// Fast-forwarding several rounds clears a pending proposal and returns its transmissions to the workers.
+    #[test_log::test(tokio::test)]
+    async fn test_fast_forward_reinserts_proposed_batch() {
+        let mut rng = TestRng::default();
+        let (primary, accounts) = primary_without_handlers(&mut rng);
+
+        // Propose a batch for the current round.
+        let round = 3;
+        let previous_certificates = store_certificate_chain(&primary, &accounts, round, &mut rng);
+        let proposal = create_test_proposal(
+            &accounts[0].1,
+            primary.ledger.current_committee().unwrap(),
+            round,
+            previous_certificates,
+            now(),
+            1,
+            &mut rng,
+        );
+        let transmission_ids: Vec<_> = proposal.transmissions().keys().copied().collect();
+        assert!(!transmission_ids.is_empty());
+        *primary.proposed_batch.write() = ProposedBatchState::Certifying(Box::new(proposal));
+
+        // Fast-forward past the proposal's round.
+        let next_round = round + 3;
+        primary.try_increment_to_the_next_round(next_round).await.unwrap();
+        assert_eq!(primary.current_round(), next_round);
+
+        // The proposal is cleared and its transmissions are back in the ready queue.
+        assert!(primary.proposed_batch.read().is_none());
+        let ready = primary.workers()[0].transmission_ids();
+        for transmission_id in transmission_ids {
+            assert!(ready.contains(&transmission_id));
         }
     }
 
