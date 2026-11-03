@@ -1,8 +1,8 @@
 # Copy to aleo-labs-protocol/snarkOS as .github/workflows/stress-test.yml.
 #
-# Runs snarkOS stress tests on the Gauntlet host (aleo-labs-protocol/
-# aws-dev-infra/gauntlet) and reports them as the "stress-test" check on the
-# commit, so anyone looking at the commit or its PR sees the result.
+# Runs snarkOS stress tests on the Gauntlet host and reports them as the
+# "stress-test" check on the commit, so anyone looking at the commit or its PR
+# sees the result.
 #
 #   start   "Run workflow" (or a release whose CI passed): approval in the
 #           stress-test environment, then queue the run on the Gauntlet host.
@@ -11,13 +11,15 @@
 #           dispatch of this workflow, which follows the same run without
 #           asking for approval again.
 #
-# Setup lives in aws-dev-infra (setup-gauntlet-ci.sh): the IAM role that only this
-# file on staging can assume, the Instance Connect Endpoint, and these variables:
-#   STRESS_ROLE_ARN              the role
-#   STRESS_MANAGER_INSTANCE_ID   the Gauntlet host
-#   STRESS_MANAGER_HOST_KEY      the Gauntlet host's ssh host key line
-#   STRESS_RELEASE_TESTS / STRESS_RELEASE_MODE   what a release runs
-# and, optionally, the secret ANTHROPIC_API_KEY for the comparison summary.
+# It needs an IAM role that only this file on staging can assume, an Instance
+# Connect Endpoint, and these settings. Actions logs are public, so anything
+# naming the cloud account is a secret, held in the stress-test and
+# stress-test-status environments so that only this job on staging can read it:
+#   environment secret  STRESS_ROLE_ARN              the role
+#   environment secret  STRESS_MANAGER_INSTANCE_ID   the Gauntlet host
+#   secret              ANTHROPIC_API_KEY            optional: the comparison summary
+#   variable            STRESS_MANAGER_HOST_KEY      the Gauntlet host's ssh host key line
+#   variable            STRESS_RELEASE_TESTS / STRESS_RELEASE_MODE   what a release runs
 name: Stress test
 
 on:
@@ -72,8 +74,8 @@ jobs:
     env:
       AWS_REGION: us-west-2
       GH_TOKEN: ${{ github.token }}
-      MANAGER: ${{ vars.STRESS_MANAGER_INSTANCE_ID }}
-      ROLE_ARN: ${{ vars.STRESS_ROLE_ARN }}
+      MANAGER: ${{ secrets.STRESS_MANAGER_INSTANCE_ID }}
+      ROLE_ARN: ${{ secrets.STRESS_ROLE_ARN }}
       HOST_KEY: ${{ vars.STRESS_MANAGER_HOST_KEY }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
@@ -124,9 +126,13 @@ jobs:
 
       - name: Connect to the Gauntlet host
         run: |
-          # The Gauntlet host's gha-gauntlet user can only run the gate (aws-dev-infra/gauntlet/
-          # host/gate.sh): enqueue, status and cancel. Each connection pushes a key
-          # that lives 60 seconds, through the Instance Connect Endpoint.
+          : "${MANAGER:?STRESS_MANAGER_INSTANCE_ID must be configured}"
+          : "${ROLE_ARN:?STRESS_ROLE_ARN must be configured}"
+          # AWS errors quote ARNs that differ from the secret, so mask the account too.
+          echo "::add-mask::$(cut -d: -f5 <<<"$ROLE_ARN")"
+          # The Gauntlet host's gha-gauntlet user can only run the gate: enqueue, status
+          # and cancel. Each connection pushes a key that lives 60 seconds, through the
+          # Instance Connect Endpoint.
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/stress
           : "${HOST_KEY:?STRESS_MANAGER_HOST_KEY must be configured}"
