@@ -278,9 +278,9 @@ jobs:
       - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
       - name: Stop leftover nodes
         run: &stop-nodes |
-          pkill -x snarkos || true
-          for _ in $(seq 20); do pgrep -x snarkos > /dev/null || break; sleep 1; done
-          pkill -9 -x snarkos || true
+          pkill -x 'snarkos|simple_node' || true
+          for _ in $(seq 20); do pgrep -x 'snarkos|simple_node' > /dev/null || break; sleep 1; done
+          pkill -9 -x 'snarkos|simple_node' || true
           sudo -n /usr/local/sbin/runner-netem clear
       - uses: actions/download-artifact@v8
         with:
@@ -318,6 +318,11 @@ jobs:
           - name: dev-on-prod-restart
             timeout: 45
             runs: ./.ci/test_dev_on_prod_restart.sh
+          # Clippy and `cargo check` only compile the examples, so this is the one
+          # job that runs one. It builds the example itself.
+          - name: simple-node
+            timeout: 60
+            runs: ./.ci/test_simple_node.sh
           - name: chaotic-minority-reset
             timeout: 45
             delay: true
