@@ -4,8 +4,8 @@
 # "stress-test" check on the commit, so anyone looking at the commit or its PR
 # sees the result.
 #
-#   start   "Run workflow" (or a release whose CI passed): approval in the
-#           stress-test environment, then queue the run on the Gauntlet host.
+#   start   "Run workflow", load-test.yml, or a release whose CI passed: approval
+#           in the stress-test environment, then queue the run on the Gauntlet host.
 #   follow  poll the Gauntlet host every 5 minutes and keep the check up to date.
 #           GitHub stops a job at 6h, so a longer run hands off to a fresh
 #           dispatch of this workflow, which follows the same run without
@@ -30,7 +30,7 @@ on:
         required: false
         default: ""
       tests:
-        description: "Tests, sets (prerelease, network, sync) or all, comma separated"
+        description: "Tests, sets (prerelease, network) or all, comma separated"
         default: prerelease
       validators:
         description: "Network size, in validators"
@@ -51,6 +51,18 @@ on:
       check_run_id:
         description: "Internal: the check to update"
         default: ""
+  workflow_call:
+    inputs:
+      commit:
+        type: string
+      tests:
+        type: string
+      validators:
+        type: string
+      network:
+        type: string
+      params:
+        type: string
   workflow_run:
     workflows: [CI]
     types: [completed]

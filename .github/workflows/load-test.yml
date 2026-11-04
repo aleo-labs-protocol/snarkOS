@@ -1,0 +1,71 @@
+# Copy to aleo-labs-protocol/snarkOS as .github/workflows/load-test.yml.
+#
+# A form for the replay_stockpile test. stress-test.yml does the rest: approval in
+# the stress-test environment, the run, and the "stress-test" check on the commit.
+name: Load test
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "snarkOS commit (full SHA). Empty: the commit this is run from."
+        required: false
+        default: ""
+      validators:
+        description: "Network size, in validators"
+        type: choice
+        options: ["5", "10", "16"]
+        default: "5"
+      stockpile:
+        description: "Stockpile to replay. Its network is the devnet's."
+        type: choice
+        options:
+          - testnet-V22-h25-p1000x20-stockpile-1
+          - testnet-V22-h25-p10000x20-stockpile-2
+          - testnet-V22-h25-p10000x10-stockpile-3
+        default: testnet-V22-h25-p1000x20-stockpile-1
+      rate:
+        description: "Transactions per second"
+        required: true
+        default: "100"
+      duration:
+        description: "Seconds to send for. 0 sends the whole stockpile."
+        required: true
+        default: "120"
+      ramp:
+        description: "FROM:TO:STEP tx/s, instead of rate and duration. Lower min_inclusion with it."
+        required: false
+        default: ""
+      targets:
+        description: "Nodes to send to"
+        type: choice
+        options: [both, clients, validators]
+        default: both
+      replay_mode:
+        description: "per-payer for a build with input locks"
+        type: choice
+        options: [open, per-payer]
+        default: open
+      min_inclusion:
+        description: "Share of the transactions sent that must land"
+        required: true
+        default: "0.99"
+
+jobs:
+  load:
+    permissions:
+      id-token: write
+      checks: write
+      actions: write
+      contents: read
+    uses: ./.github/workflows/stress-test.yml
+    secrets: inherit
+    with:
+      commit: ${{ inputs.commit }}
+      tests: replay_stockpile
+      validators: ${{ inputs.validators }}
+      network: ${{ startsWith(inputs.stockpile, 'mainnet-') && 'mainnet' || 'testnet' }}
+      params: >-
+        ${{ format('stockpile={0},rate={1},duration={2},targets={3},replay_mode={4},min_inclusion={5}{6}',
+        inputs.stockpile, inputs.rate, inputs.duration, inputs.targets, inputs.replay_mode, inputs.min_inclusion,
+        inputs.ramp && format(',ramp={0}', inputs.ramp) || '') }}
