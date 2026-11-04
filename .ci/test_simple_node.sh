@@ -6,13 +6,15 @@
 
 set -eo pipefail # error on any command failure
 
+# The example's public balances only add up to the starting supply if the node count divides it
+# evenly. For example, 7 or 9 nodes panic at genesis.
+num_nodes=4
+
 # Set parameters directly
-num_nodes=$1
-min_round=$2
-timeout_secs=$3
+min_round=$1
+timeout_secs=$2
 
 # Default values if not provided
-: "${num_nodes:=4}"
 # The target must stay below round 102. The example's ledger stays at genesis, so at that round the
 # committee lookback asks for a committee the ledger does not have, and the nodes stop proposing.
 : "${min_round:=40}"
@@ -42,9 +44,23 @@ function exit_handler() {
 }
 trap exit_handler EXIT
 
+# Exits if a process already listens on a node's port, as its responses would count as the node's.
+function check_ports_free() {
+  local port
+  for ((i = 0; i < num_nodes; i++)); do
+    for port in $((3000 + i)) $((5000 + i)); do
+      if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+        log "⛔️ Another process listens on port $port"
+        exit 1
+      fi
+    done
+  done
+}
+
 # Starts the nodes for the given mode.
 function start_nodes() {
   local mode="$1"
+  check_ports_free
   PIDS=()
   for ((i = 0; i < num_nodes; i++)); do
     # A node keeps its data in its working directory.
@@ -74,10 +90,9 @@ function wait_for_round() {
     local lowest_round=$min_round
     for ((i = 0; i < num_nodes; i++)); do
       local round
-      round=$(curl -sf -m 2 "127.0.0.1:$((3000 + i))/round/current" || echo 0)
-      # Bash evaluates a variable's contents as an expression in an arithmetic context. That runs any
-      # command substitution in the response, and a malformed response would not count as behind.
-      [[ "$round" =~ ^[0-9]+$ ]] || round=0
+      round=$(curl -sf -m 2 "127.0.0.1:$((3000 + i))/round/current") || round=0
+      # A longer or zero-padded number does not compare correctly below.
+      [[ "$round" =~ ^(0|[1-9][0-9]{0,8})$ ]] || round=0
       if ((round < lowest_round)); then
         lowest_round=$round
       fi
@@ -114,6 +129,16 @@ for mode in bft narwhal; do
   if grep -l "Detected fork" "$log_dir/$mode"-node-*.log; then
     log "⛔️ The $mode nodes do not share a genesis block"
     exit 1
+  fi
+
+  # Narwhal mode has no BFT layer, so its nodes do not commit.
+  if [ "$mode" = bft ]; then
+    for ((i = 0; i < num_nodes; i++)); do
+      if ! grep -q "Committing a subDAG" "$log_dir/$mode-node-$i.log"; then
+        log "⛔️ BFT node $i reached round $min_round without a commit"
+        exit 1
+      fi
+    done
   fi
 
   stop_nodes
