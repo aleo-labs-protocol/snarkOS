@@ -253,6 +253,8 @@ impl FromBytes for ConsensusSchedule {
 pub struct HandshakeTrailer {
     /// The consensus schedule of the sender's build.
     pub schedule: Option<ConsensusSchedule>,
+    /// The little-endian bytes of the hash of the sender's genesis block, if it sent one.
+    pub genesis_hash: Option<[u8; 32]>,
 }
 
 impl HandshakeTrailer {
@@ -261,15 +263,16 @@ impl HandshakeTrailer {
 
     /// Returns the trailer that this build sends.
     pub fn of<N: Network>() -> Self {
-        Self { schedule: Some(ConsensusSchedule::of::<N>()) }
+        Self { schedule: Some(ConsensusSchedule::of::<N>()), genesis_hash: None }
     }
 
     /// Parses a trailer, or returns `None` if it is malformed.
     fn parse(bytes: &[u8]) -> Option<Self> {
         let (length, rest) = bytes.split_first_chunk::<2>()?;
-        let fields = rest.get(..usize::from(u16::from_le_bytes(*length)))?;
-        let schedule = ConsensusSchedule::read_le(fields).ok()?;
-        Some(Self { schedule: Some(schedule) })
+        let mut fields = rest.get(..usize::from(u16::from_le_bytes(*length)))?;
+        let schedule = ConsensusSchedule::read_le(&mut fields).ok()?;
+        let genesis_hash = fields.first_chunk::<32>().copied();
+        Some(Self { schedule: Some(schedule), genesis_hash })
     }
 }
 
@@ -279,7 +282,10 @@ impl ToBytes for HandshakeTrailer {
         let Some(schedule) = &self.schedule else {
             return Ok(());
         };
-        let fields = schedule.to_bytes_le().map_err(io_error)?;
+        let mut fields = schedule.to_bytes_le().map_err(io_error)?;
+        if let Some(genesis_hash) = &self.genesis_hash {
+            fields.extend_from_slice(genesis_hash);
+        }
         u16::try_from(fields.len()).map_err(io_error)?.write_le(&mut writer)?;
         writer.write_all(&fields)
     }
@@ -420,7 +426,9 @@ pub mod prop_tests {
     }
 
     pub fn any_trailer() -> BoxedStrategy<HandshakeTrailer> {
-        proptest::option::of(any_schedule()).prop_map(|schedule| HandshakeTrailer { schedule }).boxed()
+        proptest::option::of(any_schedule())
+            .prop_map(|schedule| HandshakeTrailer { schedule, genesis_hash: None })
+            .boxed()
     }
 
     pub fn any_peer_info() -> BoxedStrategy<PeerInfo<CurrentNetwork>> {

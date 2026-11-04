@@ -1642,6 +1642,13 @@ impl<N: Network> Handshake for Gateway<N> {
 
         // Retrieve the restrictions ID.
         let restrictions_id = self.ledger.latest_restrictions_id();
+        // Retrieve the hash of our genesis block, which the peer must share.
+        let genesis_hash = self.ledger.get_block_hash(0).map_err(ConnectError::other)?;
+        let genesis_hash: [u8; 32] = genesis_hash
+            .to_bytes_le()
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| ConnectError::other(anyhow!("Failed to encode the genesis hash")))?;
 
         // Perform the handshake; we pass on a mutable reference to peer_ip in case the process is broken at any point in time.
         //
@@ -1649,11 +1656,18 @@ impl<N: Network> Handshake for Gateway<N> {
         // away before any key is derived.
         let handshake_result = if peer_side == ConnectionSide::Responder {
             write_noise_magic(stream).await?;
-            self.handshake_inner_initiator_noise(peer_addr, restrictions_id, stream).await
+            self.handshake_inner_initiator_noise(peer_addr, restrictions_id, genesis_hash, stream).await
         } else {
             match detect_handshake_protocol(stream).await? {
                 (HandshakeProtocol::Noise, _) => {
-                    self.handshake_inner_responder_noise(peer_addr, &mut listener_addr, restrictions_id, stream).await
+                    self.handshake_inner_responder_noise(
+                        peer_addr,
+                        &mut listener_addr,
+                        restrictions_id,
+                        genesis_hash,
+                        stream,
+                    )
+                    .await
                 }
                 (HandshakeProtocol::Legacy, _) => {
                     Err(ConnectError::other(format!("'{peer_addr}' did not offer the Noise handshake")))
@@ -1834,6 +1848,7 @@ impl<N: Network> Gateway<N> {
         &'a self,
         peer_addr: SocketAddr,
         restrictions_id: Field<N>,
+        genesis_hash: [u8; 32],
         stream: &'a mut TcpStream,
     ) -> Result<(PeerInfo<N>, Option<ConsensusSchedule>), ConnectError> {
         // Note who answered here last time, before the pool entry becomes a connecting one and stops
@@ -1869,7 +1884,8 @@ impl<N: Network> Gateway<N> {
         let binding = binding_message(HANDSHAKE_DOMAIN, Role::Initiator, &noise.handshake_hash()?);
 
         // Check the peer over before signing anything for it.
-        if let Some(reason) = self.verify_peer_info(peer_addr, &peer_info, &peer_trailer, restrictions_id) {
+        if let Some(reason) = self.verify_peer_info(peer_addr, &peer_info, &peer_trailer, restrictions_id, genesis_hash)
+        {
             return Err(reason.into_connect_error(peer_addr));
         }
 
@@ -1891,7 +1907,7 @@ impl<N: Network> Gateway<N> {
         let our_message = InitiatorInfo {
             info: our_info,
             signature: Data::Object(our_signature),
-            trailer: HandshakeTrailer::of::<N>(),
+            trailer: HandshakeTrailer { genesis_hash: Some(genesis_hash), ..HandshakeTrailer::of::<N>() },
         };
         noise.send(&encode_payload(&our_message)?).await?;
 
@@ -1941,6 +1957,7 @@ impl<N: Network> Gateway<N> {
         peer_addr: SocketAddr,
         peer_ip: &mut Option<SocketAddr>,
         restrictions_id: Field<N>,
+        genesis_hash: [u8; 32],
         stream: &'a mut TcpStream,
     ) -> Result<(PeerInfo<N>, Option<ConsensusSchedule>), ConnectError> {
         /* Message 1: the peer's cleartext hint. Everything it claims is re-checked in message 3. */
@@ -1977,7 +1994,12 @@ impl<N: Network> Gateway<N> {
 
         let our_info =
             PeerInfo::new(self.local_ip().port(), self.account.address(), restrictions_id, self.snarkos_sha());
-        noise.send(&encode_payload(&ResponderInfo { info: our_info, trailer: HandshakeTrailer::of::<N>() })?).await?;
+        noise
+            .send(&encode_payload(&ResponderInfo {
+                info: our_info,
+                trailer: HandshakeTrailer { genesis_hash: Some(genesis_hash), ..HandshakeTrailer::of::<N>() },
+            })?)
+            .await?;
 
         // The binding the initiator is expected to have signed.
         let peer_binding = binding_message(HANDSHAKE_DOMAIN, Role::Initiator, &noise.handshake_hash()?);
@@ -2003,7 +2025,8 @@ impl<N: Network> Gateway<N> {
 
         // Everything below is a lookup or a comparison; only once all of it passes is the peer
         // worth the cost of a signature verification.
-        if let Some(reason) = self.verify_peer_info(peer_addr, &peer_info, &peer_trailer, restrictions_id) {
+        if let Some(reason) = self.verify_peer_info(peer_addr, &peer_info, &peer_trailer, restrictions_id, genesis_hash)
+        {
             return self.reject_noise_handshake(peer_addr, noise, reason).await;
         }
 
@@ -2049,6 +2072,7 @@ impl<N: Network> Gateway<N> {
         info: &PeerInfo<N>,
         trailer: &HandshakeTrailer,
         expected_restrictions_id: Field<N>,
+        expected_genesis_hash: [u8; 32],
     ) -> Option<DisconnectReason> {
         log_repo_sha_comparison(peer_addr, &info.snarkos_sha, CONTEXT);
 
@@ -2060,6 +2084,12 @@ impl<N: Network> Gateway<N> {
                 info.version
             );
             return Some(DisconnectReason::ProtocolViolation);
+        }
+
+        // Ensure the peer shares our genesis block. A peer that sent no genesis hash predates it.
+        if trailer.genesis_hash.is_some_and(|genesis_hash| genesis_hash != expected_genesis_hash) {
+            warn!("{CONTEXT} Handshake with '{peer_addr}' failed (incorrect genesis hash)");
+            return Some(DisconnectReason::GenesisMismatch);
         }
 
         // Verify the restrictions ID. This is the only check here that the cleartext hint cannot

@@ -434,7 +434,7 @@ async fn the_gateway_weighs_the_schedule_of_an_initiator() {
     let height = u32::MAX - 1_000;
     let mut heights = ConsensusSchedule::of::<CurrentNetwork>().heights().to_vec();
     heights.push(height);
-    let trailer = HandshakeTrailer { schedule: Some(ConsensusSchedule::new(heights).unwrap()) };
+    let trailer = HandshakeTrailer { schedule: Some(ConsensusSchedule::new(heights).unwrap()), genesis_hash: None };
     assert!(gateway.ensure_block_may_be_built(height).is_ok());
 
     let sign = honest_signer(peer.clone());
@@ -526,5 +526,54 @@ async fn an_initiator_that_owes_a_consensus_schedule_is_rejected_without_one() {
     .await
     .unwrap();
     assert_eq!(verdict, ResponderProof::Rejected { reason: DisconnectReason::ProtocolViolation });
+    assert!(!gateways[0].connected_addresses().contains(&peer.address()));
+}
+
+/// A peer that discloses the gateway's own genesis hash passes the genesis check.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_initiator_that_shares_the_genesis_is_accepted() {
+    let mut rng = TestRng::default();
+    let (accounts, gateways) = new_test_gateways(1, &mut rng).await;
+    let peer = accounts[1].clone();
+
+    let genesis_hash = gateways[0].ledger().get_block_hash(0).unwrap().to_bytes_le().unwrap().try_into().unwrap();
+    let trailer = HandshakeTrailer { genesis_hash: Some(genesis_hash), ..HandshakeTrailer::of::<CurrentNetwork>() };
+    let sign = honest_signer(peer.clone());
+    let (verdict, _stream) = handshake_with_gateway_sending(
+        dial_addr(&gateways[0]),
+        &peer,
+        4146,
+        Event::<CurrentNetwork>::VERSION,
+        trailer,
+        sign,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(verdict, ResponderProof::Accepted { .. }), "the handshake should have been accepted");
+
+    let (gateway, address) = (gateways[0].clone(), peer.address());
+    deadline!(Duration::from_secs(5), move || gateway.connected_addresses().contains(&address));
+}
+
+/// A peer that discloses a different genesis hash is on another network, and is rejected.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_initiator_with_a_different_genesis_is_rejected() {
+    let mut rng = TestRng::default();
+    let (accounts, gateways) = new_test_gateways(1, &mut rng).await;
+    let peer = accounts[1].clone();
+
+    let trailer = HandshakeTrailer { genesis_hash: Some([0; 32]), ..HandshakeTrailer::of::<CurrentNetwork>() };
+    let sign = honest_signer(peer.clone());
+    let (verdict, _stream) = handshake_with_gateway_sending(
+        dial_addr(&gateways[0]),
+        &peer,
+        4147,
+        Event::<CurrentNetwork>::VERSION,
+        trailer,
+        sign,
+    )
+    .await
+    .unwrap();
+    assert_eq!(verdict, ResponderProof::Rejected { reason: DisconnectReason::GenesisMismatch });
     assert!(!gateways[0].connected_addresses().contains(&peer.address()));
 }
