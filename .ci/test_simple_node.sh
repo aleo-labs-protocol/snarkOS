@@ -77,6 +77,9 @@ function wait_for_round() {
     for ((i = 0; i < num_nodes; i++)); do
       local round
       round=$(curl -sf -m 2 "127.0.0.1:$((3000 + i))/round/current" || echo 0)
+      # Bash evaluates a variable's contents as an expression in an arithmetic context. That runs any
+      # command substitution in the response, and a malformed response would not count as behind.
+      [[ "$round" =~ ^[0-9]+$ ]] || round=0
       if ((round < lowest_round)); then
         lowest_round=$round
       fi
