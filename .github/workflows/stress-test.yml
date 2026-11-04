@@ -35,7 +35,7 @@ on:
       mode:
         description: "Network size"
         type: choice
-        options: [light, heavy, prerelease]
+        options: [light, heavy, prerelease, loadtest, loadtest-10, loadtest-16]
         default: light
       network:
         description: "snarkOS network"
