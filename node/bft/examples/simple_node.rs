@@ -129,7 +129,7 @@ pub async fn start_bft(
     // Initialize the components.
     let (committee, account) = initialize_components(node_id, num_nodes)?;
     // Initialize the translucent ledger service.
-    let ledger = create_ledger(&account, num_nodes, committee, node_id);
+    let ledger = tokio::task::spawn_blocking(move || create_ledger(num_nodes, committee, node_id)).await?;
     // Initialize the storage.
     let storage = Storage::new(
         ledger.clone(),
@@ -184,7 +184,7 @@ pub async fn start_primary(
     // Initialize the components.
     let (committee, account) = initialize_components(node_id, num_nodes)?;
     // Initialize the translucent ledger service.
-    let ledger = create_ledger(&account, num_nodes, committee, node_id);
+    let ledger = tokio::task::spawn_blocking(move || create_ledger(num_nodes, committee, node_id)).await?;
     // Initialize the storage.
     let storage = Storage::new(
         ledger.clone(),
@@ -223,21 +223,23 @@ pub async fn start_primary(
 }
 
 /// Initialize the translucent ledger service.
+///
+/// This must run on a blocking thread, as the VM's sequential operations panic on an async one.
 fn create_ledger(
-    account: &Account<CurrentNetwork>,
     num_nodes: u16,
     committee: Committee<snarkvm::prelude::MainnetV0>,
     node_id: u16,
 ) -> Arc<TranslucentLedgerService<snarkvm::prelude::MainnetV0, ConsensusMemory<snarkvm::prelude::MainnetV0>>> {
-    let gen_key = account.private_key();
+    // Every node derives the same genesis block, including nodes that do not share a filesystem.
+    let gen_key = Account::<CurrentNetwork>::new(&mut rand_chacha::ChaChaRng::seed_from_u64(0)).unwrap();
     let public_balance_per_validator =
         (CurrentNetwork::STARTING_SUPPLY - (num_nodes as u64) * MIN_VALIDATOR_STAKE) / (num_nodes as u64);
     let mut balances = IndexMap::<Address<CurrentNetwork>, u64>::new();
     for address in committee.members().keys() {
         balances.insert(*address, public_balance_per_validator);
     }
-    let mut rng = TestRng::default();
-    let gen_ledger = genesis_ledger(*gen_key, committee.clone(), balances.clone(), node_id, &mut rng);
+    let mut rng = TestRng::fixed(0);
+    let gen_ledger = genesis_ledger(*gen_key.private_key(), committee.clone(), balances.clone(), node_id, &mut rng);
     Arc::new(TranslucentLedgerService::new(gen_ledger, SimpleStoppable::new()))
 }
 
@@ -289,7 +291,10 @@ fn genesis_ledger(
             }
 
             let block = genesis_block(genesis_private_key, committee, public_balances, rng);
-            std::fs::write(&file_path, block.to_bytes_le().unwrap()).unwrap();
+            // The nodes share this file, so one of them must never read another's partial write.
+            let partial_path = file_path.with_extension(format!("{node_id}.partial"));
+            std::fs::write(&partial_path, block.to_bytes_le().unwrap()).unwrap();
+            std::fs::rename(&partial_path, &file_path).unwrap();
             block
         })
         .clone();
@@ -511,7 +516,7 @@ async fn start_server(bft: Option<BFT<CurrentNetwork>>, primary: Primary<Current
         .route("/", get(|| async { "Hello, World!" }))
         .route("/leader", get(get_leader))
         .route("/round/current", get(get_current_round))
-        .route("/certificates/:round", get(get_certificates_for_round))
+        .route("/certificates/{round}", get(get_certificates_for_round))
         // Pass in the `NodeState` to access state.
         .with_state(NodeState { bft, primary });
 
