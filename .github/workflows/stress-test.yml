@@ -43,7 +43,7 @@ on:
         options: [testnet, mainnet]
         default: testnet
       params:
-        description: "Test parameter overrides, e.g. target_tps=50,exec_tx_count=40"
+        description: "Test parameter overrides, e.g. rate=200,duration=300"
         default: ""
       follow_run_id:
         description: "Internal: keep following this run"
