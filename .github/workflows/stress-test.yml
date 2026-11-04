@@ -189,8 +189,8 @@ jobs:
           ACTOR: ${{ steps.req.outputs.actor }}
         run: |
           source "$RUNNER_TEMP/gate.sh"
-          # Only a refusal's message reaches the check.
-          trap 'cat enqueue.err >&2; sed -n "s/^refused: //p" enqueue.err | head -c 2000 > refused.txt' EXIT
+          # Only a rejection's message reaches the check.
+          trap 'cat enqueue.err >&2; sed -n "s/^rejected: //p" enqueue.err | head -c 2000 > rejected.txt' EXIT
           gate enqueue "$RUN_ID" "$COMMIT" "$TESTS" "$VALIDATORS" "$NETWORK" "$ACTOR" "$PARAMS" 2> enqueue.err
 
       - name: Follow the run
@@ -275,16 +275,16 @@ jobs:
           echo "$summary" >> "$GITHUB_STEP_SUMMARY"
           [[ "$(jq -r .verdict status.json)" == pass ]]
 
-      - name: Report a refusal or an orchestration failure
+      - name: Report a rejection or an orchestration failure
         if: failure() && steps.check.outputs.id != '' && steps.follow.outputs.handoff != 'false'
         env:
           CHECK_ID: ${{ steps.check.outputs.id }}
         run: |
-          if [[ -s refused.txt ]]; then
+          if [[ -s rejected.txt ]]; then
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_ID" \
               -f status=completed -f conclusion=failure \
-              -f 'output[title]=Request refused' \
-              -f "output[summary]=The Gauntlet host refused this request and started no run: $(cat refused.txt)" >/dev/null
+              -f 'output[title]=Request rejected' \
+              -f "output[summary]=The Gauntlet host rejected this request and started no run: $(cat rejected.txt)" >/dev/null
             exit 0
           fi
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_ID" \
