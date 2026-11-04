@@ -19,7 +19,7 @@
 #   environment secret  STRESS_MANAGER_INSTANCE_ID   the Gauntlet host
 #   secret              ANTHROPIC_API_KEY            optional: the comparison summary
 #   variable            STRESS_MANAGER_HOST_KEY      the Gauntlet host's ssh host key line
-#   variable            STRESS_RELEASE_TESTS / STRESS_RELEASE_MODE   what a release runs
+#   variable            STRESS_RELEASE_TESTS / STRESS_RELEASE_VALIDATORS   what a release runs
 name: Stress test
 
 on:
@@ -32,11 +32,11 @@ on:
       tests:
         description: "Tests, sets (prerelease, network, sync) or all, comma separated"
         default: prerelease
-      mode:
-        description: "Network size"
+      validators:
+        description: "Network size, in validators"
         type: choice
-        options: [light, heavy, prerelease]
-        default: light
+        options: ["5", "10", "16"]
+        default: "5"
       network:
         description: "snarkOS network"
         type: choice
@@ -85,21 +85,21 @@ jobs:
           EVENT: ${{ github.event_name }}
           IN_COMMIT: ${{ inputs.commit }}
           IN_TESTS: ${{ inputs.tests }}
-          IN_MODE: ${{ inputs.mode }}
+          IN_VALIDATORS: ${{ inputs.validators }}
           IN_NETWORK: ${{ inputs.network }}
           IN_PARAMS: ${{ inputs.params }}
           IN_FOLLOW: ${{ inputs.follow_run_id }}
           IN_CHECK: ${{ inputs.check_run_id }}
           RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
           RELEASE_TESTS: ${{ vars.STRESS_RELEASE_TESTS }}
-          RELEASE_MODE: ${{ vars.STRESS_RELEASE_MODE }}
+          RELEASE_VALIDATORS: ${{ vars.STRESS_RELEASE_VALIDATORS }}
           ACTOR: ${{ github.triggering_actor }}
         run: |
           if [[ "$EVENT" == workflow_run ]]; then
-            commit="$RELEASE_SHA"; tests="${RELEASE_TESTS:-prerelease}"; mode="${RELEASE_MODE:-light}"
+            commit="$RELEASE_SHA"; tests="${RELEASE_TESTS:-prerelease}"; validators="${RELEASE_VALIDATORS:-5}"
             network=testnet; params=""
           else
-            commit="${IN_COMMIT:-$GITHUB_SHA}"; tests="$IN_TESTS"; mode="$IN_MODE"; network="$IN_NETWORK"; params="$IN_PARAMS"
+            commit="${IN_COMMIT:-$GITHUB_SHA}"; tests="$IN_TESTS"; validators="$IN_VALIDATORS"; network="$IN_NETWORK"; params="$IN_PARAMS"
           fi
           [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::commit must be a full 40-character SHA"; exit 1; }
           run_id="${IN_FOLLOW:-gh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}}"
@@ -112,14 +112,14 @@ jobs:
           else
             [[ -z "$IN_CHECK" ]] || exit 1
           fi
-          for value in "$commit" "$tests" "$mode" "$network" "$params" "$run_id" "$IN_CHECK" "$ACTOR"; do
+          for value in "$commit" "$tests" "$validators" "$network" "$params" "$run_id" "$IN_CHECK" "$ACTOR"; do
             [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || {
               echo "::error::request values must be single-line"
               exit 1
             }
           done
           {
-            echo "commit=$commit"; echo "tests=$tests"; echo "mode=$mode"; echo "network=$network"
+            echo "commit=$commit"; echo "tests=$tests"; echo "validators=$validators"; echo "network=$network"
             echo "params=$params"; echo "run_id=$run_id"; echo "check_id=$IN_CHECK"
             echo "actor=$ACTOR"; echo "follow=$([[ -n "$IN_FOLLOW" ]] && echo true || echo false)"
           } >> "$GITHUB_OUTPUT"
@@ -182,14 +182,14 @@ jobs:
         env:
           COMMIT: ${{ steps.req.outputs.commit }}
           TESTS: ${{ steps.req.outputs.tests }}
-          MODE: ${{ steps.req.outputs.mode }}
+          VALIDATORS: ${{ steps.req.outputs.validators }}
           NETWORK: ${{ steps.req.outputs.network }}
           PARAMS: ${{ steps.req.outputs.params }}
           RUN_ID: ${{ steps.req.outputs.run_id }}
           ACTOR: ${{ steps.req.outputs.actor }}
         run: |
           source "$RUNNER_TEMP/gate.sh"
-          gate enqueue "$RUN_ID" "$COMMIT" "$TESTS" "$MODE" "$NETWORK" "$ACTOR" "$PARAMS"
+          gate enqueue "$RUN_ID" "$COMMIT" "$TESTS" "$VALIDATORS" "$NETWORK" "$ACTOR" "$PARAMS"
 
       - name: Follow the run
         id: follow
