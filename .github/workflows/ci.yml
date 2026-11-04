@@ -271,6 +271,12 @@ jobs:
             runs: |
               ./.ci/test_db_backup.sh
               ./.ci/test_devnet.sh
+          # Clippy and `cargo check` only compile the examples, so this is the one
+          # job that runs one. It builds the example itself.
+          - name: simple-node
+            timeout: 60
+            delay: false
+            runs: ./.ci/test_simple_node.sh
     name: devnet (${{ matrix.name }})
     steps: &devnet-steps
       - uses: actions/checkout@v7
@@ -318,11 +324,6 @@ jobs:
           - name: dev-on-prod-restart
             timeout: 45
             runs: ./.ci/test_dev_on_prod_restart.sh
-          # Clippy and `cargo check` only compile the examples, so this is the one
-          # job that runs one. It builds the example itself.
-          - name: simple-node
-            timeout: 60
-            runs: ./.ci/test_simple_node.sh
           - name: chaotic-minority-reset
             timeout: 45
             delay: true
