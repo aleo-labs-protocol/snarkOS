@@ -43,7 +43,7 @@ on:
         options: [testnet, mainnet]
         default: testnet
       params:
-        description: "Test parameter overrides, e.g. rate=200,duration=300"
+        description: "Test parameter overrides, e.g. rate=50,duration=300"
         default: ""
       follow_run_id:
         description: "Internal: keep following this run"
@@ -189,7 +189,9 @@ jobs:
           ACTOR: ${{ steps.req.outputs.actor }}
         run: |
           source "$RUNNER_TEMP/gate.sh"
-          gate enqueue "$RUN_ID" "$COMMIT" "$TESTS" "$VALIDATORS" "$NETWORK" "$ACTOR" "$PARAMS"
+          # Only a rejection's message reaches the check.
+          trap 'cat enqueue.err >&2; sed -n "s/^rejected: //p" enqueue.err | head -c 2000 > rejected.txt' EXIT
+          gate enqueue "$RUN_ID" "$COMMIT" "$TESTS" "$VALIDATORS" "$NETWORK" "$ACTOR" "$PARAMS" 2> enqueue.err
 
       - name: Follow the run
         id: follow
@@ -273,11 +275,18 @@ jobs:
           echo "$summary" >> "$GITHUB_STEP_SUMMARY"
           [[ "$(jq -r .verdict status.json)" == pass ]]
 
-      - name: Report orchestration failure
+      - name: Report a rejection or an orchestration failure
         if: failure() && steps.check.outputs.id != '' && steps.follow.outputs.handoff != 'false'
         env:
           CHECK_ID: ${{ steps.check.outputs.id }}
         run: |
+          if [[ -s rejected.txt ]]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_ID" \
+              -f status=completed -f conclusion=failure \
+              -f 'output[title]=Request rejected' \
+              -f "output[summary]=The Gauntlet host rejected this request and started no run: $(cat rejected.txt)" >/dev/null
+            exit 0
+          fi
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_ID" \
             -f status=completed -f conclusion=action_required \
             -f 'output[title]=Orchestration interrupted' \
