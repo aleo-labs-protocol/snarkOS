@@ -47,14 +47,12 @@ function start_nodes() {
   local mode="$1"
   PIDS=()
   for ((i = 0; i < num_nodes; i++)); do
-    # A node keeps its ledger in its working directory and caches its genesis block in TMPDIR. A
-    # directory for each node makes every node generate its own block, so the nodes only agree if
-    # generation is deterministic. A shared TMPDIR would let the first node's block hide a difference.
+    # A node keeps its data in its working directory.
     local node_dir="$run_dir/$mode-$i"
     mkdir -p "$node_dir"
     (
       cd "$node_dir"
-      TMPDIR="$node_dir" exec "$simple_node" --mode "$mode" --id "$i" --num-nodes "$num_nodes" --fire-transmissions
+      exec "$simple_node" --mode "$mode" --id "$i" --num-nodes "$num_nodes" --fire-transmissions
     ) > "$log_dir/$mode-node-$i.log" 2>&1 &
     PIDS+=($!)
   done

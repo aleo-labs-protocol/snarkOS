@@ -34,7 +34,7 @@ use snarkos_utilities::{NodeDataDir, SimpleStoppable};
 
 use aleo_std::StorageMode;
 use snarkvm::{
-    console::{account::PrivateKey, algorithms::BHP256, types::Address},
+    console::{account::PrivateKey, types::Address},
     ledger::{
         Block,
         Ledger,
@@ -44,8 +44,8 @@ use snarkvm::{
         puzzle::{Solution, SolutionID},
         store::{ConsensusStore, helpers::memory::ConsensusMemory},
     },
-    prelude::{Field, Hash, Network, Uniform, VM},
-    utilities::{FromBytes, TestRng, ToBits, ToBytes, to_bytes_le},
+    prelude::{Field, Network, Uniform, VM},
+    utilities::TestRng,
 };
 
 use ::bytes::Bytes;
@@ -67,7 +67,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     str::FromStr,
-    sync::{Arc, Mutex, OnceLock},
+    sync::Arc,
 };
 use tokio::{net::TcpListener, sync::oneshot};
 use tracing_subscriber::{
@@ -230,7 +230,7 @@ fn create_ledger(
     committee: Committee<snarkvm::prelude::MainnetV0>,
     node_id: u16,
 ) -> Arc<TranslucentLedgerService<snarkvm::prelude::MainnetV0, ConsensusMemory<snarkvm::prelude::MainnetV0>>> {
-    // Every node derives the same genesis block, including nodes that do not share a filesystem.
+    // Every node derives the same genesis block.
     let gen_key = Account::<CurrentNetwork>::new(&mut rand_chacha::ChaChaRng::seed_from_u64(0)).unwrap();
     let public_balance_per_validator =
         (CurrentNetwork::STARTING_SUPPLY - (num_nodes as u64) * MIN_VALIDATOR_STAKE) / (num_nodes as u64);
@@ -239,16 +239,12 @@ fn create_ledger(
         balances.insert(*address, public_balance_per_validator);
     }
     let mut rng = TestRng::fixed(0);
-    let gen_ledger = genesis_ledger(*gen_key.private_key(), committee.clone(), balances.clone(), node_id, &mut rng);
+    let block = genesis_block(*gen_key.private_key(), committee, balances, &mut rng);
+    let gen_ledger = CurrentLedger::load(block, StorageMode::Development(node_id)).unwrap();
     Arc::new(TranslucentLedgerService::new(gen_ledger, SimpleStoppable::new()))
 }
 
 pub type CurrentLedger = Ledger<CurrentNetwork, ConsensusMemory<CurrentNetwork>>;
-
-fn genesis_cache() -> &'static Mutex<HashMap<Vec<u8>, Block<CurrentNetwork>>> {
-    static CACHE: OnceLock<Mutex<HashMap<Vec<u8>, Block<CurrentNetwork>>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
 
 fn genesis_block(
     genesis_private_key: PrivateKey<CurrentNetwork>,
@@ -264,42 +260,6 @@ fn genesis_block(
     let bonded_balances: IndexMap<_, _> =
         committee.members().iter().map(|(address, (amount, _, _))| (*address, (*address, *address, *amount))).collect();
     vm.genesis_quorum(&genesis_private_key, committee, public_balances, bonded_balances, rng).unwrap()
-}
-
-fn genesis_ledger(
-    genesis_private_key: PrivateKey<CurrentNetwork>,
-    committee: Committee<CurrentNetwork>,
-    public_balances: IndexMap<Address<CurrentNetwork>, u64>,
-    node_id: u16,
-    rng: &mut impl CryptoRng,
-) -> CurrentLedger {
-    let cache_key =
-        to_bytes_le![genesis_private_key, committee, public_balances.iter().collect::<Vec<(_, _)>>()].unwrap();
-    // Initialize the genesis block on the first call; other callers
-    // will wait for it on the mutex.
-    let block = genesis_cache()
-        .lock()
-        .unwrap()
-        .entry(cache_key.clone())
-        .or_insert_with(|| {
-            let hasher = BHP256::<CurrentNetwork>::setup("aleo.dev.block").unwrap();
-            let file_name = hasher.hash(&cache_key.to_bits_le()).unwrap().to_string() + ".genesis";
-            let file_path = std::env::temp_dir().join(file_name);
-            if file_path.exists() {
-                let buffer = std::fs::read(file_path).unwrap();
-                return Block::from_bytes_le(&buffer).unwrap();
-            }
-
-            let block = genesis_block(genesis_private_key, committee, public_balances, rng);
-            // The nodes share this file, so one of them must never read another's partial write.
-            let partial_path = file_path.with_extension(format!("{node_id}.partial"));
-            std::fs::write(&partial_path, block.to_bytes_le().unwrap()).unwrap();
-            std::fs::rename(&partial_path, &file_path).unwrap();
-            block
-        })
-        .clone();
-    // Initialize the ledger with the genesis block.
-    CurrentLedger::load(block, aleo_std::StorageMode::Development(node_id)).unwrap()
 }
 
 /// Initializes the components of the node.
