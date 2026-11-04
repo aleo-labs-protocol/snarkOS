@@ -25,7 +25,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.BASE_BRANCH }}
           persist-credentials: false
@@ -66,6 +66,8 @@ jobs:
           private-key: ${{ secrets.MERGE_BOT_APP_KEY }}
           permission-contents: write
           permission-pull-requests: write
+          # The rebuilt branch can carry staging's own workflow changes.
+          permission-workflows: write
 
       - name: Open or update pull request
         if: steps.revs.outputs.current != steps.revs.outputs.latest
@@ -75,6 +77,39 @@ jobs:
           CURRENT: ${{ steps.revs.outputs.current }}
           LATEST: ${{ steps.revs.outputs.latest }}
         run: |
+          set -euo pipefail
+          bot="${APP_SLUG}[bot]"
+
+          # --head matches a fork's branch of the same name too.
+          pr=$(gh pr list --head "$PR_BRANCH" --base "$BASE_BRANCH" --state open --json number,isCrossRepository \
+                 --jq 'map(select(.isCrossRepository | not)) | .[0].number // empty')
+          if [ -n "$pr" ]; then
+            # A new commit on the same revision would only restart CI.
+            pinned=$(gh api -H 'Accept: application/vnd.github.raw+json' "repos/$GITHUB_REPOSITORY/contents/Cargo.toml?ref=$PR_BRANCH" \
+                       | sed -n '/^\[workspace\.dependencies\.snarkvm\]/,/^\[/ s/^rev = "\([0-9a-f]*\)".*/\1/p')
+            if [ "$pinned" = "$LATEST" ]; then
+              echo "#$pr already pins ${LATEST:0:9}"
+              exit 0
+            fi
+            # The workflow pushes one commit of its own. A tip that someone else
+            # wrote or committed hands the branch to them: a force-push here
+            # would delete their work.
+            theirs=$(BOT=$bot gh api "repos/$GITHUB_REPOSITORY/commits/$PR_BRANCH" \
+                       --jq 'select(.author.login != env.BOT or .committer.login != env.BOT) | .sha')
+            if [ -n "$theirs" ]; then
+              marker="<!-- bump-snarkvm: $LATEST -->"
+              # Not piped: grep -q exits at the first match, and under pipefail
+              # gh's SIGPIPE would read as no match.
+              comments=$(gh api "repos/$GITHUB_REPOSITORY/issues/$pr/comments" --paginate --jq '.[].body')
+              if ! grep -qxF -- "$marker" <<< "$comments"; then
+                gh pr comment "$pr" --body "snarkVM \`$SNARKVM_BRANCH\` is now at $SNARKVM_REPO@${LATEST:0:9}. Someone else has pushed to this branch, so the workflow does not rebuild it. Close this pull request, and the next run rebuilds the branch and opens a new one.
+
+          $marker"
+              fi
+              exit 0
+            fi
+          fi
+
           # Commits in the current pin that are missing from snarkVM's branch
           # (e.g. a pin on a merge of staging and a release branch) are dropped
           # by this bump.
@@ -83,7 +118,9 @@ jobs:
           title="Bump snarkVM to $SNARKVM_REPO@${LATEST:0:9}"
           body="Bumps snarkVM to the latest commit on \`$SNARKVM_BRANCH\`.
 
-          Changes: https://github.com/$SNARKVM_REPO/compare/$CURRENT...$LATEST"
+          Changes: https://github.com/$SNARKVM_REPO/compare/$CURRENT...$LATEST
+
+          Each run that finds a newer snarkVM commit rebuilds this branch from \`$BASE_BRANCH\` and force-pushes it. Once someone else pushes to the branch, the workflow comments instead."
           if [ "$dropped" != "0" ]; then
             body="$body
 
@@ -91,7 +128,6 @@ jobs:
           > The current pin \`${CURRENT:0:9}\` contains $dropped commit(s) that are not on snarkVM \`$SNARKVM_BRANCH\`. Merging this drops them."
           fi
 
-          bot="${APP_SLUG}[bot]"
           git config user.name "$bot"
           git config user.email "$(gh api "users/$APP_SLUG%5Bbot%5D" --jq .id)+$bot@users.noreply.github.com"
           gh auth setup-git
@@ -99,8 +135,8 @@ jobs:
           git commit -am "$title"
           git push --force origin "$PR_BRANCH"
 
-          if [ -n "$(gh pr list --head "$PR_BRANCH" --base "$BASE_BRANCH" --state open --json number --jq '.[0].number')" ]; then
-            gh pr edit "$PR_BRANCH" --title "$title" --body "$body"
+          if [ -n "$pr" ]; then
+            gh pr edit "$pr" --title "$title" --body "$body"
           else
             gh pr create --head "$PR_BRANCH" --base "$BASE_BRANCH" --title "$title" --body "$body"
           fi
