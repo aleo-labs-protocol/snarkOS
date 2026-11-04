@@ -18,14 +18,17 @@ jobs:
   bump:
     name: Bump snarkVM to latest staging
     runs-on: ubuntu-latest
+    # Admits only runs on staging, so a workflow on any other branch cannot read
+    # the app key.
+    environment: merge-bot
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
           ref: ${{ env.BASE_BRANCH }}
+          persist-credentials: false
 
       - name: Find current and latest snarkVM revisions
         id: revs
@@ -51,10 +54,24 @@ jobs:
           sed -i "/^\[workspace\.dependencies\.snarkvm\]/,/^\[/ s|^rev = .*|rev = \"$LATEST\" #$SNARKVM_BRANCH|" Cargo.toml
           cargo update -p snarkvm
 
+      # A push made with github.token starts no workflows, so CI would never run
+      # on the pull request. Actions also cannot create pull requests in this
+      # organization with github.token.
+      - name: Create app token
+        if: steps.revs.outputs.current != steps.revs.outputs.latest
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.MERGE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.MERGE_BOT_APP_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
       - name: Open or update pull request
         if: steps.revs.outputs.current != steps.revs.outputs.latest
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          APP_SLUG: ${{ steps.app.outputs.app-slug }}
           CURRENT: ${{ steps.revs.outputs.current }}
           LATEST: ${{ steps.revs.outputs.latest }}
         run: |
@@ -74,8 +91,10 @@ jobs:
           > The current pin \`${CURRENT:0:9}\` contains $dropped commit(s) that are not on snarkVM \`$SNARKVM_BRANCH\`. Merging this drops them."
           fi
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          bot="${APP_SLUG}[bot]"
+          git config user.name "$bot"
+          git config user.email "$(gh api "users/$APP_SLUG%5Bbot%5D" --jq .id)+$bot@users.noreply.github.com"
+          gh auth setup-git
           git checkout -B "$PR_BRANCH"
           git commit -am "$title"
           git push --force origin "$PR_BRANCH"
