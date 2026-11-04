@@ -54,9 +54,9 @@ use tokio::net::TcpStream;
 async fn new_test_bootstrap_client() -> BootstrapClient<CurrentNetwork> {
     let rng = &mut TestRng::default();
     let listener_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let genesis_header = *sample_genesis_block().header();
+    let genesis = sample_genesis_block();
 
-    BootstrapClient::new(listener_addr, sample_account(rng), genesis_header, Some(0)).await.unwrap()
+    BootstrapClient::new(listener_addr, sample_account(rng), *genesis.header(), genesis.hash(), Some(0)).await.unwrap()
 }
 
 fn dial_addr(client: &BootstrapClient<CurrentNetwork>) -> SocketAddr {

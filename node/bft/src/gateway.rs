@@ -1907,7 +1907,7 @@ impl<N: Network> Gateway<N> {
         let our_message = InitiatorInfo {
             info: our_info,
             signature: Data::Object(our_signature),
-            trailer: HandshakeTrailer { genesis_hash: Some(genesis_hash), ..HandshakeTrailer::of::<N>() },
+            trailer: HandshakeTrailer { genesis_hash: Some(genesis_hash.to_vec()), ..HandshakeTrailer::of::<N>() },
         };
         noise.send(&encode_payload(&our_message)?).await?;
 
@@ -1997,7 +1997,7 @@ impl<N: Network> Gateway<N> {
         noise
             .send(&encode_payload(&ResponderInfo {
                 info: our_info,
-                trailer: HandshakeTrailer { genesis_hash: Some(genesis_hash), ..HandshakeTrailer::of::<N>() },
+                trailer: HandshakeTrailer { genesis_hash: Some(genesis_hash.to_vec()), ..HandshakeTrailer::of::<N>() },
             })?)
             .await?;
 
@@ -2086,8 +2086,10 @@ impl<N: Network> Gateway<N> {
             return Some(DisconnectReason::ProtocolViolation);
         }
 
-        // Ensure the peer shares our genesis block. A peer that sent no genesis hash predates it.
-        if trailer.genesis_hash.is_some_and(|genesis_hash| genesis_hash != expected_genesis_hash) {
+        // Ensure the peer shares our genesis block. Only a peer at a version that predates the genesis
+        // hash may send none; one that sent it incomplete fails the comparison.
+        let predates_genesis_hash = info.version < HandshakeTrailer::GENESIS_VERSION && trailer.genesis_hash.is_none();
+        if !predates_genesis_hash && trailer.genesis_hash.as_deref() != Some(&expected_genesis_hash[..]) {
             warn!("{CONTEXT} Handshake with '{peer_addr}' failed (incorrect genesis hash)");
             return Some(DisconnectReason::GenesisMismatch);
         }

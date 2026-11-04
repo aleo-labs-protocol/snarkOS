@@ -253,13 +253,16 @@ impl FromBytes for ConsensusSchedule {
 pub struct HandshakeTrailer {
     /// The consensus schedule of the sender's build.
     pub schedule: Option<ConsensusSchedule>,
-    /// The little-endian bytes of the hash of the sender's genesis block, if it sent one.
-    pub genesis_hash: Option<[u8; 32]>,
+    /// The little-endian bytes of the hash of the sender's genesis block, if it sent one. Bytes of
+    /// the wrong length are kept as sent, so that they fail the genesis check instead of reading as none.
+    pub genesis_hash: Option<Vec<u8>>,
 }
 
 impl HandshakeTrailer {
     /// The first event version whose handshake messages 2 and 3 must carry a trailer with a schedule.
     pub const FIRST_VERSION: u32 = 11;
+    /// The first event version whose handshake trailer must carry the genesis hash.
+    pub const GENESIS_VERSION: u32 = 12;
 
     /// Returns the trailer that this build sends.
     pub fn of<N: Network>() -> Self {
@@ -271,7 +274,7 @@ impl HandshakeTrailer {
         let (length, rest) = bytes.split_first_chunk::<2>()?;
         let mut fields = rest.get(..usize::from(u16::from_le_bytes(*length)))?;
         let schedule = ConsensusSchedule::read_le(&mut fields).ok()?;
-        let genesis_hash = fields.first_chunk::<32>().copied();
+        let genesis_hash = (!fields.is_empty()).then(|| fields[..fields.len().min(32)].to_vec());
         Some(Self { schedule: Some(schedule), genesis_hash })
     }
 }

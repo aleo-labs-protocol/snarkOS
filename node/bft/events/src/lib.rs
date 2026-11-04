@@ -175,7 +175,7 @@ impl<N: Network> Event<N> {
     /// order to force users to update.
     pub const MINIMUM_VERSION: u32 = 10;
     /// The version of the event protocol this node speaks.
-    pub const VERSION: u32 = 11;
+    pub const VERSION: u32 = 12;
 
     /// Serializes the event's [`Data`] payload, if it holds one that is not already serialized.
     ///

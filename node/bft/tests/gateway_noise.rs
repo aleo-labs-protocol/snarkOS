@@ -126,7 +126,7 @@ async fn a_noise_handshake_leaves_the_connection_usable() {
     let peer = accounts[1].clone();
 
     let sign = honest_signer(peer.clone());
-    let (verdict, mut stream) = handshake_with_gateway(dial_addr(&gateway), &peer, 4140, sign).await.unwrap();
+    let (verdict, mut stream) = handshake_with_gateway(&gateway, &peer, 4140, sign).await.unwrap();
     assert!(matches!(verdict, ResponderProof::Accepted { .. }), "the handshake should have been accepted");
 
     // Now speak events over the same stream, through a codec built from scratch as `Reading` does.
@@ -215,21 +215,28 @@ fn honest_signer(account: Account<CurrentNetwork>) -> impl Fn(&[u8]) -> Vec<u8> 
     move |binding| account.sign_bytes(binding, &mut rand::rng()).unwrap().to_bytes_le().unwrap()
 }
 
+/// Returns the little-endian bytes of the hash of the gateway's genesis block.
+fn genesis_hash(gateway: &Gateway<CurrentNetwork>) -> Vec<u8> {
+    gateway.ledger().get_block_hash(0).unwrap().to_bytes_le().unwrap()
+}
+
 /// Drives a Noise handshake against a gateway by hand, up to and including the verdict, and hands the
 /// stream back so that a test can carry on speaking events over it.
 ///
 /// The signature over the binding is produced by `sign`, so that a test can decide whether to
-/// authenticate honestly or not. It announces the current event version and this build's schedule,
-/// and reads the gateway's metadata in the original layout, skipping its trailer.
+/// authenticate honestly or not. It announces the current event version, this build's schedule and
+/// the gateway's genesis hash, and reads the gateway's metadata in the original layout, skipping its
+/// trailer.
 async fn handshake_with_gateway(
-    gateway_addr: SocketAddr,
+    gateway: &Gateway<CurrentNetwork>,
     account: &Account<CurrentNetwork>,
     listener_port: u16,
     sign: impl Fn(&[u8]) -> Vec<u8>,
 ) -> io::Result<(ResponderProof<CurrentNetwork>, TcpStream)> {
     let version = Event::<CurrentNetwork>::VERSION;
-    let trailer = HandshakeTrailer::of::<CurrentNetwork>();
-    handshake_with_gateway_sending(gateway_addr, account, listener_port, version, trailer, sign).await
+    let trailer =
+        HandshakeTrailer { genesis_hash: Some(genesis_hash(gateway)), ..HandshakeTrailer::of::<CurrentNetwork>() };
+    handshake_with_gateway_sending(dial_addr(gateway), account, listener_port, version, trailer, sign).await
 }
 
 /// Drives a Noise handshake like [`handshake_with_gateway`], announcing the event `version` and
@@ -307,7 +314,7 @@ async fn a_committee_member_that_cannot_prove_its_identity_is_rejected() {
     let impostor = Account::<CurrentNetwork>::new(&mut rng).unwrap();
     let sign = move |binding: &[u8]| impostor.sign_bytes(binding, &mut rand::rng()).unwrap().to_bytes_le().unwrap();
 
-    let (verdict, _stream) = handshake_with_gateway(dial_addr(&gateway), &accounts[1], 4131, sign).await.unwrap();
+    let (verdict, _stream) = handshake_with_gateway(&gateway, &accounts[1], 4131, sign).await.unwrap();
 
     assert_eq!(verdict, ResponderProof::Rejected { reason: DisconnectReason::InvalidChallengeResponse });
     assert!(!gateway.connected_addresses().contains(&accounts[1].address()));
@@ -406,7 +413,8 @@ async fn an_initiator_that_discloses_its_consensus_schedule_is_accepted() {
     let peer = accounts[1].clone();
 
     let sign = honest_signer(peer.clone());
-    let trailer = HandshakeTrailer::of::<CurrentNetwork>();
+    let trailer =
+        HandshakeTrailer { genesis_hash: Some(genesis_hash(&gateways[0])), ..HandshakeTrailer::of::<CurrentNetwork>() };
     let (verdict, _stream) = handshake_with_gateway_sending(
         dial_addr(&gateways[0]),
         &peer,
@@ -434,7 +442,10 @@ async fn the_gateway_weighs_the_schedule_of_an_initiator() {
     let height = u32::MAX - 1_000;
     let mut heights = ConsensusSchedule::of::<CurrentNetwork>().heights().to_vec();
     heights.push(height);
-    let trailer = HandshakeTrailer { schedule: Some(ConsensusSchedule::new(heights).unwrap()), genesis_hash: None };
+    let trailer = HandshakeTrailer {
+        schedule: Some(ConsensusSchedule::new(heights).unwrap()),
+        genesis_hash: Some(genesis_hash(&gateway)),
+    };
     assert!(gateway.ensure_block_may_be_built(height).is_ok());
 
     let sign = honest_signer(peer.clone());
@@ -470,7 +481,7 @@ async fn a_validator_counts_as_connected_only_once_its_schedule_is_recorded() {
     // The gateway cannot record the schedule while the lock is held.
     let guard = gateway.upgrade_monitor().lock_for_test();
     let sign = honest_signer(peer.clone());
-    let (verdict, _stream) = handshake_with_gateway(dial_addr(&gateway), &peer, 4143, sign).await.unwrap();
+    let (verdict, _stream) = handshake_with_gateway(&gateway, &peer, 4143, sign).await.unwrap();
     assert!(matches!(verdict, ResponderProof::Accepted { .. }), "the handshake should have been accepted");
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(!gateway.connected_addresses().contains(&peer.address()));
@@ -536,8 +547,8 @@ async fn an_initiator_that_shares_the_genesis_is_accepted() {
     let (accounts, gateways) = new_test_gateways(1, &mut rng).await;
     let peer = accounts[1].clone();
 
-    let genesis_hash = gateways[0].ledger().get_block_hash(0).unwrap().to_bytes_le().unwrap().try_into().unwrap();
-    let trailer = HandshakeTrailer { genesis_hash: Some(genesis_hash), ..HandshakeTrailer::of::<CurrentNetwork>() };
+    let trailer =
+        HandshakeTrailer { genesis_hash: Some(genesis_hash(&gateways[0])), ..HandshakeTrailer::of::<CurrentNetwork>() };
     let sign = honest_signer(peer.clone());
     let (verdict, _stream) = handshake_with_gateway_sending(
         dial_addr(&gateways[0]),
@@ -562,7 +573,7 @@ async fn an_initiator_with_a_different_genesis_is_rejected() {
     let (accounts, gateways) = new_test_gateways(1, &mut rng).await;
     let peer = accounts[1].clone();
 
-    let trailer = HandshakeTrailer { genesis_hash: Some([0; 32]), ..HandshakeTrailer::of::<CurrentNetwork>() };
+    let trailer = HandshakeTrailer { genesis_hash: Some(vec![0; 32]), ..HandshakeTrailer::of::<CurrentNetwork>() };
     let sign = honest_signer(peer.clone());
     let (verdict, _stream) = handshake_with_gateway_sending(
         dial_addr(&gateways[0]),
@@ -576,4 +587,75 @@ async fn an_initiator_with_a_different_genesis_is_rejected() {
     .unwrap();
     assert_eq!(verdict, ResponderProof::Rejected { reason: DisconnectReason::GenesisMismatch });
     assert!(!gateways[0].connected_addresses().contains(&peer.address()));
+}
+
+/// A peer at an event version that requires the genesis hash is rejected without one, rather than
+/// read as a peer that predates it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_initiator_that_owes_a_genesis_hash_is_rejected_without_one() {
+    let mut rng = TestRng::default();
+    let (accounts, gateways) = new_test_gateways(1, &mut rng).await;
+    let peer = accounts[1].clone();
+
+    let sign = honest_signer(peer.clone());
+    let (verdict, _stream) = handshake_with_gateway_sending(
+        dial_addr(&gateways[0]),
+        &peer,
+        4148,
+        HandshakeTrailer::GENESIS_VERSION,
+        HandshakeTrailer::of::<CurrentNetwork>(),
+        sign,
+    )
+    .await
+    .unwrap();
+    assert_eq!(verdict, ResponderProof::Rejected { reason: DisconnectReason::GenesisMismatch });
+    assert!(!gateways[0].connected_addresses().contains(&peer.address()));
+}
+
+/// A peer at an event version that predates the genesis hash is accepted without one.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_initiator_that_predates_the_genesis_hash_is_accepted_without_one() {
+    let mut rng = TestRng::default();
+    let (accounts, gateways) = new_test_gateways(1, &mut rng).await;
+    let peer = accounts[1].clone();
+
+    let sign = honest_signer(peer.clone());
+    let (verdict, _stream) = handshake_with_gateway_sending(
+        dial_addr(&gateways[0]),
+        &peer,
+        4149,
+        HandshakeTrailer::GENESIS_VERSION - 1,
+        HandshakeTrailer::of::<CurrentNetwork>(),
+        sign,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(verdict, ResponderProof::Accepted { .. }), "the handshake should have been accepted");
+
+    let (gateway, address) = (gateways[0].clone(), peer.address());
+    deadline!(Duration::from_secs(5), move || gateway.connected_addresses().contains(&address));
+}
+
+/// A genesis hash cut short is malformed, not absent, so it is rejected even from a peer at an event
+/// version that predates the genesis hash.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_initiator_with_a_truncated_genesis_hash_is_rejected() {
+    let mut rng = TestRng::default();
+    let (accounts, gateways) = new_test_gateways(1, &mut rng).await;
+    let peer = accounts[1].clone();
+
+    for (version, listener_port) in
+        [(HandshakeTrailer::GENESIS_VERSION - 1, 4150), (Event::<CurrentNetwork>::VERSION, 4151)]
+    {
+        let mut truncated = genesis_hash(&gateways[0]);
+        truncated.truncate(31);
+        let trailer = HandshakeTrailer { genesis_hash: Some(truncated), ..HandshakeTrailer::of::<CurrentNetwork>() };
+        let sign = honest_signer(peer.clone());
+        let (verdict, _stream) =
+            handshake_with_gateway_sending(dial_addr(&gateways[0]), &peer, listener_port, version, trailer, sign)
+                .await
+                .unwrap();
+        assert_eq!(verdict, ResponderProof::Rejected { reason: DisconnectReason::GenesisMismatch });
+        assert!(!gateways[0].connected_addresses().contains(&peer.address()));
+    }
 }
