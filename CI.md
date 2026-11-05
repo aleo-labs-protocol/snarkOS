@@ -52,7 +52,6 @@ marked "release" only on the third. The other jobs run on every event.
 | `devnet (upgrade)` | `cpu` | merge | 90 | `test_full_upgrade.sh`, `test_partial_upgrade.sh` |
 | `devnet (upgrade-required)` | `cpu` | release | 30 | `test_upgrade_required.sh` |
 | `devnet (chaotic-restart-all)` | `cpu` | release | 45 | `test_restart_all.sh`, with delays |
-| `devnet (chaotic-crash-all)` | `cpu` | release | 45 | `test_restart_all.sh` with SIGKILL, with delays |
 | `machete` | hosted | all | | `cargo machete` |
 | `windows` | hosted (Windows) | merge | | `cargo check --examples --benches --tests` in `account`, `cli`, `display`, `node` |
 | `ci-ok` | hosted | all | | fails unless every job a pull request runs succeeded |

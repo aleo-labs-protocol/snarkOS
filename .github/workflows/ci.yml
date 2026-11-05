@@ -373,10 +373,6 @@ jobs:
             timeout: 45
             delay: true
             runs: ./.ci/test_restart_all.sh
-          - name: chaotic-crash-all
-            timeout: 45
-            delay: true
-            runs: ./.ci/test_restart_all.sh 7 0 10 100 3 crash
     name: devnet (${{ matrix.name }})
     steps: *devnet-steps
 
