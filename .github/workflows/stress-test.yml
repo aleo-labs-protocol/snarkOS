@@ -142,8 +142,8 @@ jobs:
           : "${ROLE_ARN:?STRESS_ROLE_ARN must be configured}"
           # AWS errors quote ARNs that differ from the secret, so mask the account too.
           echo "::add-mask::$(cut -d: -f5 <<<"$ROLE_ARN")"
-          # The Gauntlet host's gha-gauntlet user can only run the gate: enqueue, status
-          # and cancel. Each connection pushes a key that lives 60 seconds, through the
+          # The Gauntlet host's gha-gauntlet user can only run the gate: enqueue, status,
+          # report and cancel. Each connection pushes a key that lives 60 seconds, through the
           # Instance Connect Endpoint.
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/stress
@@ -273,19 +273,58 @@ jobs:
           fi
           jq -r '[.content[] | select(.type == "text") | .text] | join("\n")' response.json > claude.md
 
+      - name: Export the interactive report
+        id: export
+        if: steps.follow.outputs.handoff == 'false'
+        continue-on-error: true
+        env:
+          RUN_ID: ${{ steps.req.outputs.run_id }}
+        run: |
+          source "$RUNNER_TEMP/gate.sh"
+          mkdir -p report
+          gate report "$RUN_ID" html > report/report.html
+          gate report "$RUN_ID" json > report/report.json
+          jq -e --arg run "$RUN_ID" '.schema_version == 1 and .run.run_id == $run' report/report.json >/dev/null
+
+      - name: Upload the report
+        id: artifact
+        if: steps.follow.outputs.handoff == 'false' && steps.export.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: gauntlet-${{ steps.req.outputs.run_id }}
+          path: |
+            report/report.html
+            report/report.json
+          retention-days: 14
+          if-no-files-found: error
+
       - name: Close the check
         if: steps.follow.outputs.handoff == 'false'
         env:
           CHECK_ID: ${{ steps.check.outputs.id }}
+          REPORT_URL: ${{ steps.artifact.outputs.artifact-url }}
         run: |
-          summary="$(jq -r .summary status.json)"
-          if [[ -s claude.md ]]; then
-            summary="$summary"$'\n\n### Compared with the last passing run (Claude)\n\n'"$(cat claude.md)"
-          fi
-          jq -n --arg summary "$summary" --slurpfile s status.json \
-            '{status: "completed", conclusion: $s[0].conclusion, output: {title: $s[0].title, summary: $summary}}' \
-            | gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_ID" --input - >/dev/null
-          echo "$summary" >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          state = json.loads(Path("status.json").read_text())
+          summary = state["summary"]
+          if url := os.environ.get("REPORT_URL"):
+              summary = f"[Download interactive report + JSON]({url}) · Unzip and open report.html locally.\n\n" + summary
+          extra = Path("claude.md")
+          if extra.is_file():
+              note = "\n\n### Compared with the last passing run (Claude)\n\n" + extra.read_text()
+              if len((summary + note).encode()) <= 65535:
+                  summary += note
+          Path("check.json").write_text(json.dumps({"status": "completed", "conclusion": state["conclusion"],
+                                                  "output": {"title": state["title"], "summary": summary}}))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as out:
+              out.write(summary + "\n")
+          PY
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_ID" --input check.json >/dev/null
           [[ "$(jq -r .verdict status.json)" == pass ]]
 
       - name: Report a rejection or an orchestration failure
