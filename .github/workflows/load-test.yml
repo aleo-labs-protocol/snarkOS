@@ -2,6 +2,7 @@
 #
 # A form for the replay_stockpile test. stress-test.yml does the rest: approval in
 # the stress-test environment, the run, and the "stress-test" check on the commit.
+# Gauntlet owns the defaults: this sends only what's filled in.
 name: Load test
 
 on:
@@ -25,13 +26,13 @@ on:
           - testnet-V22-h25-p10000x10-stockpile-3
         default: testnet-V22-h25-p1000x20-stockpile-1
       rate:
-        description: "Transactions per second"
-        required: true
-        default: "100"
+        description: "Transactions per second. Empty: Gauntlet's default."
+        required: false
+        default: ""
       duration:
-        description: "Seconds to send for. 0 sends the whole stockpile."
-        required: true
-        default: "120"
+        description: "Seconds to send for. 0 sends the whole stockpile. Empty: Gauntlet's default."
+        required: false
+        default: ""
       ramp:
         description: "FROM:TO:STEP tx/s, instead of rate and duration. Lower min_inclusion with it."
         required: false
@@ -39,17 +40,17 @@ on:
       targets:
         description: "Nodes to send to"
         type: choice
-        options: [both, clients, validators]
-        default: both
+        options: [default, clients, validators, both]
+        default: default
       replay_mode:
         description: "per-payer for a build with input locks"
         type: choice
-        options: [open, per-payer]
-        default: open
+        options: [default, open, per-payer]
+        default: default
       min_inclusion:
-        description: "Share of the transactions sent that must land"
-        required: true
-        default: "0.99"
+        description: "Share of the transactions sent that must land. Empty: Gauntlet's default."
+        required: false
+        default: ""
 
 jobs:
   load:
@@ -66,6 +67,10 @@ jobs:
       validators: ${{ inputs.validators }}
       network: ${{ startsWith(inputs.stockpile, 'mainnet-') && 'mainnet' || 'testnet' }}
       params: >-
-        ${{ format('stockpile={0},rate={1},duration={2},targets={3},replay_mode={4},min_inclusion={5}{6}',
-        inputs.stockpile, inputs.rate, inputs.duration, inputs.targets, inputs.replay_mode, inputs.min_inclusion,
-        inputs.ramp && format(',ramp={0}', inputs.ramp) || '') }}
+        ${{ format('stockpile={0}{1}{2}{3}{4}{5}{6}', inputs.stockpile,
+        inputs.rate && format(',rate={0}', inputs.rate) || '',
+        inputs.duration && format(',duration={0}', inputs.duration) || '',
+        inputs.ramp && format(',ramp={0}', inputs.ramp) || '',
+        inputs.targets != 'default' && format(',targets={0}', inputs.targets) || '',
+        inputs.replay_mode != 'default' && format(',replay_mode={0}', inputs.replay_mode) || '',
+        inputs.min_inclusion && format(',min_inclusion={0}', inputs.min_inclusion) || '') }}
