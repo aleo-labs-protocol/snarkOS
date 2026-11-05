@@ -285,12 +285,40 @@ jobs:
           gate report "$RUN_ID" html > report/report.html
           gate report "$RUN_ID" json > report/report.json
           jq -e --arg run "$RUN_ID" '.schema_version == 1 and .run.run_id == $run' report/report.json >/dev/null
+          # Artifacts bypass GitHub log masking.
+          python3 - <<'PY'
+          import ipaddress
+          import os
+          import re
+          from pathlib import Path
+
+          secrets = (os.environ["MANAGER"], os.environ["ROLE_ARN"], os.environ["ROLE_ARN"].split(":")[4])
+          cloud = re.compile(
+              r"\barn:|\bi-[0-9a-f]{8,17}\b|"
+              r"\b(?:[a-z0-9-]+\.)+(?:compute(?:-\d+)?\.amazonaws\.com(?:\.cn)?|compute\.internal|ec2\.internal)\b",
+              re.IGNORECASE)
+          addresses = re.compile(
+              r"(?<![\w:])(?:[a-f\d]{0,4}:){2,}[a-f\d:.]*(?:%[\w.-]+)?(?![\w:])|"
+              r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])", re.IGNORECASE)
+          for name in ("report.html", "report.json"):
+              content = Path("report", name).read_text()
+              blocked = any(value and value in content for value in secrets) or cloud.search(content)
+              for match in addresses.finditer(content):
+                  try:
+                      ipaddress.ip_address(match[0])
+                  except ValueError:
+                      continue
+                  blocked = True
+                  break
+              if blocked:
+                  raise SystemExit("::warning::Interactive report contains infrastructure identifiers; skipping upload.")
+          PY
 
       - name: Upload the report
         id: artifact
         if: steps.follow.outputs.handoff == 'false' && steps.export.outcome == 'success'
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: gauntlet-${{ steps.req.outputs.run_id }}
           path: |
