@@ -79,7 +79,7 @@ use snarkvm::{
     prelude::{Address, Field, Signature},
 };
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, bail};
 use indexmap::{IndexMap, IndexSet};
 use serde::{Deserialize, Serialize};
 pub use std::io::{self, Result as IoResult};

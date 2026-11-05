@@ -22,4 +22,4 @@ extern crate tracing;
 pub use snarkos_node_metrics as metrics;
 
 mod blocks;
-pub use blocks::{CDN_BASE_URL, CdnBlockSync, load_blocks};
+pub use blocks::{CDN_BASE_URL, CdnBlockSync, CdnSyncOutcome, load_blocks};

@@ -114,14 +114,18 @@ impl<N: Network> DataBlocks<N> {
     pub const MAXIMUM_NUMBER_OF_BLOCKS: u8 = 5;
 
     /// Ensures that the blocks are well-formed in a block response.
+    ///
+    /// An empty block response is well-formed: it is the peer's explicit signal that it cannot
+    /// serve the requested range (e.g. because the blocks' authority data was pruned).
     pub fn ensure_response_is_well_formed(
         &self,
         peer_ip: SocketAddr,
         start_height: u32,
         end_height: u32,
     ) -> Result<()> {
-        // Ensure the blocks are not empty.
-        ensure!(!self.0.is_empty(), "Peer '{peer_ip}' sent an empty block response ({start_height}..{end_height})");
+        if self.0.is_empty() {
+            return Ok(());
+        }
         // Check that the blocks are sequentially ordered.
         if !self.0.windows(2).all(|w| w[0].height() + 1 == w[1].height()) {
             bail!("Peer '{peer_ip}' sent an invalid block response (blocks are not sequentially ordered)")
@@ -259,5 +263,25 @@ pub mod prop_tests {
         assert_eq!(response.request, request);
         assert_eq!(response.latest_consensus_version, None);
         assert_eq!(response.blocks.deserialize_blocking().unwrap(), blocks);
+    }
+
+    /// An empty block response is the peer's explicit signal that it cannot serve the requested range.
+    #[test]
+    fn empty_response_is_well_formed() {
+        let peer_ip: std::net::SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        let empty = DataBlocks::<CurrentNetwork>(vec![]);
+        empty.ensure_response_is_well_formed(peer_ip, 1, 3).unwrap();
+    }
+
+    /// A non-empty block response must still match the requested range exactly.
+    #[test]
+    fn nonempty_response_must_match_request_range() {
+        let mut rng = TestRng::default();
+        let peer_ip: std::net::SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        let genesis = sample_genesis_block(&mut rng);
+        let height = genesis.height();
+        let blocks = DataBlocks(vec![genesis]);
+        blocks.ensure_response_is_well_formed(peer_ip, height, height + 1).unwrap();
+        blocks.ensure_response_is_well_formed(peer_ip, height + 1, height + 2).unwrap_err();
     }
 }

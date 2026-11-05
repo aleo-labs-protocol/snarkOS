@@ -49,7 +49,7 @@ default-features = false
 [workspace.dependencies.snarkvm]
 #path = "../snarkVM"
 git = "https://github.com/aleo-labs-protocol/snarkVM.git"
-rev = "6d0fb24ac7ade4cc63a2bfc599d7b54b4ad58b82" #staging
+rev = "d14e59196174550aa698e28de78813c85936d39d" # eran/authority-prune
 #version = "=4.12.0"
 default-features = false
 
@@ -283,6 +283,8 @@ default = [ "snarkos-cli/metrics", "snarkos-node-metrics", "snarkos-node/metrics
 # The names stay so existing build commands keep resolving.
 history = []
 history-staking-rewards = []
+# Prune authority data (certificates) older than snarkVM's AUTHORITY_RETENTION_BLOCKS.
+prune-authority-data = [ "snarkos-cli/prune-authority-data", "snarkos-node/prune-authority-data" ]
 # Deprecated alias for the metrics feature, which now carries the validator telemetry.
 # Retained so that build commands naming this feature keep resolving.
 telemetry = [ "snarkos-node/metrics" ]
@@ -323,6 +325,8 @@ serial = [
 test_targets = [ "snarkos-cli/test_targets" ]
 test_consensus_heights = [ "snarkos-cli/test_consensus_heights" ]
 test_network = [ "snarkos-cli/test_network", "snarkos-node/test_network" ]
+# Prune authority data with snarkVM's 300-block devnet window.
+test_authority_retention = [ "snarkos-cli/test_authority_retention", "snarkos-node/test_authority_retention" ]
 tokio_console = [ "snarkos-cli/tokio_console" ]
 
 [dependencies.clap]

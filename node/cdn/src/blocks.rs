@@ -21,7 +21,7 @@ use snarkos_utilities::{SignalHandler, Stoppable};
 
 use snarkvm::{
     prelude::{Deserialize, DeserializeOwned, Ledger, Network, Serialize, block::Block, store::ConsensusStorage},
-    utilities::{flatten_error, unchecked_deserialize},
+    utilities::unchecked_deserialize,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -50,6 +50,9 @@ const CONCURRENT_REQUESTS: u32 = 16;
 const MAXIMUM_PENDING_BLOCKS: u32 = BLOCKS_PER_FILE * CONCURRENT_REQUESTS * 2;
 /// Maximum number of attempts for a request to the CDN.
 const MAXIMUM_REQUEST_ATTEMPTS: u8 = 10;
+/// Maximum number of attempts to fetch the CDN height; fewer than for block bundles, so that an
+/// unreachable CDN does not hold up a node that can sync from peers.
+const MAXIMUM_HEIGHT_REQUEST_ATTEMPTS: u8 = 3;
 
 /// The CDN base url.
 pub const CDN_BASE_URL: &str = "https://cdn.provable.com/v0/blocks";
@@ -71,7 +74,14 @@ fn update_block_metrics<N: Network>(height: u32) {
     );
 }
 
-pub type SyncResult = Result<u32, (u32, anyhow::Error)>;
+/// The outcome of the startup CDN sync.
+#[derive(Debug)]
+pub enum CdnSyncOutcome {
+    /// The ledger was synced up to the CDN height, or the CDN held no newer blocks.
+    Synced,
+    /// The sync stopped at the given height with an error.
+    Failed(u32, anyhow::Error),
+}
 
 /// Manages the CDN sync task.
 ///
@@ -80,7 +90,7 @@ pub type SyncResult = Result<u32, (u32, anyhow::Error)>;
 pub struct CdnBlockSync {
     base_url: http::Uri,
     /// The background tasks that performs the sync operation.
-    task: Mutex<Option<JoinHandle<SyncResult>>>,
+    task: Mutex<Option<JoinHandle<CdnSyncOutcome>>>,
     /// This flag will be set to true once the sync task has been successfully awaited.
     done: AtomicBool,
 }
@@ -110,9 +120,8 @@ impl CdnBlockSync {
 
     /// Wait for CDN sync to finish. Can only be called once.
     ///
-    /// On success, this function returns the completed block height.
-    /// On failure, this function returns the last successful block height (if any), along with the error.
-    pub async fn wait(&self) -> Result<SyncResult> {
+    /// The error means the sync task could not be awaited; otherwise, this returns the sync's outcome.
+    pub async fn wait(&self) -> Result<CdnSyncOutcome> {
         let Some(hdl) = self.task.lock().take() else {
             bail!("CDN task was already awaited");
         };
@@ -126,7 +135,7 @@ impl CdnBlockSync {
         base_url: http::Uri,
         ledger: Ledger<N, C>,
         stoppable: Arc<dyn Stoppable>,
-    ) -> SyncResult {
+    ) -> CdnSyncOutcome {
         // Fetch the node height.
         let start_height = ledger.latest_height() + 1;
         // Load the blocks from the CDN into the ledger.
@@ -141,31 +150,35 @@ impl CdnBlockSync {
         // TODO (howardwu): Find a way to resolve integrity failures.
         // If the sync failed, check the integrity of the ledger.
         match result {
-            Ok(completed_height) => Ok(completed_height),
+            Ok(_) => CdnSyncOutcome::Synced,
             Err((completed_height, error)) => {
-                warn!("{}", flatten_error(error.context("Failed to sync block(s) from the CDN")));
-
+                // The caller logs the failure.
                 // If the sync made any progress, then check the integrity of the ledger.
-                if completed_height != start_height {
+                if completed_height >= start_height {
                     debug!("Synced the ledger up to block {completed_height}");
 
                     // Retrieve the latest height, according to the ledger.
                     let node_height = *ledger.vm().block_store().heights().max().unwrap_or_default();
                     // Check the integrity of the latest height.
                     if node_height != completed_height {
-                        return Err((
+                        return CdnSyncOutcome::Failed(
                             completed_height,
-                            anyhow!("The ledger height does not match the last sync height"),
-                        ));
+                            error.context(format!(
+                                "The ledger is at block {node_height} but the CDN sync completed block {completed_height}"
+                            )),
+                        );
                     }
 
                     // Fetch the latest block from the ledger.
                     if let Err(err) = ledger.get_block(node_height) {
-                        return Err((completed_height, err));
+                        return CdnSyncOutcome::Failed(
+                            completed_height,
+                            error.context(format!("Failed to read block {node_height} from the ledger: {err:#}")),
+                        );
                     }
                 }
 
-                Ok(completed_height)
+                CdnSyncOutcome::Failed(completed_height, error)
             }
         }
     }
@@ -195,15 +208,38 @@ pub async fn load_blocks<N: Network>(
         }
     };
 
-    // Fetch the CDN height.
-    let cdn_height = match cdn_height::<BLOCKS_PER_FILE>(&client, base_url).await {
-        Ok(cdn_height) => cdn_height,
-        Err(error) => return Err((start_height, error)),
+    // Fetch the CDN height, retrying with a short linear backoff.
+    let cdn_height = {
+        let mut attempts = 0;
+        loop {
+            if stoppable.is_stopped() {
+                info!("Stopping block sync before fetching the CDN height - shutting down");
+                return Ok(start_height.saturating_sub(1));
+            }
+            attempts += 1;
+            match cdn_height::<BLOCKS_PER_FILE>(&client, base_url).await {
+                Ok(cdn_height) => break cdn_height,
+                Err(error) if attempts < MAXIMUM_HEIGHT_REQUEST_ATTEMPTS => {
+                    warn!("{error} - retrying ({attempts} attempt(s) so far)");
+                    // Sleep in short steps, so that a stop interrupts the backoff.
+                    let deadline = Instant::now() + Duration::from_secs(attempts as u64 * 2);
+                    while Instant::now() < deadline && !stoppable.is_stopped() {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
+                Err(error) => return Err((start_height.saturating_sub(1), error)),
+            }
+        }
     };
-    // If the CDN height is less than the start height, return.
+    // If the CDN height is less than the start height, there is nothing to fetch. Without an end
+    // height the caller is syncing to the tip, which is then already reached; otherwise, return.
     if cdn_height < start_height {
+        if end_height.is_none() {
+            debug!("The CDN height ({cdn_height}) is below the start height ({start_height}); nothing to fetch");
+            return Ok(start_height.saturating_sub(1));
+        }
         return Err((
-            start_height,
+            start_height.saturating_sub(1),
             anyhow!("The given start height ({start_height}) must be less than the CDN height ({cdn_height})"),
         ));
     }
@@ -214,7 +250,7 @@ pub async fn load_blocks<N: Network>(
     // If the end height is less than the start height, return.
     if end_height < start_height {
         return Err((
-            start_height,
+            start_height.saturating_sub(1),
             anyhow!("The given end height ({end_height}) must not be less than the start height ({start_height})"),
         ));
     }
@@ -223,9 +259,9 @@ pub async fn load_blocks<N: Network>(
     let cdn_start = start_height - (start_height % BLOCKS_PER_FILE);
     // Set the CDN end height to the given end height.
     let cdn_end = end_height;
-    // If the CDN range is empty, return.
+    // If the CDN range is empty, nothing is loaded.
     if cdn_start >= cdn_end {
-        return Ok(cdn_end);
+        return Ok(start_height.saturating_sub(1));
     }
 
     // A collection of downloaded blocks pending insertion into the ledger.
@@ -282,11 +318,12 @@ pub async fn load_blocks<N: Network>(
         let next_blocks = std::mem::replace(&mut *candidate_blocks, retained_blocks);
         drop(candidate_blocks);
 
-        // Attempt to advance the ledger using the CDN block bundle.
+        // Attempt to advance the ledger using the CDN block bundle. The closure reports the last
+        // inserted height with any error, as it may fail partway through the bundle.
         let mut process_clone = process.clone();
         let stoppable_clone = stoppable.clone();
         let threadpool_clone = threadpool.clone();
-        current_height = tokio::task::spawn_blocking(move || {
+        let bundle_result = tokio::task::spawn_blocking(move || {
             threadpool_clone.install(|| {
                 for block in next_blocks.into_iter().filter(|b| (start_height..end_height).contains(&b.height())) {
                     // If we are instructed to shut down, abort.
@@ -300,7 +337,9 @@ pub async fn load_blocks<N: Network>(
                     let block_height = block.height();
 
                     // Insert the block into the ledger.
-                    process_clone(block)?;
+                    if let Err(error) = process_clone(block) {
+                        return Err((current_height, error));
+                    }
 
                     // Update the current height.
                     current_height = block_height;
@@ -316,9 +355,11 @@ pub async fn load_blocks<N: Network>(
                 Ok(current_height)
             })
         })
-        .await
-        .map_err(|e| (current_height, e.into()))?
-        .map_err(|e| (current_height, e))?;
+        .await;
+        current_height = match bundle_result {
+            Ok(result) => result?,
+            Err(error) => return Err((current_height, error.into())),
+        };
     }
 
     Ok(current_height)
@@ -609,6 +650,22 @@ mod tests {
                 assert_eq!(block.height(), start + i as u32);
             }
         });
+    }
+
+    /// Tests that a failure partway through a bundle reports the last inserted height.
+    #[test]
+    fn test_load_blocks_reports_height_on_process_failure() {
+        let process = |block: Block<CurrentNetwork>| match block.height() {
+            10 => Err(anyhow::anyhow!("rejected")),
+            _ => Ok(()),
+        };
+        let testnet_cdn_url = Uri::try_from(format!("{CDN_BASE_URL}/mainnet")).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (completed_height, error) =
+            rt.block_on(load_blocks(&testnet_cdn_url, 0, Some(50), SimpleStoppable::new(), process)).unwrap_err();
+        assert_eq!(completed_height, 9);
+        assert_eq!(error.to_string(), "rejected");
     }
 
     #[test]

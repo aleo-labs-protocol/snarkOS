@@ -22,6 +22,7 @@ default = [ ]
 # The names stay so existing build commands keep resolving.
 history = []
 history-staking-rewards = []
+prune-authority-data = [ "snarkvm/prune-authority-data" ]
 metrics = [ "dep:snarkos-node-metrics", "snarkos-node-consensus/metrics" ]
 cuda = [ "snarkvm/cuda", "snarkos-node-consensus/cuda", "snarkos-node-router/cuda" ]
 locktick = [

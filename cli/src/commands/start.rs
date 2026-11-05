@@ -342,7 +342,7 @@ pub struct Start {
     #[clap(long)]
     pub auto_db_checkpoints: Option<PathBuf>,
 
-    /// Enables the node to prefetch initial blocks from a CDN
+    /// Enables the node to prefetch initial blocks from a CDN, also with `--dev` (which otherwise disables it)
     #[clap(long, conflicts_with = "nocdn")]
     pub cdn: Option<http::Uri>,
 
@@ -489,32 +489,30 @@ impl Start {
 
     /// Returns the CDN to prefetch initial blocks from, or `None` if fetching from the CDN is disabled.
     fn parse_cdn<N: Network>(&self) -> Result<Option<http::Uri>> {
-        // Disable CDN if:
-        //  1. The node is in development mode.
-        //  2. The user has explicitly disabled CDN.
-        //  3. The node is a prover (no need to sync).
-        let no_cdn_reasons = [("--dev", self.dev.is_some()), ("--nocdn", self.nocdn), ("--prover", self.prover)]
+        // Disable CDN if the user has explicitly disabled it, or the node is a prover (no need to sync).
+        let no_cdn_reasons = [("--nocdn", self.nocdn), ("--prover", self.prover)]
             .into_iter()
             .filter_map(|(reason, flag_set)| flag_set.then_some(reason))
             .join(" and ");
         if !no_cdn_reasons.is_empty() {
             info!("CDN disabled because the following flags are set: {no_cdn_reasons}.");
-            Ok(None)
+            return Ok(None);
         }
-        // Enable the CDN otherwise.
-        else {
-            // Determine the CDN URL.
-            match &self.cdn {
-                // Use the provided CDN URL if it is not empty.
-                Some(cdn) => match cdn.to_string().is_empty() {
-                    true => Ok(None),
-                    false => Ok(Some(cdn.clone())),
-                },
-                // If no CDN URL is provided, determine the CDN URL based on the network ID.
-                None => {
-                    let uri = format!("{}/{}", snarkos_node_cdn::CDN_BASE_URL, N::SHORT_NAME);
-                    Ok(Some(http::Uri::try_from(&uri).with_context(|| "Unexpected error")?))
-                }
+        match &self.cdn {
+            // Use the provided CDN URL if it is not empty, even in development mode.
+            Some(cdn) => match cdn.to_string().is_empty() {
+                true => Ok(None),
+                false => Ok(Some(cdn.clone())),
+            },
+            // Development mode does not use the default CDN.
+            None if self.dev.is_some() => {
+                info!("CDN disabled because --dev is set and no --cdn is given.");
+                Ok(None)
+            }
+            // Otherwise, determine the CDN URL based on the network ID.
+            None => {
+                let uri = format!("{}/{}", snarkos_node_cdn::CDN_BASE_URL, N::SHORT_NAME);
+                Ok(Some(http::Uri::try_from(&uri).with_context(|| "Unexpected error")?))
             }
         }
     }
@@ -1389,7 +1387,7 @@ mod tests {
             ["snarkos", "--dev", "0", "--validator", "--private-key", "aleo1xx", "--cdn", "url"].iter(),
         )
         .unwrap();
-        assert!(config.parse_cdn::<CurrentNetwork>()?.is_none());
+        assert!(config.parse_cdn::<CurrentNetwork>()?.is_some());
         let config = Start::try_parse_from(
             ["snarkos", "--dev", "0", "--validator", "--private-key", "aleo1xx", "--nocdn"].iter(),
         )?;
@@ -1435,7 +1433,7 @@ mod tests {
             ["snarkos", "--dev", "0", "--client", "--private-key", "aleo1xx", "--cdn", "url"].iter(),
         )
         .unwrap();
-        assert!(config.parse_cdn::<CurrentNetwork>()?.is_none());
+        assert!(config.parse_cdn::<CurrentNetwork>()?.is_some());
         let config =
             Start::try_parse_from(["snarkos", "--dev", "0", "--client", "--private-key", "aleo1xx", "--nocdn"].iter())
                 .unwrap();
@@ -1453,7 +1451,7 @@ mod tests {
         let config = Start::try_parse_from(["snarkos", "--dev", "0"].iter()).unwrap();
         assert!(config.parse_cdn::<CurrentNetwork>()?.is_none());
         let config = Start::try_parse_from(["snarkos", "--dev", "0", "--cdn", "url"].iter()).unwrap();
-        assert!(config.parse_cdn::<CurrentNetwork>()?.is_none());
+        assert!(config.parse_cdn::<CurrentNetwork>()?.is_some());
         let config = Start::try_parse_from(["snarkos", "--dev", "0", "--nocdn"].iter()).unwrap();
         assert!(config.parse_cdn::<CurrentNetwork>()?.is_none());
 
