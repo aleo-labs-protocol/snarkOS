@@ -20,8 +20,9 @@
 use snarkos_utilities::{SignalHandler, Stoppable};
 
 use snarkvm::{
-    prelude::{Deserialize, DeserializeOwned, Ledger, Network, Serialize, block::Block, store::ConsensusStorage},
-    utilities::{flatten_error, unchecked_deserialize},
+    console::account::ComputeKeyCache,
+    prelude::{Deserialize, FromBytes, Ledger, Network, Serialize, block::Block, store::ConsensusStorage},
+    utilities::flatten_error,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -389,8 +390,8 @@ async fn download_block_bundles<N: Network>(
 
                 loop {
                     // Fetch the blocks.
-                    match cdn_get(client_clone.clone(), &blocks_url, &ctx).await {
-                        Ok::<Vec<Block<N>>, _>(blocks) => {
+                    match cdn_get_blocks::<N>(client_clone.clone(), &blocks_url, &ctx).await {
+                        Ok(blocks) => {
                             // Keep the collection of pending blocks sorted by the height.
                             let mut pending_blocks = pending_blocks_clone.lock().await;
                             for block in blocks {
@@ -475,8 +476,8 @@ async fn cdn_height<const BLOCKS_PER_FILE: u32>(client: &Client, base_url: &http
     Ok(tip - (tip % BLOCKS_PER_FILE) + BLOCKS_PER_FILE)
 }
 
-/// Retrieves the objects from the CDN with the given URL.
-async fn cdn_get<T: 'static + DeserializeOwned + Send>(client: Client, url: &str, ctx: &str) -> Result<T> {
+/// Retrieves the blocks from the CDN with the given URL.
+async fn cdn_get_blocks<N: Network>(client: Client, url: &str, ctx: &str) -> Result<Vec<Block<N>>> {
     // Fetch the bytes from the given URL.
     let response = match client.get(url).send().await {
         Ok(response) => response,
@@ -488,8 +489,8 @@ async fn cdn_get<T: 'static + DeserializeOwned + Send>(client: Client, url: &str
         Err(error) => bail!("Failed to parse {ctx} - {error}"),
     };
 
-    // Parse the objects.
-    match tokio::task::spawn_blocking(move || (unchecked_deserialize::<T>(&bytes), bytes)).await {
+    // Parse the blocks.
+    match tokio::task::spawn_blocking(move || (read_blocks::<N>(&bytes), bytes)).await {
         Ok((Ok(objects), _)) => Ok(objects),
         Ok((Err(error), response_bytes)) => {
             let bytes_as_string = String::from_utf8_lossy(&response_bytes);
@@ -499,6 +500,25 @@ async fn cdn_get<T: 'static + DeserializeOwned + Send>(client: Client, url: &str
             bail!("Failed to join task for {ctx} - {error}")
         }
     }
+}
+
+/// Reads a CDN file of blocks without checking them. The file is the bincode encoding of a `Vec<Block<N>>`.
+///
+/// The blocks share one compute-key cache, so each signer's key is decoded once per file.
+fn read_blocks<N: Network>(mut bytes: &[u8]) -> Result<Vec<Block<N>>> {
+    // bincode prefixes the vector, and the bytes of each block, with a little-endian `u64` length.
+    let num_blocks = u64::read_le(&mut bytes)?;
+    let mut blocks = Vec::with_capacity(cmp::min(num_blocks, u64::from(BLOCKS_PER_FILE)) as usize);
+    let mut cache = ComputeKeyCache::default();
+    for _ in 0..num_blocks {
+        let num_bytes = usize::try_from(u64::read_le(&mut bytes)?)?;
+        let Some((block_bytes, rest)) = bytes.split_at_checked(num_bytes) else {
+            bail!("The block length ({num_bytes}) exceeds the remaining bytes ({})", bytes.len());
+        };
+        blocks.push(Block::read_le_with_cache(block_bytes, true, &mut cache)?);
+        bytes = rest;
+    }
+    Ok(blocks)
 }
 
 /// Converts a duration into a string that humans can read easily.
@@ -574,11 +594,14 @@ fn log_progress<const OBJECTS_PER_FILE: u32>(
 
 #[cfg(test)]
 mod tests {
-    use super::{BLOCKS_PER_FILE, CDN_BASE_URL, cdn_height, load_blocks, log_progress};
+    use super::{BLOCKS_PER_FILE, CDN_BASE_URL, cdn_height, load_blocks, log_progress, read_blocks};
 
     use snarkos_utilities::SimpleStoppable;
 
-    use snarkvm::prelude::{MainnetV0, block::Block};
+    use snarkvm::{
+        prelude::{FromBytes, MainnetV0, Network, block::Block},
+        utilities::unchecked_deserialize,
+    };
 
     use http::Uri;
     use parking_lot::RwLock;
@@ -609,6 +632,25 @@ mod tests {
                 assert_eq!(block.height(), start + i as u32);
             }
         });
+    }
+
+    #[test]
+    fn test_read_blocks_matches_unchecked_deserialize() {
+        let genesis = Block::<CurrentNetwork>::from_bytes_le(CurrentNetwork::genesis_bytes()).unwrap();
+        for num_blocks in [0, 1, 3] {
+            let bytes = bincode::serialize(&vec![genesis.clone(); num_blocks]).unwrap();
+            let expected: Vec<Block<CurrentNetwork>> = unchecked_deserialize(&bytes).unwrap();
+            assert_eq!(read_blocks::<CurrentNetwork>(&bytes).unwrap(), expected);
+            // Truncated files fail on both paths.
+            for len in [0, 7, 8, bytes.len() / 2, bytes.len() - 1] {
+                if len >= bytes.len() {
+                    continue;
+                }
+                let truncated = &bytes[..len];
+                assert!(unchecked_deserialize::<Vec<Block<CurrentNetwork>>>(truncated).is_err());
+                assert!(read_blocks::<CurrentNetwork>(truncated).is_err());
+            }
+        }
     }
 
     #[test]
