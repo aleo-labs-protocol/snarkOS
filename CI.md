@@ -44,6 +44,7 @@ other jobs run on every event.
 | `test (sync)` | `cpu` | all | 90 | `snarkos-node-sync` |
 | `build-snarkos` | `cpu` | all | 60 | release `snarkos` with `test_network`, as an artifact |
 | `devnet (devnet)` | `cpu` | all | 40 | `test_db_backup.sh`, `test_devnet.sh` |
+| `devnet (simple-node)` | `cpu` | all | 60 | `test_simple_node.sh` |
 | `devnet (dev-on-prod-restart)` | `cpu` | merge | 45 | `test_dev_on_prod_restart.sh` |
 | `devnet (chaotic-minority-reset)` | `cpu` | merge | 45 | `test_reset_minority.sh`, with delays |
 | `devnet (chaotic-majority-restart)` | `cpu` | merge | 45 | `test_restart_majority.sh`, with delays |
@@ -91,8 +92,8 @@ blocks are keyed by `Cargo.lock` and `cli/src/commands/start.rs`. The
 of their own. It builds that release the first time a box sees its tag, in a
 target dir of its own, and keeps it. The chaotic entries delay loopback
 traffic through the boxes' `runner-netem` helper, which the runner user may
-run with `sudo`. Every devnet entry stops leftover `snarkos` processes and
-clears the delays before it starts and after it ends.
+run with `sudo`. Every devnet entry stops leftover `snarkos` and `simple_node`
+processes and clears the delays before it starts and after it ends.
 
 To run the `.ci` scripts on macOS you may want to `brew install bash coreutils
 && echo 'export PATH="/opt/homebrew/bin:$PATH"' >> ~/.bash_profile`.

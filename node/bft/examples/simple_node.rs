@@ -34,7 +34,7 @@ use snarkos_utilities::{NodeDataDir, SimpleStoppable};
 
 use aleo_std::StorageMode;
 use snarkvm::{
-    console::{account::PrivateKey, algorithms::BHP256, types::Address},
+    console::{account::PrivateKey, types::Address},
     ledger::{
         Block,
         Ledger,
@@ -44,8 +44,8 @@ use snarkvm::{
         puzzle::{Solution, SolutionID},
         store::{ConsensusStore, helpers::memory::ConsensusMemory},
     },
-    prelude::{Field, Hash, Network, Uniform, VM},
-    utilities::{FromBytes, TestRng, ToBits, ToBytes, to_bytes_le},
+    prelude::{Field, Network, Uniform, VM},
+    utilities::TestRng,
 };
 
 use ::bytes::Bytes;
@@ -67,7 +67,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     str::FromStr,
-    sync::{Arc, Mutex, OnceLock},
+    sync::Arc,
 };
 use tokio::{net::TcpListener, sync::oneshot};
 use tracing_subscriber::{
@@ -129,7 +129,7 @@ pub async fn start_bft(
     // Initialize the components.
     let (committee, account) = initialize_components(node_id, num_nodes)?;
     // Initialize the translucent ledger service.
-    let ledger = create_ledger(&account, num_nodes, committee, node_id);
+    let ledger = tokio::task::spawn_blocking(move || create_ledger(num_nodes, committee, node_id)).await?;
     // Initialize the storage.
     let storage = Storage::new(
         ledger.clone(),
@@ -184,7 +184,7 @@ pub async fn start_primary(
     // Initialize the components.
     let (committee, account) = initialize_components(node_id, num_nodes)?;
     // Initialize the translucent ledger service.
-    let ledger = create_ledger(&account, num_nodes, committee, node_id);
+    let ledger = tokio::task::spawn_blocking(move || create_ledger(num_nodes, committee, node_id)).await?;
     // Initialize the storage.
     let storage = Storage::new(
         ledger.clone(),
@@ -223,30 +223,28 @@ pub async fn start_primary(
 }
 
 /// Initialize the translucent ledger service.
+///
+/// This must run on a blocking thread, as the VM's sequential operations panic on an async one.
 fn create_ledger(
-    account: &Account<CurrentNetwork>,
     num_nodes: u16,
     committee: Committee<snarkvm::prelude::MainnetV0>,
     node_id: u16,
 ) -> Arc<TranslucentLedgerService<snarkvm::prelude::MainnetV0, ConsensusMemory<snarkvm::prelude::MainnetV0>>> {
-    let gen_key = account.private_key();
+    // Every node derives the same genesis block.
+    let gen_key = Account::<CurrentNetwork>::new(&mut rand_chacha::ChaChaRng::seed_from_u64(0)).unwrap();
     let public_balance_per_validator =
         (CurrentNetwork::STARTING_SUPPLY - (num_nodes as u64) * MIN_VALIDATOR_STAKE) / (num_nodes as u64);
     let mut balances = IndexMap::<Address<CurrentNetwork>, u64>::new();
     for address in committee.members().keys() {
         balances.insert(*address, public_balance_per_validator);
     }
-    let mut rng = TestRng::default();
-    let gen_ledger = genesis_ledger(*gen_key, committee.clone(), balances.clone(), node_id, &mut rng);
+    let mut rng = TestRng::fixed(0);
+    let block = genesis_block(*gen_key.private_key(), committee, balances, &mut rng);
+    let gen_ledger = CurrentLedger::load(block, StorageMode::Development(node_id)).unwrap();
     Arc::new(TranslucentLedgerService::new(gen_ledger, SimpleStoppable::new()))
 }
 
 pub type CurrentLedger = Ledger<CurrentNetwork, ConsensusMemory<CurrentNetwork>>;
-
-fn genesis_cache() -> &'static Mutex<HashMap<Vec<u8>, Block<CurrentNetwork>>> {
-    static CACHE: OnceLock<Mutex<HashMap<Vec<u8>, Block<CurrentNetwork>>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
 
 fn genesis_block(
     genesis_private_key: PrivateKey<CurrentNetwork>,
@@ -262,39 +260,6 @@ fn genesis_block(
     let bonded_balances: IndexMap<_, _> =
         committee.members().iter().map(|(address, (amount, _, _))| (*address, (*address, *address, *amount))).collect();
     vm.genesis_quorum(&genesis_private_key, committee, public_balances, bonded_balances, rng).unwrap()
-}
-
-fn genesis_ledger(
-    genesis_private_key: PrivateKey<CurrentNetwork>,
-    committee: Committee<CurrentNetwork>,
-    public_balances: IndexMap<Address<CurrentNetwork>, u64>,
-    node_id: u16,
-    rng: &mut impl CryptoRng,
-) -> CurrentLedger {
-    let cache_key =
-        to_bytes_le![genesis_private_key, committee, public_balances.iter().collect::<Vec<(_, _)>>()].unwrap();
-    // Initialize the genesis block on the first call; other callers
-    // will wait for it on the mutex.
-    let block = genesis_cache()
-        .lock()
-        .unwrap()
-        .entry(cache_key.clone())
-        .or_insert_with(|| {
-            let hasher = BHP256::<CurrentNetwork>::setup("aleo.dev.block").unwrap();
-            let file_name = hasher.hash(&cache_key.to_bits_le()).unwrap().to_string() + ".genesis";
-            let file_path = std::env::temp_dir().join(file_name);
-            if file_path.exists() {
-                let buffer = std::fs::read(file_path).unwrap();
-                return Block::from_bytes_le(&buffer).unwrap();
-            }
-
-            let block = genesis_block(genesis_private_key, committee, public_balances, rng);
-            std::fs::write(&file_path, block.to_bytes_le().unwrap()).unwrap();
-            block
-        })
-        .clone();
-    // Initialize the ledger with the genesis block.
-    CurrentLedger::load(block, aleo_std::StorageMode::Development(node_id)).unwrap()
 }
 
 /// Initializes the components of the node.
@@ -511,7 +476,7 @@ async fn start_server(bft: Option<BFT<CurrentNetwork>>, primary: Primary<Current
         .route("/", get(|| async { "Hello, World!" }))
         .route("/leader", get(get_leader))
         .route("/round/current", get(get_current_round))
-        .route("/certificates/:round", get(get_certificates_for_round))
+        .route("/certificates/{round}", get(get_certificates_for_round))
         // Pass in the `NodeState` to access state.
         .with_state(NodeState { bft, primary });
 
