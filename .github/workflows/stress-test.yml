@@ -4,8 +4,8 @@
 # "stress-test" check on the commit, so anyone looking at the commit or its PR
 # sees the result.
 #
-#   start   "Run workflow" (or a release whose CI passed): approval in the
-#           stress-test environment, then queue the run on the Gauntlet host.
+#   start   "Run workflow", load-test.yml, or a release whose CI passed: approval
+#           in the stress-test environment, then queue the run on the Gauntlet host.
 #   follow  poll the Gauntlet host every 5 minutes and keep the check up to date.
 #           GitHub stops a job at 6h, so a longer run hands off to a fresh
 #           dispatch of this workflow, which follows the same run without
@@ -30,7 +30,7 @@ on:
         required: false
         default: ""
       tests:
-        description: "Tests, sets (prerelease, network, sync) or all, comma separated"
+        description: "Tests, sets (prerelease, network) or all, comma separated"
         default: prerelease
       validators:
         description: "Network size, in validators"
@@ -51,6 +51,18 @@ on:
       check_run_id:
         description: "Internal: the check to update"
         default: ""
+  workflow_call:
+    inputs:
+      commit:
+        type: string
+      tests:
+        type: string
+      validators:
+        type: string
+      network:
+        type: string
+      params:
+        type: string
   workflow_run:
     workflows: [CI]
     types: [completed]
@@ -61,7 +73,7 @@ permissions:
 
 jobs:
   stress:
-    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository)
+    if: github.repository == 'aleo-labs-protocol/snarkOS' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository))
     runs-on: ubuntu-latest
     # Approval gates starting a run; following one needs none.
     environment: ${{ inputs.follow_run_id == '' && 'stress-test' || 'stress-test-status' }}
@@ -226,8 +238,9 @@ jobs:
           RUN_ID: ${{ steps.req.outputs.run_id }}
           CHECK_ID: ${{ steps.check.outputs.id }}
           COMMIT: ${{ steps.req.outputs.commit }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          gh workflow run stress-test.yml --repo "$GITHUB_REPOSITORY" --ref "${{ github.event.repository.default_branch }}" \
+          gh workflow run stress-test.yml --repo "$GITHUB_REPOSITORY" --ref "$DEFAULT_BRANCH" \
             -f follow_run_id="$RUN_ID" -f check_run_id="$CHECK_ID" -f commit="$COMMIT"
           echo "Still running after 5h30m; a new run of this workflow keeps following \`$RUN_ID\`." >> "$GITHUB_STEP_SUMMARY"
 
