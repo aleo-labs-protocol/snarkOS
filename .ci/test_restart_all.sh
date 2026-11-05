@@ -20,6 +20,8 @@ network_id=$2
 restart_interval=$3
 final_height=$4
 num_restarts=$5
+# How validators stop before each restart: `graceful` (SIGTERM) or `crash` (SIGKILL).
+stop_mode=$6
 
 # Default values if not provided.
 : "${total_validators:=7}"
@@ -27,6 +29,12 @@ num_restarts=$5
 : "${restart_interval:=10}"
 : "${final_height:=100}"
 : "${num_restarts:=3}"
+: "${stop_mode:=graceful}"
+
+if [[ "$stop_mode" != graceful && "$stop_mode" != crash ]]; then
+  log "❌ Unknown stop mode '$stop_mode'."
+  exit 1
+fi
 
 # The time that is used to determine the total timeout for the test.
 max_wait_per_block=10
@@ -52,6 +60,48 @@ common_flags=(
   --nodisplay --nobanner --noupdater "--network=$network_id" "--verbosity=$verbosity"
   "--dev-num-validators=$total_validators"
 )
+
+# Records the height of each validator in `crash_heights`, then kills all validators with SIGKILL.
+function crash_validators() {
+  local index
+  for index in "${!PIDS[@]}"; do
+    crash_heights[index]=$(get_block_height_by_port $((3030 + index)) "$network_name" 5)
+    if ! is_integer "${crash_heights[index]}"; then
+      log "❌ Test failed! Validator $index did not report its height before the crash."
+      exit 1
+    fi
+  done
+  log "Heights before the crash: ${crash_heights[*]}"
+  stop_nodes
+}
+
+# Fails unless each validator serves at least the height it held before the crash.
+function check_resumed_from_ledger() {
+  local index resumed_height
+  for index in "${!PIDS[@]}"; do
+    resumed_height=$(get_block_height_by_port $((3030 + index)) "$network_name" 5)
+    log "Validator $index resumed at height '$resumed_height' and held ${crash_heights[index]} before the crash"
+    if ! is_integer "$resumed_height" || (( resumed_height < crash_heights[index] )); then
+      log "❌ Test failed! Validator $index did not resume from its ledger."
+      exit 1
+    fi
+  done
+}
+
+# Fails unless all validators hold the same block at height $1.
+function check_same_block() {
+  local block_height=$1
+  local index block_hash first_hash=""
+  for index in "${!PIDS[@]}"; do
+    block_hash=$(curl -s --max-time 5 "http://$localhost:$((3030 + index))/v2/$network_name/block/$block_height" | jq -r '.block_hash // empty' 2>/dev/null || true)
+    log "Validator $index holds block '$block_hash' at height $block_height"
+    : "${first_hash:=$block_hash}"
+    if [[ -z "$block_hash" || "$block_hash" != "$first_hash" ]]; then
+      log "❌ Test failed! Validators disagree on the block at height $block_height."
+      exit 1
+    fi
+  done
+}
 
 # Start all validator nodes in the background
 for validator_index in $(seq 0 $((total_validators-1))); do
@@ -79,8 +129,12 @@ for iter in $(seq 1 "$num_restarts"); do
   fi
   log "All nodes reached restart height $restart_height. Restarting all validators (iteration $iter/$num_restarts)..."
 
-  # Gracefully shut down all validators
-  stop_some_nodes "${!PIDS[@]}"
+  if [[ "$stop_mode" == crash ]]; then
+    crash_validators
+  else
+    # Gracefully shut down all validators
+    stop_some_nodes "${!PIDS[@]}"
+  fi
 
   # Wait briefly before restarting
   sleep 5
@@ -100,10 +154,17 @@ for iter in $(seq 1 "$num_restarts"); do
     log "❌ Test failed! Not all nodes became ready within $max_restart_wait seconds after restart #$iter."
     exit 1
   fi
+
+  if [[ "$stop_mode" == crash ]]; then
+    check_resumed_from_ledger
+  fi
 done
 
 # Wait for final height
 if wait_for_heights 0 "$total_validators" "$final_height" "$network_name" "$max_wait"; then
+  if [[ "$stop_mode" == crash ]]; then
+    check_same_block "$final_height"
+  fi
  log "SUCCESS!"
   exit 0
 else
