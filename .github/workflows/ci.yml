@@ -344,8 +344,8 @@ jobs:
     name: devnet (${{ matrix.name }})
     steps: *devnet-steps
 
-  # Slowest devnets. On every push to `canary`, `testnet` or `mainnet`, and on
-  # demand.
+  # Devnets for releases only. On every push to `canary`, `testnet` or
+  # `mainnet`, and on demand.
   devnet-release:
     needs: [start-cpu-runners, build-snarkos]
     runs-on: [self-hosted, linux, x64, cpu]
