@@ -39,7 +39,7 @@ other jobs run on every event.
 | `test (messages)` | hosted | all | 90 | `snarkos-node-bft-events`, `-node-router-messages`, `-node-bft-ledger-service` |
 | `test (services)` | `cpu` | all | 90 | `snarkos-node-consensus`, `-node-rest`, `-cli` |
 | `test (node)` | `cpu` | all | 90 | `snarkos-node` with `snarkos-node-bft-storage-service` (features `memory,persistent`) |
-| `test (bft)` | `cpu` | all | 90 | `snarkos-node-bft` |
+| `test (bft)` | `cpu` | all | 90 | `snarkos-node-bft`; its `helpers::telemetry` tests with `metrics`, as a second build |
 | `test (router)` | `cpu` | all | 90 | `snarkos-node-router` |
 | `test (sync)` | `cpu` | all | 90 | `snarkos-node-sync` |
 | `build-snarkos` | `cpu` | all | 60 | release `snarkos` with `test_network`, as an artifact |
@@ -63,19 +63,23 @@ fails in both cases.
 
 ## Test groups
 
-Each `test` entry is one cargo build. `cargo test -p a -p b` unifies the
-features of `a` and `b`, and several crates enable features on their
+Each line of a `test` entry is one cargo build. `cargo test -p a -p b` unifies
+the features of `a` and `b`, and several crates enable features on their
 dependencies that change what those dependencies do, such as
-`snarkos-node-router/test` and `snarkvm-ledger-block/test`. So crates share an
-entry only where that unification enables no such feature on any crate.
-Helper features such as `test-helpers` and `mock` can still be unified, so a
-test may compile in its entry that would not under `cargo test -p <crate>`
-alone. Check this before moving a crate between entries, for example by
-comparing `cargo tree -e features` for the entry against each crate alone.
+`snarkos-node-router/test` and `snarkvm-ledger-block/test`. So crates share a
+line only where that unification enables no such feature on any crate. Helper
+features such as `test-helpers` and `mock` can still be unified, so a test may
+compile in its line that would not under `cargo test -p <crate>` alone. Check
+this before moving a crate between lines, for example by comparing
+`cargo tree -e features` for the line against each crate alone.
+
+`test (bft)` has a second line for the tests in `helpers::telemetry`, which
+compile only under `metrics`. That line builds the library alone. It passes
+`--no-tests=fail`, because the step otherwise lets a command match no tests.
 
 [`.config/nextest.toml`](.config/nextest.toml) sets two test threads. Each
-entry uploads nextest's JUnit report as the artifact `junit-<entry>`, with the
-time of each test.
+entry uploads nextest's JUnit reports as the artifact `junit-<entry>`, one file
+per line, with the time of each test.
 
 ## Devnets
 
