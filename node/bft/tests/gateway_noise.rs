@@ -20,6 +20,7 @@ mod common;
 
 use crate::common::{
     CurrentNetwork,
+    TranslucentLedgerService,
     primary::new_test_committee,
     utils::{sample_gateway, sample_ledger, sample_storage},
 };
@@ -45,11 +46,11 @@ use snarkos_node_network::{
 };
 use snarkos_node_tcp::P2P;
 use snarkvm::{
-    ledger::narwhal::Data,
+    ledger::{narwhal::Data, store::helpers::memory::ConsensusMemory},
     prelude::{FromBytes, TestRng, ToBytes},
 };
 
-use std::{io, net::SocketAddr, time::Duration};
+use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 
 use deadline::deadline;
 use futures::{SinkExt, TryStreamExt};
@@ -84,17 +85,25 @@ async fn new_test_gateways(
 
     let mut gateways = Vec::with_capacity(n);
     for account in accounts.iter().take(n) {
-        let storage = sample_storage(ledger.clone());
-        let gateway = sample_gateway(account.clone(), storage, ledger.clone());
-
-        // Set up primary channels; the rx is discarded as these tests exercise the gateway alone.
-        let (primary_tx, _primary_rx) = init_primary_channels();
-        gateway.run(primary_tx, [].into(), None).await;
-
-        gateways.push(gateway);
+        gateways.push(run_test_gateway(account.clone(), ledger.clone()).await);
     }
 
     (accounts, gateways)
+}
+
+/// Builds and runs a gateway for `account` on the given ledger.
+async fn run_test_gateway(
+    account: Account<CurrentNetwork>,
+    ledger: Arc<TranslucentLedgerService<CurrentNetwork, ConsensusMemory<CurrentNetwork>>>,
+) -> Gateway<CurrentNetwork> {
+    let storage = sample_storage(ledger.clone());
+    let gateway = sample_gateway(account, storage, ledger);
+
+    // Set up primary channels; the rx is discarded as these tests exercise the gateway alone.
+    let (primary_tx, _primary_rx) = init_primary_channels();
+    gateway.run(primary_tx, [].into(), None).await;
+
+    gateway
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -608,7 +617,7 @@ async fn an_initiator_that_owes_a_genesis_hash_is_rejected_without_one() {
     )
     .await
     .unwrap();
-    assert_eq!(verdict, ResponderProof::Rejected { reason: DisconnectReason::GenesisMismatch });
+    assert_eq!(verdict, ResponderProof::Rejected { reason: DisconnectReason::ProtocolViolation });
     assert!(!gateways[0].connected_addresses().contains(&peer.address()));
 }
 
@@ -658,4 +667,37 @@ async fn an_initiator_with_a_truncated_genesis_hash_is_rejected() {
         assert_eq!(verdict, ResponderProof::Rejected { reason: DisconnectReason::GenesisMismatch });
         assert!(!gateways[0].connected_addresses().contains(&peer.address()));
     }
+}
+
+/// A gateway that dials a validator on a network with a different genesis block turns it away on its
+/// metadata, before signing anything for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_initiator_rejects_a_responder_with_a_different_genesis() {
+    let mut rng = TestRng::default();
+    let (accounts, committee) = new_test_committee(COMMITTEE_SIZE, &mut rng);
+
+    // Two chains with the same committee. The test genesis cache is keyed by the generator key, which
+    // `sample_ledger` takes from the first account, so the second chain starts from another member.
+    let mut other_accounts = accounts.clone();
+    other_accounts.rotate_left(1);
+    let mut ledgers = Vec::with_capacity(2);
+    for chain_accounts in [accounts.clone(), other_accounts] {
+        let committee = committee.clone();
+        let mut rng_ = TestRng::fixed(rng.random());
+        ledgers
+            .push(task::spawn_blocking(move || sample_ledger(&chain_accounts, &committee, &mut rng_)).await.unwrap());
+    }
+
+    let gateway_a = run_test_gateway(accounts[0].clone(), ledgers[0].clone()).await;
+    let gateway_b = run_test_gateway(accounts[1].clone(), ledgers[1].clone()).await;
+    assert_ne!(genesis_hash(&gateway_a), genesis_hash(&gateway_b));
+
+    // The reason reaches the caller as text, having passed through an I/O error on the way out of the
+    // handshake.
+    let error = gateway_a.tcp().connect(dial_addr(&gateway_b)).await.unwrap_err();
+    assert_eq!(error.to_string(), DisconnectReason::GenesisMismatch.to_string());
+
+    // Neither side may end up considering the other a peer.
+    assert!(!gateway_a.connected_addresses().contains(&accounts[1].address()));
+    assert!(!gateway_b.connected_addresses().contains(&accounts[0].address()));
 }

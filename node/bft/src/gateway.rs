@@ -2086,10 +2086,17 @@ impl<N: Network> Gateway<N> {
             return Some(DisconnectReason::ProtocolViolation);
         }
 
-        // Ensure the peer shares our genesis block. Only a peer at a version that predates the genesis
-        // hash may send none; one that sent it incomplete fails the comparison.
-        let predates_genesis_hash = info.version < HandshakeTrailer::GENESIS_VERSION && trailer.genesis_hash.is_none();
-        if !predates_genesis_hash && trailer.genesis_hash.as_deref() != Some(&expected_genesis_hash[..]) {
+        // Likewise, a peer at a version that requires the genesis hash and sent none is not read as a
+        // peer that predates it.
+        if info.version >= HandshakeTrailer::GENESIS_VERSION && trailer.genesis_hash.is_none() {
+            warn!("{CONTEXT} Handshake with '{peer_addr}' failed (version {} sent no genesis hash)", info.version);
+            return Some(DisconnectReason::ProtocolViolation);
+        }
+
+        // Ensure the peer shares our genesis block. A hash sent incomplete fails the comparison.
+        if let Some(genesis_hash) = &trailer.genesis_hash
+            && genesis_hash[..] != expected_genesis_hash[..]
+        {
             warn!("{CONTEXT} Handshake with '{peer_addr}' failed (incorrect genesis hash)");
             return Some(DisconnectReason::GenesisMismatch);
         }

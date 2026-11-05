@@ -429,8 +429,12 @@ pub mod prop_tests {
     }
 
     pub fn any_trailer() -> BoxedStrategy<HandshakeTrailer> {
-        proptest::option::of(any_schedule())
-            .prop_map(|schedule| HandshakeTrailer { schedule, genesis_hash: None })
+        // A genesis hash is only sent after a schedule, and may be cut short.
+        (proptest::option::of(any_schedule()), proptest::option::of(collection::vec(any::<u8>(), 1..=32)))
+            .prop_map(|(schedule, genesis_hash)| {
+                let genesis_hash = genesis_hash.filter(|_| schedule.is_some());
+                HandshakeTrailer { schedule, genesis_hash }
+            })
             .boxed()
     }
 

@@ -462,6 +462,7 @@ pub mod prop_tests {
                     DisconnectReason::AlreadyConnectedToAleoAddress,
                     DisconnectReason::InvalidChallengeRequest,
                     DisconnectReason::UnauthorizedValidator,
+                    DisconnectReason::GenesisMismatch,
                 ]),
                 any::<Selector>()
             )
