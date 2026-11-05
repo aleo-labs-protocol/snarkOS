@@ -16,7 +16,7 @@
 use super::*;
 
 use snarkvm::{
-    console::network::ConsensusVersion,
+    console::{account::ComputeKeyCache, network::ConsensusVersion},
     ledger::narwhal::Data,
     prelude::{FromBytes, ToBytes},
     utilities::io_error,
@@ -174,8 +174,11 @@ impl<N: Network> FromBytes for DataBlocks<N> {
         if num_blocks > Self::MAXIMUM_NUMBER_OF_BLOCKS {
             return Err(error("Block response exceeds maximum number of blocks"));
         }
-        // Read the blocks.
-        let blocks = (0..num_blocks).map(|_| Block::read_le(&mut reader)).collect::<Result<Vec<_>, _>>()?;
+        // Read the blocks. They share one compute-key cache, so each signer's key is decoded once per response.
+        let mut cache = ComputeKeyCache::default();
+        let blocks = (0..num_blocks)
+            .map(|_| Block::read_le_with_cache(&mut reader, false, &mut cache))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self(blocks))
     }
 }
