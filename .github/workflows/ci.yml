@@ -111,13 +111,14 @@ jobs:
       - run: cargo check -p snarkos-node-metrics --all-features
       - run: cargo check -p snarkos-display --all-features
 
-  # Each entry is one build. `cargo test -p a -p b` unifies the features of
-  # a and b, and several crates enable features on their dependencies that
-  # change what those dependencies do: `snarkos-node-router/test`,
-  # `snarkos-node-network/test` and `snarkvm-ledger-block/test` skip checks,
-  # and `rocks` and `metrics` select other code paths. Crates share an entry
-  # only where that unification enables none of these on any crate. Helper
-  # features such as `test-helpers` and `mock` can still be unified.
+  # Each line of `runs` is one build. `cargo test -p a -p b` unifies the
+  # features of a and b, and several crates enable features on their
+  # dependencies that change what those dependencies do:
+  # `snarkos-node-router/test`, `snarkos-node-network/test` and
+  # `snarkvm-ledger-block/test` skip checks, and `rocks` and `metrics` select
+  # other code paths. Crates share a line only where that unification enables
+  # none of these on any crate. Helper features such as `test-helpers` and
+  # `mock` can still be unified.
   #
   # Cheap entries run on free hosted runners and do not wait for the fleet.
   test-hosted:
@@ -163,7 +164,8 @@ jobs:
           key: aleo-resources-${{ matrix.name }}-${{ hashFiles('Cargo.lock') }}
       - uses: taiki-e/install-action@v2
         with: { tool: cargo-nextest@0.9.114 }
-      # Each line of `runs` is one cargo command.
+      # Each line of `runs` is one cargo command, split on whitespace with no
+      # shell parsing, so its arguments can hold neither quotes nor spaces.
       - name: Test
         env:
           RUNS: ${{ matrix.runs }}
@@ -211,8 +213,12 @@ jobs:
             runs: nextest run -p snarkos-node-consensus -p snarkos-node-rest -p snarkos-cli
           - name: node
             runs: nextest run -p snarkos-node -p snarkos-node-bft-storage-service --features snarkos-node-bft-storage-service/memory,snarkos-node-bft-storage-service/persistent
+          # `helpers::telemetry` compiles only under `metrics`. `--no-tests=fail`
+          # overrides NEXTEST_NO_TESTS, so a filter that stops matching fails.
           - name: bft
-            runs: nextest run -p snarkos-node-bft
+            runs: |
+              nextest run -p snarkos-node-bft
+              nextest run -p snarkos-node-bft --lib --features metrics --no-tests=fail -E test(/helpers::telemetry::/)
           - name: router
             runs: nextest run -p snarkos-node-router
           - name: sync
@@ -271,6 +277,12 @@ jobs:
             runs: |
               ./.ci/test_db_backup.sh
               ./.ci/test_devnet.sh
+          # Clippy and `cargo check` only compile the examples, so this is the one
+          # job that runs one. It builds the example itself.
+          - name: simple-node
+            timeout: 60
+            delay: false
+            runs: ./.ci/test_simple_node.sh
     name: devnet (${{ matrix.name }})
     steps: &devnet-steps
       - uses: actions/checkout@v7
@@ -278,9 +290,9 @@ jobs:
       - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
       - name: Stop leftover nodes
         run: &stop-nodes |
-          pkill -x snarkos || true
-          for _ in $(seq 20); do pgrep -x snarkos > /dev/null || break; sleep 1; done
-          pkill -9 -x snarkos || true
+          pkill -x 'snarkos|simple_node' || true
+          for _ in $(seq 20); do pgrep -x 'snarkos|simple_node' > /dev/null || break; sleep 1; done
+          pkill -9 -x 'snarkos|simple_node' || true
           sudo -n /usr/local/sbin/runner-netem clear
       - uses: actions/download-artifact@v8
         with:
@@ -335,6 +347,36 @@ jobs:
               export CARGO_TARGET_DIR="$SNARKOS_RELEASE_DIR/target"
               ./.ci/test_full_upgrade.sh
               ./.ci/test_partial_upgrade.sh
+    name: devnet (${{ matrix.name }})
+    steps: *devnet-steps
+
+  # Devnets for releases only. On every push to `canary`, `testnet` or
+  # `mainnet`, and on demand.
+  devnet-release:
+    needs: [start-cpu-runners, build-snarkos]
+    runs-on: [self-hosted, linux, x64, cpu]
+    timeout-minutes: ${{ matrix.timeout }}
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+       (github.ref == 'refs/heads/canary' ||
+        github.ref == 'refs/heads/testnet' ||
+        github.ref == 'refs/heads/mainnet'))
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: upgrade-required
+            timeout: 30
+            runs: ./.ci/test_upgrade_required.sh
+          - name: chaotic-restart-all
+            timeout: 45
+            delay: true
+            runs: ./.ci/test_restart_all.sh
+          - name: chaotic-crash-all
+            timeout: 45
+            delay: true
+            runs: ./.ci/test_restart_all.sh 7 0 10 100 3 crash
     name: devnet (${{ matrix.name }})
     steps: *devnet-steps
 
