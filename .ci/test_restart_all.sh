@@ -31,6 +31,11 @@ num_restarts=$5
 # The time that is used to determine the total timeout for the test.
 max_wait_per_block=10
 
+# How long a restarted node may take to become ready again.
+# Loading an existing ledger is dominated by deserializing the cached block tree,
+# which has been observed to take over two minutes on CI.
+max_restart_wait=300
+
 network_name=$(get_network_name "$network_id")
 
 # Keep verbosity low as we are running many nodes.
@@ -75,7 +80,7 @@ for iter in $(seq 1 "$num_restarts"); do
   log "All nodes reached restart height $restart_height. Restarting all validators (iteration $iter/$num_restarts)..."
 
   # Gracefully shut down all validators
-  stop_nodes
+  stop_some_nodes "${!PIDS[@]}"
 
   # Wait briefly before restarting
   sleep 5
@@ -88,10 +93,17 @@ for iter in $(seq 1 "$num_restarts"); do
     # Add 1-second delay between starting nodes to avoid hitting rate limits
     sleep 1
   done
+
+  # Block until the restarted nodes serve their REST API again, so that the startup time
+  # is not deducted from the time budget of the next `wait_for_heights`.
+  if ! wait_for_nodes "$total_validators" 0 "$network_name" "$max_restart_wait"; then
+    log "❌ Test failed! Not all nodes became ready within $max_restart_wait seconds after restart #$iter."
+    exit 1
+  fi
 done
 
 # Wait for final height
-if wait_for_heights 0 "$total_validators" "$final_height" "$network_name"; then
+if wait_for_heights 0 "$total_validators" "$final_height" "$network_name" "$max_wait"; then
  log "SUCCESS!"
   exit 0
 else

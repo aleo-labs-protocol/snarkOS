@@ -20,11 +20,12 @@ Jobs run in one of two places:
 |---|---|
 | Pull request | `fmt`, `deny`, `shellcheck`, `machete`, `lint`, `test`, `build-snarkos`, `devnet`, `ci-ok` |
 | Push to `staging`, `canary`, `testnet`, `mainnet`, or manual dispatch | the above, plus `devnet-merge`, `windows` |
+| Push to `canary`, `testnet`, `mainnet`, or manual dispatch | the above, plus `devnet-release` |
 
 ## Jobs
 
-A job marked "merge" runs only on the second row of the table above. The
-other jobs run on every event.
+A job marked "merge" runs only on the second row of the table above, and a job
+marked "release" only on the third. The other jobs run on every event.
 
 | Job | Runner | Trigger | Timeout (min) | What it runs |
 |---|---|---|---|---|
@@ -49,6 +50,8 @@ other jobs run on every event.
 | `devnet (chaotic-minority-reset)` | `cpu` | merge | 45 | `test_reset_minority.sh`, with delays |
 | `devnet (chaotic-majority-restart)` | `cpu` | merge | 45 | `test_restart_majority.sh`, with delays |
 | `devnet (upgrade)` | `cpu` | merge | 90 | `test_full_upgrade.sh`, `test_partial_upgrade.sh` |
+| `devnet (upgrade-required)` | `cpu` | release | 30 | `test_upgrade_required.sh` |
+| `devnet (chaotic-restart-all)` | `cpu` | release | 45 | `test_restart_all.sh`, with delays |
 | `machete` | hosted | all | | `cargo machete` |
 | `windows` | hosted (Windows) | merge | | `cargo check --examples --benches --tests` in `account`, `cli`, `display`, `node` |
 | `ci-ok` | hosted | all | | fails unless every job a pull request runs succeeded |
@@ -80,9 +83,9 @@ time of each test.
 ## Devnets
 
 `build-snarkos` builds the node once with `--features test_network`. Each
-`devnet` and `devnet-merge` entry downloads it and runs scripts from `.ci` on
-one box. A box has one runner slot, so the nodes' fixed ports never collide
-with another job's.
+`devnet`, `devnet-merge` and `devnet-release` entry downloads it and runs
+scripts from `.ci` on one box. A box has one runner slot, so the nodes' fixed
+ports never collide with another job's.
 
 Each `test` and devnet job on the fleet gets its own home directory and
 `TMPDIR`, so ledgers and node data from one run never reach the next.

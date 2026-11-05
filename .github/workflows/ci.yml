@@ -344,6 +344,32 @@ jobs:
     name: devnet (${{ matrix.name }})
     steps: *devnet-steps
 
+  # Slowest devnets. On every push to `canary`, `testnet` or `mainnet`, and on
+  # demand.
+  devnet-release:
+    needs: [start-cpu-runners, build-snarkos]
+    runs-on: [self-hosted, linux, x64, cpu]
+    timeout-minutes: ${{ matrix.timeout }}
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+       (github.ref == 'refs/heads/canary' ||
+        github.ref == 'refs/heads/testnet' ||
+        github.ref == 'refs/heads/mainnet'))
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: upgrade-required
+            timeout: 30
+            runs: ./.ci/test_upgrade_required.sh
+          - name: chaotic-restart-all
+            timeout: 45
+            delay: true
+            runs: ./.ci/test_restart_all.sh
+    name: devnet (${{ matrix.name }})
+    steps: *devnet-steps
+
   machete:
     runs-on: ubuntu-latest
     steps:
