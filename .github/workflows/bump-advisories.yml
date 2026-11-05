@@ -1,7 +1,8 @@
 name: Bump crates with advisories
 
-# Pull requests do not check advisories. This opens a pull request that updates
-# Cargo.lock past them, and an issue for those it cannot fix.
+# Pull requests into staging do not check advisories. This opens a pull
+# request that updates Cargo.lock past them, and an issue for those it cannot
+# fix.
 on:
   schedule:
     - cron: '23 4 * * *'

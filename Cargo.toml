@@ -22,6 +22,7 @@ members = [
   "account",
   "cli",
   "display",
+  "ledger-distribution",
   "node",
   "node/bft",
   "node/bft/events",
@@ -47,8 +48,8 @@ default-features = false
 
 [workspace.dependencies.snarkvm]
 #path = "../snarkVM"
-git = "https://github.com/ProvableHQ/snarkVM.git"
-rev = "7200331ae5b8c97708fb9c8806bef37c662da049" # eran/authority-prune
+git = "https://github.com/aleo-labs-protocol/snarkVM.git"
+rev = "d14e59196174550aa698e28de78813c85936d39d" # eran/authority-prune
 #version = "=4.12.0"
 default-features = false
 
