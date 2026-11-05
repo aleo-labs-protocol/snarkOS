@@ -111,13 +111,14 @@ jobs:
       - run: cargo check -p snarkos-node-metrics --all-features
       - run: cargo check -p snarkos-display --all-features
 
-  # Each entry is one build. `cargo test -p a -p b` unifies the features of
-  # a and b, and several crates enable features on their dependencies that
-  # change what those dependencies do: `snarkos-node-router/test`,
-  # `snarkos-node-network/test` and `snarkvm-ledger-block/test` skip checks,
-  # and `rocks` and `metrics` select other code paths. Crates share an entry
-  # only where that unification enables none of these on any crate. Helper
-  # features such as `test-helpers` and `mock` can still be unified.
+  # Each line of `runs` is one build. `cargo test -p a -p b` unifies the
+  # features of a and b, and several crates enable features on their
+  # dependencies that change what those dependencies do:
+  # `snarkos-node-router/test`, `snarkos-node-network/test` and
+  # `snarkvm-ledger-block/test` skip checks, and `rocks` and `metrics` select
+  # other code paths. Crates share a line only where that unification enables
+  # none of these on any crate. Helper features such as `test-helpers` and
+  # `mock` can still be unified.
   #
   # Cheap entries run on free hosted runners and do not wait for the fleet.
   test-hosted:
@@ -163,7 +164,8 @@ jobs:
           key: aleo-resources-${{ matrix.name }}-${{ hashFiles('Cargo.lock') }}
       - uses: taiki-e/install-action@v2
         with: { tool: cargo-nextest@0.9.114 }
-      # Each line of `runs` is one cargo command.
+      # Each line of `runs` is one cargo command, split on whitespace with no
+      # shell parsing, so its arguments can hold neither quotes nor spaces.
       - name: Test
         env:
           RUNS: ${{ matrix.runs }}
@@ -211,8 +213,12 @@ jobs:
             runs: nextest run -p snarkos-node-consensus -p snarkos-node-rest -p snarkos-cli
           - name: node
             runs: nextest run -p snarkos-node -p snarkos-node-bft-storage-service --features snarkos-node-bft-storage-service/memory,snarkos-node-bft-storage-service/persistent
+          # `helpers::telemetry` compiles only under `metrics`. `--no-tests=fail`
+          # overrides NEXTEST_NO_TESTS, so a filter that stops matching fails.
           - name: bft
-            runs: nextest run -p snarkos-node-bft
+            runs: |
+              nextest run -p snarkos-node-bft
+              nextest run -p snarkos-node-bft --lib --features metrics --no-tests=fail -E test(/helpers::telemetry::/)
           - name: router
             runs: nextest run -p snarkos-node-router
           - name: sync
