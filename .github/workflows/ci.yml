@@ -213,12 +213,15 @@ jobs:
             runs: nextest run -p snarkos-node-consensus -p snarkos-node-rest -p snarkos-cli
           - name: node
             runs: nextest run -p snarkos-node -p snarkos-node-bft-storage-service --features snarkos-node-bft-storage-service/memory,snarkos-node-bft-storage-service/persistent
-          # `helpers::telemetry` compiles only under `metrics`. `--no-tests=fail`
-          # overrides NEXTEST_NO_TESTS, so a filter that stops matching fails.
+          # `helpers::telemetry` compiles only under `metrics`, and nextest
+          # skips the tests in examples unless a command names one.
+          # `--no-tests=fail` overrides NEXTEST_NO_TESTS, so a command that
+          # stops matching any test fails.
           - name: bft
             runs: |
               nextest run -p snarkos-node-bft
               nextest run -p snarkos-node-bft --lib --features metrics --no-tests=fail -E test(/helpers::telemetry::/)
+              nextest run -p snarkos-node-bft --example simple_node --no-tests=fail
           - name: router
             runs: nextest run -p snarkos-node-router
           - name: sync
