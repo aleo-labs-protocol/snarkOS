@@ -59,6 +59,11 @@ const fn cdn_user_agent() -> &'static str {
     concat!("snarkos/", env!("SNARKOS_VERSION"))
 }
 
+/// Builds a client for CDN requests.
+fn cdn_client() -> reqwest::Result<Client> {
+    Client::builder().use_rustls_tls().zstd(true).user_agent(cdn_user_agent()).build()
+}
+
 /// Updates the metrics during CDN sync.
 #[cfg(feature = "metrics")]
 fn update_block_metrics<N: Network>(height: u32) {
@@ -171,7 +176,7 @@ impl CdnBlockSync {
     }
 
     pub async fn get_cdn_height(&self) -> anyhow::Result<u32> {
-        let client = Client::builder().use_rustls_tls().user_agent(cdn_user_agent()).build()?;
+        let client = cdn_client()?;
         cdn_height::<BLOCKS_PER_FILE>(&client, &self.base_url).await
     }
 }
@@ -188,7 +193,7 @@ pub async fn load_blocks<N: Network>(
     process: impl FnMut(Block<N>) -> Result<()> + Clone + Send + Sync + 'static,
 ) -> Result<u32, (u32, anyhow::Error)> {
     // Create a Client to maintain a connection pool throughout the sync.
-    let client = match Client::builder().use_rustls_tls().user_agent(cdn_user_agent()).build() {
+    let client = match cdn_client() {
         Ok(client) => client,
         Err(error) => {
             return Err((start_height.saturating_sub(1), anyhow!("Failed to create a CDN request client - {error}")));
@@ -574,7 +579,7 @@ fn log_progress<const OBJECTS_PER_FILE: u32>(
 
 #[cfg(test)]
 mod tests {
-    use super::{BLOCKS_PER_FILE, CDN_BASE_URL, cdn_height, load_blocks, log_progress};
+    use super::{BLOCKS_PER_FILE, CDN_BASE_URL, cdn_client, cdn_get, cdn_height, load_blocks, log_progress};
 
     use snarkos_utilities::SimpleStoppable;
 
@@ -585,6 +590,64 @@ mod tests {
     use std::{sync::Arc, time::Instant};
 
     type CurrentNetwork = MainnetV0;
+
+    /// Serves one HTTP/1.1 response with the given extra headers and body.
+    ///
+    /// Returns the URL to request and a handle that yields the raw request head.
+    async fn serve_once(headers: &'static str, body: Vec<u8>) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/0.50.blocks", listener.local_addr().unwrap());
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !request.ends_with(b"\r\n\r\n") {
+                let n = stream.read(&mut buf).await.unwrap();
+                assert!(n > 0, "the client closed the connection before sending a request");
+                request.extend_from_slice(&buf[..n]);
+            }
+            let head =
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n", body.len());
+            stream.write_all(head.as_bytes()).await.unwrap();
+            stream.write_all(&body).await.unwrap();
+            String::from_utf8(request).unwrap().to_ascii_lowercase()
+        });
+        (url, handle)
+    }
+
+    /// Returns a bincode payload that compresses well.
+    fn sample_payload() -> (Vec<u64>, Vec<u8>) {
+        let values: Vec<u64> = (0..10_000).map(|i| i % 7).collect();
+        let bytes = bincode::serialize(&values).unwrap();
+        (values, bytes)
+    }
+
+    #[tokio::test]
+    async fn test_cdn_get_decodes_zstd() {
+        let (expected, bytes) = sample_payload();
+        let compressed = zstd::encode_all(bytes.as_slice(), 1).unwrap();
+        assert!(compressed.len() < bytes.len());
+        let (url, request) = serve_once("Content-Encoding: zstd\r\n", compressed).await;
+
+        let values: Vec<u64> = cdn_get(cdn_client().unwrap(), &url, "test blocks").await.unwrap();
+        assert_eq!(values, expected);
+
+        let request = request.await.unwrap();
+        let accept_encoding = request.lines().find_map(|line| line.strip_prefix("accept-encoding:"));
+        assert!(accept_encoding.is_some_and(|value| value.contains("zstd")), "request: {request}");
+    }
+
+    #[tokio::test]
+    async fn test_cdn_get_reads_identity() {
+        let (expected, bytes) = sample_payload();
+        let (url, request) = serve_once("", bytes).await;
+
+        let values: Vec<u64> = cdn_get(cdn_client().unwrap(), &url, "test blocks").await.unwrap();
+        assert_eq!(values, expected);
+        request.await.unwrap();
+    }
 
     fn check_load_blocks(start: u32, end: Option<u32>, expected: usize) {
         let blocks = Arc::new(RwLock::new(Vec::new()));
