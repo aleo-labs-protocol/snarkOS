@@ -83,7 +83,7 @@ workspace = true
 
 [dev-dependencies.tokio]
 workspace = true
-features = [ "io-util", "net", "rt", "rt-multi-thread" ]
+features = [ "io-util", "macros", "net", "rt", "rt-multi-thread" ]
 
 [dev-dependencies.tokio-test]
 version = "0.4"

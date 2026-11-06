@@ -29,7 +29,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use locktick::{parking_lot::Mutex, tokio::Mutex as TMutex};
 #[cfg(not(feature = "locktick"))]
 use parking_lot::Mutex;
-use reqwest::{Client, Response};
+use reqwest::Client;
 use std::{
     cmp,
     sync::{
@@ -50,10 +50,6 @@ const CONCURRENT_REQUESTS: u32 = 16;
 const MAXIMUM_PENDING_BLOCKS: u32 = BLOCKS_PER_FILE * CONCURRENT_REQUESTS * 2;
 /// Maximum number of attempts for a request to the CDN.
 const MAXIMUM_REQUEST_ATTEMPTS: u8 = 10;
-/// Maximum decoded size of a block file from the CDN.
-const MAXIMUM_FILE_BYTES: usize = 256 << 20;
-/// Maximum decoded size of the `latest.json` file from the CDN.
-const MAXIMUM_LATEST_JSON_BYTES: usize = 64 << 10;
 
 /// The CDN base url.
 pub const CDN_BASE_URL: &str = "https://cdn.provable.com/v0/blocks";
@@ -461,7 +457,7 @@ async fn cdn_height<const BLOCKS_PER_FILE: u32>(client: &Client, base_url: &http
         Err(error) => bail!("Failed to fetch the CDN height - {error}"),
     };
     // Parse the response.
-    let bytes = match read_body(response, MAXIMUM_LATEST_JSON_BYTES).await {
+    let bytes = match response.bytes().await {
         Ok(bytes) => bytes,
         Err(error) => bail!("Failed to parse the CDN height response - {error}"),
     };
@@ -492,7 +488,7 @@ async fn cdn_get<T: 'static + DeserializeOwned + Send>(client: Client, url: &str
         Err(error) => bail!("Failed to fetch {ctx} - {error}"),
     };
     // Parse the response.
-    let bytes = match read_body(response, MAXIMUM_FILE_BYTES).await {
+    let bytes = match response.bytes().await {
         Ok(bytes) => bytes,
         Err(error) => bail!("Failed to parse {ctx} - {error}"),
     };
@@ -508,19 +504,6 @@ async fn cdn_get<T: 'static + DeserializeOwned + Send>(client: Client, url: &str
             bail!("Failed to join task for {ctx} - {error}")
         }
     }
-}
-
-/// Reads the decoded body of a response, failing once it exceeds `max_bytes`.
-async fn read_body(mut response: Response, max_bytes: usize) -> Result<Vec<u8>> {
-    let capacity = response.content_length().and_then(|len| usize::try_from(len).ok()).unwrap_or(0).min(max_bytes);
-    let mut body = Vec::with_capacity(capacity);
-    while let Some(chunk) = response.chunk().await? {
-        if body.len().saturating_add(chunk.len()) > max_bytes {
-            bail!("the response body exceeds {max_bytes} bytes");
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
 }
 
 /// Converts a duration into a string that humans can read easily.
@@ -596,7 +579,7 @@ fn log_progress<const OBJECTS_PER_FILE: u32>(
 
 #[cfg(test)]
 mod tests {
-    use super::{BLOCKS_PER_FILE, CDN_BASE_URL, cdn_client, cdn_get, cdn_height, load_blocks, log_progress, read_body};
+    use super::{BLOCKS_PER_FILE, CDN_BASE_URL, cdn_client, cdn_get, cdn_height, load_blocks, log_progress};
 
     use snarkos_utilities::SimpleStoppable;
 
@@ -641,55 +624,29 @@ mod tests {
         (values, bytes)
     }
 
-    #[test]
-    fn test_cdn_get_decodes_zstd() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (expected, bytes) = sample_payload();
-            let compressed = zstd::encode_all(bytes.as_slice(), 1).unwrap();
-            assert!(compressed.len() < bytes.len());
-            let (url, request) = serve_once("Content-Encoding: zstd\r\n", compressed).await;
+    #[tokio::test]
+    async fn test_cdn_get_decodes_zstd() {
+        let (expected, bytes) = sample_payload();
+        let compressed = zstd::encode_all(bytes.as_slice(), 1).unwrap();
+        assert!(compressed.len() < bytes.len());
+        let (url, request) = serve_once("Content-Encoding: zstd\r\n", compressed).await;
 
-            let values: Vec<u64> = cdn_get(cdn_client().unwrap(), &url, "test blocks").await.unwrap();
-            assert_eq!(values, expected);
+        let values: Vec<u64> = cdn_get(cdn_client().unwrap(), &url, "test blocks").await.unwrap();
+        assert_eq!(values, expected);
 
-            let request = request.await.unwrap();
-            let accept_encoding = request.lines().find_map(|line| line.strip_prefix("accept-encoding:"));
-            assert!(accept_encoding.is_some_and(|value| value.contains("zstd")), "request: {request}");
-        });
+        let request = request.await.unwrap();
+        let accept_encoding = request.lines().find_map(|line| line.strip_prefix("accept-encoding:"));
+        assert!(accept_encoding.is_some_and(|value| value.contains("zstd")), "request: {request}");
     }
 
-    #[test]
-    fn test_cdn_get_reads_identity() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (expected, bytes) = sample_payload();
-            let (url, request) = serve_once("", bytes).await;
+    #[tokio::test]
+    async fn test_cdn_get_reads_identity() {
+        let (expected, bytes) = sample_payload();
+        let (url, request) = serve_once("", bytes).await;
 
-            let values: Vec<u64> = cdn_get(cdn_client().unwrap(), &url, "test blocks").await.unwrap();
-            assert_eq!(values, expected);
-            request.await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_read_body_limits_decoded_size() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let decoded = vec![0u8; 1 << 20];
-            let compressed = zstd::encode_all(decoded.as_slice(), 1).unwrap();
-            let limit = 1 << 16;
-            assert!(compressed.len() < limit);
-
-            let (url, _request) = serve_once("Content-Encoding: zstd\r\n", compressed.clone()).await;
-            let response = cdn_client().unwrap().get(&url).send().await.unwrap();
-            let error = read_body(response, limit).await.unwrap_err();
-            assert!(error.to_string().contains("exceeds"), "{error}");
-
-            let (url, _request) = serve_once("Content-Encoding: zstd\r\n", compressed).await;
-            let response = cdn_client().unwrap().get(&url).send().await.unwrap();
-            assert_eq!(read_body(response, decoded.len()).await.unwrap(), decoded);
-        });
+        let values: Vec<u64> = cdn_get(cdn_client().unwrap(), &url, "test blocks").await.unwrap();
+        assert_eq!(values, expected);
+        request.await.unwrap();
     }
 
     fn check_load_blocks(start: u32, end: Option<u32>, expected: usize) {
