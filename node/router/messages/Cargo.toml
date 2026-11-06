@@ -23,7 +23,6 @@ test = [ ]
 # `prop_tests` generators so a fuzzing corpus can be seeded with structurally
 # valid messages rather than by mutation from nothing.
 fuzz-helpers = [
-  "dep:indexmap",
   "dep:proptest",
   "dep:test-strategy",
   "snarkos-node-bft-events/fuzz-helpers",
@@ -67,10 +66,6 @@ features = [ "test" ]
 [dev-dependencies.snarkvm]
 workspace = true
 features = [ "algorithms", "test-helpers" ]
-
-[dependencies.indexmap]
-workspace = true
-optional = true
 
 [dependencies.proptest]
 workspace = true
