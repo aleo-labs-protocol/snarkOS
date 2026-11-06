@@ -1,0 +1,31 @@
+name: Mirror staging to snarkOS-internal
+
+# snarkOS-internal is a private copy of this repository. Its staging follows this
+# staging and nothing else: the bot only fast-forwards it, and a mirror that has
+# diverged fails the run.
+on:
+  push:
+    branches: [staging]
+  # Catches a push whose run failed or never started.
+  schedule:
+    - cron: '41 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency: mirror-staging
+
+jobs:
+  mirror:
+    # snarkOS-internal holds this file too. Without this, the bot's push there
+    # would start a run in the mirror.
+    if: github.repository == 'aleo-labs-protocol/snarkOS'
+    uses: aleo-labs-protocol/gh-actions/.github/workflows/mirror-branches.yml@v2
+    permissions: { contents: read }
+    with:
+      mirror: snarkOS-internal
+      branches: staging
+    # Lives in the merge-bot environment, which admits only staging. The called
+    # workflow's job sets that environment and receives the value.
+    secrets:
+      MERGE_BOT_APP_KEY: ${{ secrets.MERGE_BOT_APP_KEY }}
