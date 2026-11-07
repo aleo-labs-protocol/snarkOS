@@ -20,6 +20,7 @@ jobs:
     # snarkOS-internal holds this file too. Without this, the bot's push there
     # would start a run in the mirror.
     if: github.repository == 'aleo-labs-protocol/snarkOS'
+    # gh-actions is ours; check-shared-refs requires a @vN tag here, not a SHA.
     uses: aleo-labs-protocol/gh-actions/.github/workflows/mirror-branches.yml@v2
     permissions: { contents: read }
     with:

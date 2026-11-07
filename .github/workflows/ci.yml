@@ -25,6 +25,7 @@ env:
 # jobs.
 jobs:
   start-cpu-runners:
+    # gh-actions is ours; check-shared-refs requires a @vN tag here, not a SHA.
     uses: aleo-labs-protocol/gh-actions/.github/workflows/start-runner.yml@v2
     permissions: { id-token: write, contents: read, actions: read }
     secrets:
@@ -45,6 +46,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
+      # gh-actions is ours; check-shared-refs requires a @vN tag here, not a SHA.
       - uses: aleo-labs-protocol/gh-actions/.github/actions/check-shared-refs@v2
 
   fmt:
@@ -103,6 +105,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
+      # gh-actions is ours; check-shared-refs requires a @vN tag here, not a SHA.
       - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -143,6 +146,7 @@ jobs:
     steps: &test-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
+      # gh-actions is ours; check-shared-refs requires a @vN tag here, not a SHA.
       - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
       - uses: ./.github/actions/job-home
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -240,6 +244,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
+      # gh-actions is ours; check-shared-refs requires a @vN tag here, not a SHA.
       - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
       # The same profile as `ci_cargo_install_snarkos` in .ci/utils.sh, which
       # the upgrade tests build the latest release with.
@@ -287,6 +292,7 @@ jobs:
     steps: &devnet-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
+      # gh-actions is ours; check-shared-refs requires a @vN tag here, not a SHA.
       - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
       - name: Stop leftover nodes
         run: &stop-nodes |
