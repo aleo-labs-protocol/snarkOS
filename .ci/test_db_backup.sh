@@ -63,31 +63,62 @@ for ((validator_index = 0; validator_index < total_validators; validator_index++
   sleep 1
 done
 
-# The height of each node just before its most recent checkpoint.
-declare -a checkpoint_floor=()
+# The height of every node's most recent checkpoint.
+checkpoint_floor=""
 
-# Create database checkpoints
-function create_checkpoints() {
+# Prints the height every node reports, or nothing if they differ or one does not answer.
+function common_height() {
+  local height common=""
   for ((node_index = 0; node_index < total_validators; node_index++)); do
-    port=$((3030 + node_index))
-    path=$(checkpoint_dir "${node_index}_$1")
-    checkpoint_floor[node_index]=$(get_block_height_by_port "$port" "$network_name")
-    if [[ -z "${checkpoint_floor[node_index]}" ]]; then
-      log "❌ Node #${node_index} did not report its height before the checkpoint"
-      return 1
+    height=$(get_block_height_by_port $((3030 + node_index)) "$network_name")
+    if [[ -z "$height" || ( -n "$common" && "$height" != "$common" ) ]]; then
+      return
     fi
-    if ! curl -sf -X "POST" -H "Authorization: Bearer ${jwt[node_index]}" "http://127.0.0.1:$port/v2/$network_name/db_backup?path=$path" > /dev/null; then
-      log "❌ Node #${node_index} failed to create a checkpoint at $path"
-      return 1
-    fi
-    if [[ ! -d "$path" ]]; then
-      log "❌ Node #${node_index} reported a checkpoint, but $path does not exist"
-      return 1
-    fi
+    common=$height
   done
+  echo "$common"
+}
 
-  log "All nodes created a checkpoint"
-  return 0
+# Create database checkpoints, all at the same height. A node that restarts one block ahead of a
+# quorum is on a fork of the chain the quorum rebuilds, and never catches up. The backups run
+# concurrently, and are retried when a block lands during them.
+function create_checkpoints() {
+  local attempt before after failed path
+  local -a pids
+  for ((attempt = 1; attempt <= 10; attempt++)); do
+    before=$(common_height)
+    for ((node_index = 0; node_index < total_validators; node_index++)); do
+      path=$(checkpoint_dir "${node_index}_$1")
+      curl -sf -X "POST" -H "Authorization: Bearer ${jwt[node_index]}" "http://127.0.0.1:$((3030 + node_index))/v2/$network_name/db_backup?path=$path" > /dev/null &
+      pids[node_index]=$!
+    done
+    failed=false
+    for ((node_index = 0; node_index < total_validators; node_index++)); do
+      path=$(checkpoint_dir "${node_index}_$1")
+      if ! wait "${pids[node_index]}"; then
+        log "❌ Node #${node_index} failed to create a checkpoint at $path"
+        failed=true
+      elif [[ ! -d "$path" ]]; then
+        log "❌ Node #${node_index} reported a checkpoint, but $path does not exist"
+        failed=true
+      fi
+    done
+    if [[ $failed = true ]]; then
+      return 1
+    fi
+    after=$(common_height)
+    if [[ -n "$before" && "$before" = "$after" ]]; then
+      checkpoint_floor=$before
+      log "All nodes created a checkpoint at height $checkpoint_floor"
+      return 0
+    fi
+    log "Heights changed during checkpoint attempt $attempt; retrying"
+    for ((node_index = 0; node_index < total_validators; node_index++)); do
+      rm -rf "$(checkpoint_dir "${node_index}_$1")"
+    done
+  done
+  log "❌ Nodes did not hold one height across a checkpoint in $((attempt - 1)) attempts"
+  return 1
 }
 
 wait_for_nodes "$total_validators" 0 "$network_name"
@@ -171,8 +202,8 @@ while (( total_wait < 600 )); do  # 10 minutes max
         log "Node #${validator_index} height after restart: $height"
 
         # A node that ignored the checkpoint starts either at genesis or at its pre-shutdown height.
-        if (( height < checkpoint_floor[validator_index] || height >= rollback_height )); then
-          log "❌ Node #${validator_index} restarted at height $height, expected at least ${checkpoint_floor[validator_index]} and below $rollback_height"
+        if (( height != checkpoint_floor )); then
+          log "❌ Node #${validator_index} restarted at height $height, expected $checkpoint_floor"
           log "❌ Test failed!"
           exit 1
         fi
