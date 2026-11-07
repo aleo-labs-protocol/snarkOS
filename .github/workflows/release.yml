@@ -15,10 +15,12 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
 
       - name: Install required Debian pacakges
         run: sudo apt install -y lld libclang-dev
@@ -28,7 +30,7 @@ jobs:
           cargo build --all --release && strip target/release/snarkos
 
       - id: get_version
-        uses: battila7/get-version-action@v2
+        uses: battila7/get-version-action@d97fbc34ceb64d1f5d95f4dfd6dce33521ccccf5 # v2.3.0
 
       - name: Zip
         run: |
@@ -40,7 +42,7 @@ jobs:
           mv tempdir/aleo-${{ steps.get_version.outputs.version }}-x86_64-unknown-linux-gnu.zip .
 
       - name: Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
@@ -55,10 +57,12 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
 
       # clang-sys links libclang with @rpath. dyld does not search the Xcode
       # toolchain, but it does search $HOME/lib (DYLD_FALLBACK_LIBRARY_PATH).
@@ -74,7 +78,7 @@ jobs:
           cargo build --all --release && strip target/release/snarkos
 
       - id: get_version
-        uses: battila7/get-version-action@v2
+        uses: battila7/get-version-action@d97fbc34ceb64d1f5d95f4dfd6dce33521ccccf5 # v2.3.0
 
       - name: Zip
         run: |
@@ -86,7 +90,7 @@ jobs:
           mv tempdir/aleo-${{ steps.get_version.outputs.version }}-aarch64-apple-darwin.zip .
 
       - name: Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
@@ -102,13 +106,15 @@ jobs:
     continue-on-error: true
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
 
       - name: Install LLVM and Clang
-        uses: KyleMayes/install-llvm-action@v2
+        uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2.0.9
         with:
           version: "11"
           directory: ${{ runner.temp }}/llvm
@@ -121,14 +127,14 @@ jobs:
           cargo build --all --release
 
       - id: get_version
-        uses: battila7/get-version-action@v2
+        uses: battila7/get-version-action@d97fbc34ceb64d1f5d95f4dfd6dce33521ccccf5 # v2.3.0
 
       - name: Zip
         run: |
           Compress-Archive target/release/snarkos.exe aleo-${{ steps.get_version.outputs.version }}-x86_64-pc-windows-msvc.zip
 
       - name: Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |

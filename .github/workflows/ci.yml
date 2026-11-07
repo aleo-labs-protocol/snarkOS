@@ -43,7 +43,7 @@ jobs:
   check-shared-refs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
       - uses: aleo-labs-protocol/gh-actions/.github/actions/check-shared-refs@v2
 
@@ -54,7 +54,7 @@ jobs:
       # an error. Bumping this pin may reformat the tree.
       FMT_TOOLCHAIN: nightly-2026-04-02
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
       - run: rustup toolchain install "$FMT_TOOLCHAIN" --profile minimal --component rustfmt
       - run: cargo "+$FMT_TOOLCHAIN" fmt --all -- --check
@@ -62,9 +62,9 @@ jobs:
   deny:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
         with: { tool: cargo-deny@0.20.2 }
       - run: cargo deny --workspace check bans licenses sources
       # staging's advisories are bumped nightly by bump-advisories.yml, which
@@ -77,7 +77,7 @@ jobs:
     env:
       SHELLCHECK_VERSION: v0.11.0
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
       - run: |
           curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
@@ -89,7 +89,7 @@ jobs:
   merge-fixup:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
       - run: .github/merge-fixup.test.sh
 
@@ -101,7 +101,7 @@ jobs:
       github.event.pull_request == null ||
       github.event.pull_request.head.repo.full_name == github.repository
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
       - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -141,11 +141,11 @@ jobs:
               -p snarkos-node-bft-ledger-service
     name: test (${{ matrix.name }})
     steps: &test-steps
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
       - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
       - uses: ./.github/actions/job-home
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: runner.environment == 'github-hosted'
         with:
           key: ${{ matrix.name }}
@@ -157,12 +157,12 @@ jobs:
       # Downloaded parameters. A box keeps its own; a hosted runner starts
       # without, and parallel tests downloading the same file can read it
       # half-written.
-      - uses: actions/cache/restore@v6
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: runner.environment == 'github-hosted'
         with: &aleo-resources
           path: ~/.aleo/resources
           key: aleo-resources-${{ matrix.name }}-${{ hashFiles('Cargo.lock') }}
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
         with: { tool: cargo-nextest@0.9.114 }
       # Each line of `runs` is one cargo command, split on whitespace with no
       # shell parsing, so its arguments can hold neither quotes nor spaces.
@@ -188,12 +188,12 @@ jobs:
           done <<< "$RUNS"
           exit "$rc"
       # Per-test timings, for deciding what to shard or drop.
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ !cancelled() }}
         with:
           name: junit-${{ matrix.name }}
           path: ${{ runner.temp }}/junit
-      - uses: actions/cache/save@v6
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: runner.environment == 'github-hosted' && github.ref == 'refs/heads/staging'
         with: *aleo-resources
 
@@ -238,7 +238,7 @@ jobs:
       github.event.pull_request == null ||
       github.event.pull_request.head.repo.full_name == github.repository
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
       - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
       # The same profile as `ci_cargo_install_snarkos` in .ci/utils.sh, which
@@ -249,7 +249,7 @@ jobs:
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
           CARGO_PROFILE_RELEASE_OPT_LEVEL: "2"
           CARGO_PROFILE_RELEASE_DEBUG: "0"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: snarkos
           path: ${{ env.CARGO_TARGET_DIR }}/release/snarkos
@@ -285,7 +285,7 @@ jobs:
             runs: ./.ci/test_simple_node.sh
     name: devnet (${{ matrix.name }})
     steps: &devnet-steps
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
       - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
       - name: Stop leftover nodes
@@ -294,7 +294,7 @@ jobs:
           for _ in $(seq 20); do pgrep -x 'snarkos|simple_node' > /dev/null || break; sleep 1; done
           pkill -9 -x 'snarkos|simple_node' || true
           sudo -n /usr/local/sbin/runner-netem clear
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: snarkos
           path: ${{ runner.temp }}/bin
@@ -379,9 +379,9 @@ jobs:
   machete:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
         with: { tool: cargo-machete@0.7.0 }
       - run: cargo machete
 
@@ -396,9 +396,9 @@ jobs:
       matrix:
         dir: [account, cli, display, node]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.dir }}
           save-if: ${{ github.ref == 'refs/heads/staging' }}

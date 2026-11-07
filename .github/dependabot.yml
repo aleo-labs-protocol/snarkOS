@@ -50,7 +50,3 @@ updates:
       github-actions:
         applies-to: version-updates
         patterns: [ "*" ]
-    ignore:
-      # The benchmarks workflow pins this action to the MSRV. Bump it together
-      # with `rust-version` in Cargo.toml, not to the latest Rust release.
-      - dependency-name: "dtolnay/rust-toolchain"
