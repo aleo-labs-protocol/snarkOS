@@ -31,7 +31,7 @@ The binary reads its credentials and its targets from the environment:
 | `BUCKET_URL` | yes | — | Target bucket: `gs://<bucket>` for Google Cloud Storage, or `s3://<bucket>` for an S3-compatible service. Objects go under `v0/` at the bucket's root; a path in the URL is rejected |
 | `LEDGER_PATH` | yes | — | The node's ledger directory, e.g. `~/.aleo/storage/ledger-0` |
 | `LEDGER_SECONDARY_PATH` | yes | — | A directory of its own, where RocksDB keeps the files of the read-only instance |
-| `GENESIS_PATH` | no | the network's genesis block | File holding the genesis block (as written by `snarkos start --dev`) that an empty bucket must start with |
+| `GENESIS_PATH` | no | the network's genesis block | File holding the genesis block (as written by `snarkos start --dev`) that the ledger and the bucket must start with |
 
 The bucket's credentials and other settings come from the environment variables that the
 [`object_store`](https://docs.rs/object_store) builders read:
@@ -60,17 +60,25 @@ touching the bucket.
 cargo test -p snarkos-ledger-distribution
 ```
 
-The test reads a ledger that another process keeps writing, uploads it to an in-process S3 server,
-then loads it back with `snarkos-node-cdn`, the client snarkOS nodes sync from the CDN with.
+`round_trip` reads a ledger that another process keeps writing, uploads it to an in-process S3
+server, then loads it back with `snarkos-node-cdn`, the client snarkOS nodes sync from the CDN with.
+`recovery` sets up the bucket states that an interrupted pass or a rollback of the ledger leaves
+behind, and checks that one pass repairs each.
 
 ## Procedure
 
-1. Catches up with the node's ledger, and checks its latest block height and that of the stored blocks in the bucket.
-    - If the ledger is ahead by more than 50 blocks, then continue.
-2. Read 50 blocks at a time from the ledger.
-3. Upload the 50 blocks and their checksum to the bucket.
+1. Catches up with the node's ledger, and checks its latest block height.
+2. Repairs the bucket, so that it holds complete chunks from height 0 that match the ledger:
+    - If the bucket goes past the ledger, it is left as it is until the ledger catches up.
+    - Looks down from the bucket's highest chunk file for the highest chunk that can be read and matches the ledger.
+    - If there are chunks above that one (stale after a rollback of the ledger, or broken), lowers `latest.json` to it. The upload steps below then replace those chunks in place.
+    - Uploads again any chunk below it that is missing, or missing either of its files.
+    - Fails, and changes nothing, if the ledger's first block is not the genesis block. The same goes when no chunk above the bucket's first chunk matches, if that chunk is complete and either starts with another block or cannot be read. A bucket without a complete first chunk has nothing to check, so its chunks are replaced from the ledger. An error fetching from the bucket also fails the pass, which the next pass retries.
+3. If the ledger is ahead of the chunks that match it by 50 blocks or more, reads 50 blocks at a time from the ledger.
+4. Uploads the 50 blocks and their checksum to the bucket.
     - e.g. 0.50.blocks and 0.50.blocks.sum
     - Checksum is sha256(block_bytes)
-4. Fetch the newly uploaded blocks and checksum from the bucket and check that they are equivalent to the ledger's blocks.
+5. Fetches the newly uploaded blocks and checksum from the bucket, checks that they are equivalent to the ledger's blocks, and updates `latest.json`.
+6. Corrects `latest.json` if it does not describe the bucket's highest chunk, even when nothing was uploaded.
 
 When the bucket has caught up to the ledger, it checks every 30 seconds whether it needs to upload more block chunks.

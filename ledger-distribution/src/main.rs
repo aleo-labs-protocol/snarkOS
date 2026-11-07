@@ -43,7 +43,7 @@ fn open_ledger<N: Network>() -> Result<LedgerReader<N>> {
     LedgerReader::open(ledger_path, secondary_path)
 }
 
-/// The genesis block the bucket must start with: the block in the file at `GENESIS_PATH` if it
+/// The genesis block the ledger and the bucket must start with: the block in the file at `GENESIS_PATH` if it
 /// is set, which a development network needs, and the network's genesis block otherwise.
 fn genesis_block<N: Network>() -> Result<Block<N>> {
     match env::var("GENESIS_PATH") {
@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
     // Check for dry-run flag
     let dry_run = args.iter().any(|arg| arg == "--dry-run");
     if dry_run {
-        info!("Running in DRY-RUN mode - no chunks will be removed from the bucket");
+        info!("Running in DRY-RUN mode - the bucket will not be repaired, but new chunks are still uploaded");
     }
 
     // Initialize the bucket.
