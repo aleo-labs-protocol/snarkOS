@@ -323,6 +323,11 @@ pub struct Start {
     #[clap(long, requires = "metrics")]
     pub metrics_ip: Option<SocketAddr>,
 
+    /// Send transaction events as JSON over UDP to the given address, e.g. 127.0.0.1:9150
+    #[cfg(feature = "metrics")]
+    #[clap(long)]
+    pub tx_events: Option<SocketAddr>,
+
     /// Specify the directory that holds all ledger data, e.g., blocks and transactions.
     /// This flag overrides the default path, even when `--dev` is set.
     ///
@@ -953,6 +958,17 @@ impl Start {
         #[cfg(feature = "metrics")]
         if self.metrics {
             metrics::initialize_metrics(self.metrics_ip);
+        }
+        #[cfg(feature = "metrics")]
+        if let Some(target) = self.tx_events {
+            let ntype = match node_type {
+                NodeType::Client => "client",
+                NodeType::Prover => "prover",
+                NodeType::Validator => "validator",
+                NodeType::BootstrapClient => "bootstrap_client",
+            };
+            metrics::tx_events::initialize(target, N::SHORT_NAME, account.address().to_string(), ntype)
+                .with_context(|| format!("Failed to start sending transaction events to {target}"))?;
         }
 
         // Determine whether to generate background transactions in dev mode.

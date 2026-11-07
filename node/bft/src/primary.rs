@@ -758,10 +758,29 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
                         let current_block_height = self.ledger.latest_block_height();
                         let consensus_version = N::CONSENSUS_VERSION(current_block_height)?;
 
+                        #[cfg(feature = "metrics")]
+                        let kind = metrics::transaction_kind(&transaction);
+                        #[cfg(feature = "metrics")]
+                        let emit_dropped = move |reason: metrics::tx_events::Reason| {
+                            if let Some(events) = metrics::tx_events::get() {
+                                events.emit(metrics::tx_events::TxEvent {
+                                    kind: Some(kind),
+                                    reason: Some(reason),
+                                    ..metrics::tx_events::TxEvent::new::<N>(
+                                        metrics::tx_events::Ev::ProposeDropped,
+                                        &transaction_id,
+                                        Some(checksum),
+                                    )
+                                });
+                            }
+                        };
+
                         // Compute the transaction spent cost (in microcredits).
                         // Note: We purposefully discard this transaction if we are unable to compute the spent cost.
                         let Ok(cost) = self.ledger.transaction_spend_in_microcredits(&transaction, consensus_version)
                         else {
+                            #[cfg(feature = "metrics")]
+                            emit_dropped(metrics::tx_events::Reason::SpendCost);
                             debug!(
                                 "Proposing - Skipping and discarding transaction '{}' - Unable to compute transaction spent cost",
                                 fmt_id(transaction_id)
@@ -774,7 +793,7 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
                         let timer = metrics::TransactionCheckTimer::start("propose_batch", &transaction);
                         let result = self.ledger.check_transaction_basic(transaction_id, transaction).await;
                         #[cfg(feature = "metrics")]
-                        timer.finish(&result);
+                        timer.finish_and_emit::<N, _, _>(&result, &transaction_id, Some(checksum));
                         if let Err(e) = result {
                             trace!("Proposing - Skipping transaction '{}' - {e}", fmt_id(transaction_id));
                             continue;
@@ -783,6 +802,8 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
                         // Compute the next proposal cost.
                         // Note: We purposefully discard this transaction if the proposal cost overflows.
                         let Some(next_proposal_cost) = proposal_cost.checked_add(cost) else {
+                            #[cfg(feature = "metrics")]
+                            emit_dropped(metrics::tx_events::Reason::SpendOverflow);
                             debug!(
                                 "Proposing - Skipping and discarding transaction '{}' - Proposal cost overflowed",
                                 fmt_id(transaction_id)
@@ -859,6 +880,9 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
             }
         })?;
 
+        #[cfg(feature = "metrics")]
+        let proposed = metrics::tx_events::get()
+            .map(|events| (events, batch_header.transmission_ids().iter().copied().collect::<Vec<_>>()));
         // Broadcast the batch to all validators for signing, until the round is over.
         // Note: `round` may be stale by now, as proposing awaits; peers still sign for the previous round,
         // so the broadcast is scoped to the current round instead.
@@ -873,6 +897,18 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
         #[cfg(feature = "metrics")]
         {
             *self.batch_propose_start.lock() = Some(Instant::now());
+        }
+        drop(lock_guard);
+        #[cfg(feature = "metrics")]
+        if let Some((events, transmission_ids)) = proposed {
+            let extra = metrics::tx_events::json!({ "round": round });
+            events.emit_all(transmission_ids.iter().filter_map(|transmission_id| {
+                metrics::tx_events::TxEvent::for_transmission(
+                    metrics::tx_events::Ev::Proposed,
+                    transmission_id,
+                    extra.clone(),
+                )
+            }));
         }
 
         Ok(true)
@@ -1845,6 +1881,8 @@ impl<N: Network> Primary<N> {
 
         // Broadcast the certified batch to all validators.
         self.gateway.broadcast(Event::BatchCertified(certificate.clone().into()));
+        #[cfg(feature = "metrics")]
+        emit_certified(&certificate);
 
         // If a BFT sender was provided, send the certificate to the BFT.
         if let Some(cb) = self.primary_callback.get() {
@@ -1944,6 +1982,8 @@ impl<N: Network> Primary<N> {
         }
 
         debug!("Stored a batch certificate for round {batch_round} from '{peer_ip}'");
+        #[cfg(feature = "metrics")]
+        emit_certified(&certificate);
         // If a BFT sender was provided, send the round and certificate to the BFT.
         if let Some(cb) = self.primary_callback.get() {
             cb.add_new_certificate(certificate).await.with_context(|| "Failed to update the DAG from sync")?;
@@ -2207,6 +2247,22 @@ impl<N: Network> Primary<N> {
         }
         // Close the gateway.
         self.gateway.shut_down().await;
+    }
+}
+
+/// Emits a `certified` transaction event for each transaction in the stored certificate.
+#[cfg(feature = "metrics")]
+fn emit_certified<N: Network>(certificate: &BatchCertificate<N>) {
+    if let Some(events) = metrics::tx_events::get() {
+        let extra =
+            metrics::tx_events::json!({ "round": certificate.round(), "author": certificate.author().to_string() });
+        events.emit_all(certificate.transmission_ids().iter().filter_map(|transmission_id| {
+            metrics::tx_events::TxEvent::for_transmission(
+                metrics::tx_events::Ev::Certified,
+                transmission_id,
+                extra.clone(),
+            )
+        }));
     }
 }
 

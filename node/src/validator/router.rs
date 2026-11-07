@@ -299,8 +299,29 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Validator<N, C> {
         serialized: UnconfirmedTransaction<N>,
         transaction: Transaction<N>,
     ) -> bool {
+        #[cfg(feature = "metrics")]
+        let transaction_id = serialized.transaction_id;
+        #[cfg(feature = "metrics")]
+        let (kind, checksum) = (
+            snarkos_node_metrics::transaction_kind(&transaction),
+            snarkos_node_metrics::tx_events::get().and_then(|_| serialized.transaction.to_checksum::<N>().ok()),
+        );
         // Add the unconfirmed transaction to the memory pool.
         if let Err(error) = self.consensus.add_unconfirmed_transaction(transaction).await {
+            #[cfg(feature = "metrics")]
+            if let (Some(events), Some(refused)) =
+                (snarkos_node_metrics::tx_events::get(), error.downcast_ref::<snarkos_node_consensus::MempoolRefused>())
+            {
+                events.emit(snarkos_node_metrics::tx_events::TxEvent {
+                    kind: Some(kind),
+                    reason: Some(refused.reason),
+                    ..snarkos_node_metrics::tx_events::TxEvent::new::<N>(
+                        snarkos_node_metrics::tx_events::Ev::MempoolRefused,
+                        &transaction_id,
+                        checksum,
+                    )
+                });
+            }
             trace!("[UnconfirmedTransaction] {error}");
             return true; // Maintain the connection.
         }
@@ -308,11 +329,7 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Validator<N, C> {
         // Propagate the "UnconfirmedTransaction" to the connected validators.
         self.propagate_to_validators(message, &[peer_ip]);
         #[cfg(feature = "metrics")]
-        snarkos_node_metrics::increment_counter_1(
-            snarkos_node_metrics::router::UNCONFIRMED_TRANSACTIONS_PROPAGATED,
-            "site",
-            "validator",
-        );
+        snarkos_node_metrics::record_transaction_propagated::<N>("validator", &transaction_id, checksum);
         true
     }
 }
