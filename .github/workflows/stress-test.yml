@@ -20,7 +20,7 @@
 #   secret              ANTHROPIC_API_KEY            optional: the comparison summary
 #   variable            STRESS_MANAGER_HOST_KEY      the Gauntlet host's ssh host key line
 #   variable            STRESS_RELEASE_TESTS / STRESS_RELEASE_VALIDATORS   what a release runs
-name: Stress test
+name: "Gauntlet: Stress test"
 
 on:
   workflow_dispatch:
