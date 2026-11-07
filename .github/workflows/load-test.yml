@@ -3,7 +3,7 @@
 # A form for the replay_stockpile test. stress-test.yml does the rest: approval in
 # the stress-test environment, the run, and the "stress-test" check on the commit.
 # Gauntlet owns the defaults: this sends only what's filled in.
-name: Load test
+name: "Gauntlet: Load test"
 
 on:
   workflow_dispatch:
@@ -51,6 +51,11 @@ on:
         description: "Share of the transactions sent that must land. Empty: Gauntlet's default."
         required: false
         default: ""
+      packet_loss:
+        description: "Percent of P2P packets every node drops while sending; on the wire it comes in bursts. Inclusion is then reported, not judged. Not with a ramp."
+        type: choice
+        options: ["0", "1", "5", "10", "20", "30", "50", "70"]
+        default: "0"
 
 jobs:
   load:
@@ -67,10 +72,11 @@ jobs:
       validators: ${{ inputs.validators }}
       network: ${{ startsWith(inputs.stockpile, 'mainnet-') && 'mainnet' || 'testnet' }}
       params: >-
-        ${{ format('stockpile={0}{1}{2}{3}{4}{5}{6}', inputs.stockpile,
+        ${{ format('stockpile={0}{1}{2}{3}{4}{5}{6}{7}', inputs.stockpile,
         inputs.rate && format(',rate={0}', inputs.rate) || '',
         inputs.duration && format(',duration={0}', inputs.duration) || '',
         inputs.ramp && format(',ramp={0}', inputs.ramp) || '',
         inputs.targets != 'default' && format(',targets={0}', inputs.targets) || '',
         inputs.replay_mode != 'default' && format(',replay_mode={0}', inputs.replay_mode) || '',
-        inputs.min_inclusion && format(',min_inclusion={0}', inputs.min_inclusion) || '') }}
+        inputs.min_inclusion && format(',min_inclusion={0}', inputs.min_inclusion) || '',
+        inputs.packet_loss != '0' && format(',packet_loss={0}', inputs.packet_loss) || '') }}
