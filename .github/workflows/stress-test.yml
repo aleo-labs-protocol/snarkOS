@@ -5,7 +5,8 @@
 # sees the result.
 #
 #   start   "Run workflow", load-test.yml, or a release whose CI passed: approval
-#           in the stress-test environment, then queue the run on the Gauntlet host.
+#           in the stress-test environment, then start the Gauntlet host, which stops
+#           itself when idle, and queue the run on it.
 #   follow  poll the Gauntlet host every 5 minutes and keep the check up to date.
 #           GitHub stops a job at 6h, so a longer run hands off to a fresh
 #           dispatch of this workflow, which follows the same run without
@@ -15,7 +16,8 @@
 # Connect Endpoint, and these settings. Actions logs are public, so anything
 # naming the cloud account is a secret, held in the stress-test and
 # stress-test-status environments so that only this job on staging can read it:
-#   environment secret  STRESS_ROLE_ARN              the role
+#   environment secret  STRESS_ROLE_ARN              the role; in stress-test-status, one that
+#                                                    can't start a run
 #   environment secret  STRESS_MANAGER_INSTANCE_ID   the Gauntlet host
 #   secret              ANTHROPIC_API_KEY            optional: the comparison summary
 #   variable            STRESS_MANAGER_HOST_KEY      the Gauntlet host's ssh host key line
@@ -89,6 +91,7 @@ jobs:
       MANAGER: ${{ secrets.STRESS_MANAGER_INSTANCE_ID }}
       ROLE_ARN: ${{ secrets.STRESS_ROLE_ARN }}
       HOST_KEY: ${{ vars.STRESS_MANAGER_HOST_KEY }}
+      GATE_USER: ${{ inputs.follow_run_id == '' && 'gha-gauntlet' || 'gha-gauntlet-status' }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - name: Resolve the request
@@ -142,9 +145,9 @@ jobs:
           : "${ROLE_ARN:?STRESS_ROLE_ARN must be configured}"
           # AWS errors quote ARNs that differ from the secret, so mask the account too.
           echo "::add-mask::$(cut -d: -f5 <<<"$ROLE_ARN")"
-          # The Gauntlet host's gha-gauntlet user can only run the gate: enqueue, status,
-          # report and cancel. Each connection pushes a key that lives 60 seconds, through the
-          # Instance Connect Endpoint.
+          # The Gauntlet host's gate users can only run the gate: gha-gauntlet enqueue, status,
+          # report and cancel, and gha-gauntlet-status all but enqueue. Each connection pushes a
+          # key that lives 60 seconds, through the Instance Connect Endpoint.
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/stress
           : "${HOST_KEY:?STRESS_MANAGER_HOST_KEY must be configured}"
@@ -166,10 +169,35 @@ jobs:
           gate() {
             aws_login
             aws ec2-instance-connect send-ssh-public-key --instance-id "$MANAGER" \
-              --instance-os-user gha-gauntlet --ssh-public-key "file://$HOME/.ssh/stress.pub" >/dev/null
+              --instance-os-user "$GATE_USER" --ssh-public-key "file://$HOME/.ssh/stress.pub" >/dev/null
             ssh -i ~/.ssh/stress -o BatchMode=yes -o StrictHostKeyChecking=yes \
               -o "ProxyCommand=aws ec2-instance-connect open-tunnel --instance-id $MANAGER" \
-              "gha-gauntlet@$MANAGER" "$@"
+              "$GATE_USER@$MANAGER" "$@"
+          }
+          # Starts the host, which stops itself when idle, until its gate answers. A host that is
+          # stopping is started once stopped, and holds the gate's lock until then. EC2 may have no
+          # capacity for it for a while.
+          start_host() {
+            local error="" rc
+            aws_login
+            for _ in {1..100}; do
+              if aws ec2 start-instances --instance-ids "$MANAGER" >/dev/null 2> start.err; then
+                rc=0; gate status "$RUN_ID" >/dev/null 2> probe.err || rc=$?
+                (( rc == 255 )) || grep -q 'undergoing maintenance' probe.err || return 0
+              fi
+              # Only the error's code: its message names the instance type and zone.
+              error="$(sed -n 's/.*An error occurred (\([A-Za-z.]*\)).*/\1/p' start.err)"
+              case "$error" in
+                ''|IncorrectInstanceState|InsufficientInstanceCapacity|VcpuLimitExceeded) sleep 15 ;;
+                *) echo "::error::could not start the Gauntlet host: ${error}"; return 1 ;;
+              esac
+            done
+            case "$error" in
+              InsufficientInstanceCapacity|VcpuLimitExceeded)
+                echo "::error::EC2 had no capacity to start the Gauntlet host"; touch no-capacity ;;
+              *) echo "::error::the Gauntlet host did not answer: $(tail -n 1 probe.err)" ;;
+            esac
+            return 1
           }
           EOF
 
@@ -189,6 +217,14 @@ jobs:
           fi
           echo "id=$CHECK_ID" >> "$GITHUB_OUTPUT"
 
+      - name: Start the Gauntlet host
+        if: steps.req.outputs.follow == 'false'
+        env:
+          RUN_ID: ${{ steps.req.outputs.run_id }}
+        run: |
+          source "$RUNNER_TEMP/gate.sh"
+          start_host
+
       - name: Queue the run
         if: steps.req.outputs.follow == 'false'
         env:
@@ -203,7 +239,12 @@ jobs:
           source "$RUNNER_TEMP/gate.sh"
           # Only a rejection's message reaches the check.
           trap 'cat enqueue.err >&2; sed -n "s/^rejected: //p" enqueue.err | head -c 2000 > rejected.txt' EXIT
-          gate enqueue "$RUN_ID" "$COMMIT" "$TESTS" "$VALIDATORS" "$NETWORK" "$ACTOR" "$PARAMS" 2> enqueue.err
+          request=(enqueue "$RUN_ID" "$COMMIT" "$TESTS" "$VALIDATORS" "$NETWORK" "$ACTOR" "$PARAMS")
+          rc=0; gate "${request[@]}" 2> enqueue.err || rc=$?
+          # The host may have begun stopping since it was started: start it again, once.
+          (( rc )) && grep -q 'undergoing maintenance' enqueue.err || exit "$rc"
+          start_host || { : > enqueue.err; exit 1; }
+          gate "${request[@]}" 2> enqueue.err
 
       - name: Follow the run
         id: follow
@@ -223,6 +264,9 @@ jobs:
               [[ "$(jq -r .state status.json)" == finished ]] && break
             else
               echo "::warning::could not read the run's status: $(cat status.err)"
+              # It stops only once a run is over, so a late follow-on job may find it stopped.
+              [[ "$(aws ec2 describe-instances --instance-ids "$MANAGER" --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null)" != stopped ]] \
+                || start_host || { rm -f no-capacity; exit 1; }
             fi
             if (( $(date +%s) > deadline )); then
               echo "handoff=true" >> "$GITHUB_OUTPUT"
@@ -360,6 +404,13 @@ jobs:
         env:
           CHECK_ID: ${{ steps.check.outputs.id }}
         run: |
+          if [[ -f no-capacity ]]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_ID" \
+              -f status=completed -f conclusion=action_required \
+              -f 'output[title]=No capacity for the Gauntlet host' \
+              -f "output[summary]=EC2 had no capacity to start the Gauntlet host, so no run started and nothing was tested. Run the workflow again later." >/dev/null
+            exit 0
+          fi
           if [[ -s rejected.txt ]]; then
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_ID" \
               -f status=completed -f conclusion=failure \
