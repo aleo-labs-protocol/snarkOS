@@ -567,7 +567,7 @@ async fn record_rest_request(request: Request<Body>, next: middleware::Next) -> 
 const V1_DEPRECATION_TIMESTAMP: i64 = 1_794_096_000;
 
 /// Where a v1 client learns how to migrate to v2.
-const V1_MIGRATION_GUIDE_URL: &str = "https://github.com/aleo-labs-protocol/snarkOS/pull/XXXX";
+const V1_MIGRATION_GUIDE_URL: &str = "https://github.com/aleo-labs-protocol/snarkOS/pull/4650";
 
 /// The `Deprecation` response header field (RFC 9745).
 const DEPRECATION: HeaderName = HeaderName::from_static("deprecation");
