@@ -1,7 +1,8 @@
 # Copy to aleo-labs-protocol/snarkOS as .github/workflows/load-test.yml.
 #
 # A form for the replay_stockpile test. stress-test.yml does the rest: approval in
-# the stress-test environment, the run, and the "stress-test" check on the commit.
+# the stress-test environment and queueing the run, which the Gauntlet host reports
+# as the "stress-test" check on the commit. Its secrets are the environment's.
 # Gauntlet owns the defaults: this sends only what's filled in.
 name: "Gauntlet: Load test"
 
@@ -61,11 +62,8 @@ jobs:
   load:
     permissions:
       id-token: write
-      checks: write
-      actions: write
       contents: read
     uses: ./.github/workflows/stress-test.yml
-    secrets: inherit
     with:
       commit: ${{ inputs.commit }}
       tests: replay_stockpile

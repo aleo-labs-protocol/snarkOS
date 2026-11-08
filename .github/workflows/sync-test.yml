@@ -1,23 +1,21 @@
 # Copy to aleo-labs-protocol/snarkOS as .github/workflows/sync-test.yml, on staging.
 #
 # Runs catch_up on the sync host, a Gauntlet host of its own: a client with the CDN and one
-# without start from the last release's ledger and must reach the tip. Reports it as the
-# "sync-test" check on the commit. The host owns the defaults: this sends only what's filled in.
+# without start from the last release's ledger and must reach the tip. With ab, the second client
+# runs the network's last release, with the CDN, and the check compares their catch-up rates. The
+# host owns the defaults: this sends only what's filled in.
 #
-#   start   "Run workflow": approval in the sync-test environment, then start the sync host
-#           if it's stopped and queue the run through its gate, which takes only sync tests.
-#   follow  poll the sync host every 5 minutes and keep the check up to date. GitHub stops
-#           a job at 6h, so a longer run hands off to a fresh dispatch of this workflow, in
-#           sync-test-status, which follows the same run without asking for approval again.
+# "Run workflow": approval in the sync-test environment, then start the sync host if it's stopped
+# and queue the run through its gate, which takes only sync tests. The host reports the run as the
+# "sync-test" check on the commit, through its App, so this job ends once the run is queued.
+# gauntlet-report.yml adds the report when it finishes.
 #
 # It needs an IAM role that only this file on staging can assume, an Instance Connect
-# Endpoint, and these settings, in both environments:
-#   environment secret    STRESS_ROLE_ARN              the role; in sync-test-status, one that
-#                                                      can't start a run
+# Endpoint, and these settings, in the sync-test environment:
+#   environment secret    STRESS_ROLE_ARN              the role
 #   environment secret    STRESS_MANAGER_INSTANCE_ID   the sync host
 #   environment variable  STRESS_MANAGER_HOST_KEY      the sync host's ssh host key line, over
 #                                                      the repository's, Gauntlet's
-# and optionally the secret ANTHROPIC_API_KEY, for the comparison summary.
 name: "Gauntlet: Sync test"
 
 on:
@@ -36,15 +34,13 @@ on:
         description: "If it passes, keep the ledger it reached as this release's (a release candidate)"
         type: boolean
         default: false
+      ab:
+        description: "A/B: run the network's last release beside it, on the same ledger with the CDN, and compare catch-up rates. Skips --nocdn"
+        type: boolean
+        default: false
       params:
         description: "Test parameter overrides, e.g. deadline_hours=12"
         required: false
-        default: ""
-      follow_run_id:
-        description: "Internal: keep following this run"
-        default: ""
-      check_run_id:
-        description: "Internal: the check to update"
         default: ""
 
 permissions:
@@ -54,22 +50,20 @@ jobs:
   sync:
     if: github.repository == 'aleo-labs-protocol/snarkOS'
     runs-on: ubuntu-latest
-    # Approval gates starting a run; following one needs none.
-    environment: ${{ inputs.follow_run_id == '' && 'sync-test' || 'sync-test-status' }}
-    timeout-minutes: 355
+    environment: sync-test
+    # Past start_host's longest wait, twice: the enqueue may start the host again. Billed only if it waits.
+    timeout-minutes: 90
     permissions:
       id-token: write
-      checks: write
-      actions: write
       contents: read
     env:
       AWS_REGION: us-west-2
+      # ab's release lookup: read-only, as the job's permissions say.
       GH_TOKEN: ${{ github.token }}
       MANAGER: ${{ secrets.STRESS_MANAGER_INSTANCE_ID }}
       ROLE_ARN: ${{ secrets.STRESS_ROLE_ARN }}
       HOST_KEY: ${{ vars.STRESS_MANAGER_HOST_KEY }}
-      GATE_USER: ${{ inputs.follow_run_id == '' && 'gha-gauntlet' || 'gha-gauntlet-status' }}
-      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      GATE_USER: gha-gauntlet
     steps:
       - name: Resolve the request
         id: req
@@ -77,34 +71,39 @@ jobs:
           IN_COMMIT: ${{ inputs.commit }}
           IN_NETWORK: ${{ inputs.network }}
           IN_SAVE: ${{ inputs.save }}
+          IN_AB: ${{ inputs.ab }}
           IN_PARAMS: ${{ inputs.params }}
-          IN_FOLLOW: ${{ inputs.follow_run_id }}
-          IN_CHECK: ${{ inputs.check_run_id }}
           ACTOR: ${{ github.triggering_actor }}
         run: |
           commit="${IN_COMMIT:-$GITHUB_SHA}" params="$IN_PARAMS"
           [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::commit must be a full 40-character SHA"; exit 1; }
           # save is a param, so the gate and the host carry it as they are.
           [[ "$IN_SAVE" != true ]] || params="save=true${params:+,$params}"
-          run_id="${IN_FOLLOW:-gh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}}"
-          [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || exit 1
-          if [[ -n "$IN_FOLLOW" ]]; then
-            [[ "$IN_CHECK" =~ ^[0-9]+$ ]] || exit 1
-            gh api "repos/$GITHUB_REPOSITORY/check-runs/$IN_CHECK" > check.json
-            jq -e --arg run "$run_id" --arg sha "$commit" \
-              '.name == "sync-test" and .external_id == $run and .head_sha == $sha' check.json >/dev/null
-          else
-            [[ -z "$IN_CHECK" ]] || exit 1
+          # The A/B's baseline: the network's highest published release, testnet-vX.Y.Z
+          # or vX.Y.Z. Not by date or prerelease flag: neither tells the networks' releases apart.
+          if [[ "$IN_AB" == true ]]; then
+            [[ "$IN_SAVE" != true ]] || { echo "::error::ab and save don't go together: an A/B skips --nocdn"; exit 1; }
+            [[ ",$IN_PARAMS" != *,baseline=* ]] || { echo "::error::ab fills in baseline itself: drop baseline= from params"; exit 1; }
+            prefix=v
+            [[ "$IN_NETWORK" != testnet ]] || prefix=testnet-v
+            tag="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" | jq -r --arg p "$prefix" '[.[] | select(.draft | not) | .tag_name
+              | select(startswith($p)) | ltrimstr($p) | select(test("^[0-9]+[.][0-9]+[.][0-9]+$"))] | max_by(split(".") | map(tonumber)) // empty
+              | $p + .')"
+            [[ -n "$tag" ]] || { echo "::error::no ${IN_NETWORK} release to compare with"; exit 1; }
+            baseline="$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)" && [[ "$baseline" =~ ^[0-9a-f]{40}$ ]] \
+              || { echo "::error::could not find the commit of ${tag}, ${IN_NETWORK}'s last release"; exit 1; }
+            params="baseline=${baseline}${params:+,$params}"
+            echo "A/B against ${IN_NETWORK}'s last release, ${tag} (\`${baseline}\`)" >> "$GITHUB_STEP_SUMMARY"
           fi
-          for value in "$IN_NETWORK" "$params" "$run_id" "$IN_CHECK" "$ACTOR"; do
+          for value in "$IN_NETWORK" "$params" "$ACTOR"; do
             [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || {
               echo "::error::request values must be single-line"
               exit 1
             }
           done
           {
-            echo "commit=$commit"; echo "network=$IN_NETWORK"; echo "params=$params"; echo "run_id=$run_id"
-            echo "check_id=$IN_CHECK"; echo "actor=$ACTOR"; echo "follow=$([[ -n "$IN_FOLLOW" ]] && echo true || echo false)"
+            echo "commit=$commit"; echo "network=$IN_NETWORK"; echo "params=$params"
+            echo "run_id=gh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"; echo "actor=$ACTOR"
           } >> "$GITHUB_OUTPUT"
 
       - name: Connect to the sync host
@@ -113,15 +112,15 @@ jobs:
           : "${ROLE_ARN:?STRESS_ROLE_ARN must be configured}"
           # AWS errors quote ARNs that differ from the secret, so mask the account too.
           echo "::add-mask::$(cut -d: -f5 <<<"$ROLE_ARN")"
-          # The sync host's gate users can only run the gate: gha-gauntlet enqueue-sync, status,
-          # report and cancel, and gha-gauntlet-status all but enqueue-sync. Each connection
-          # pushes a key that lives 60 seconds, through the Instance Connect Endpoint.
+          # The sync host's gate users can only run the gate, and gha-gauntlet-status can't start
+          # a run. Each connection pushes a key that lives 60 seconds, through the Instance
+          # Connect Endpoint.
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/stress
           : "${HOST_KEY:?STRESS_MANAGER_HOST_KEY must be configured}"
           printf '%s %s\n' "$MANAGER" "$HOST_KEY" > ~/.ssh/known_hosts
           cat > "$RUNNER_TEMP/gate.sh" <<'EOF'
-          # AWS credentials from GitHub's OIDC token, fresh for every call: a run
+          # AWS credentials from GitHub's OIDC token, fresh for every call: starting the host
           # can outlast the role's one-hour session.
           aws_login() {
             local token creds
@@ -169,24 +168,7 @@ jobs:
           }
           EOF
 
-      - name: Open the check
-        id: check
-        env:
-          COMMIT: ${{ steps.req.outputs.commit }}
-          RUN_ID: ${{ steps.req.outputs.run_id }}
-          CHECK_ID: ${{ steps.req.outputs.check_id }}
-        run: |
-          if [[ -z "$CHECK_ID" ]]; then
-            CHECK_ID="$(gh api "repos/$GITHUB_REPOSITORY/check-runs" \
-              -f name=sync-test -f head_sha="$COMMIT" -f status=in_progress \
-              -f details_url="$RUN_URL" -f external_id="$RUN_ID" \
-              -f 'output[title]=Queued' -f "output[summary]=Run \`$RUN_ID\` is queued on the sync host." \
-              --jq .id)"
-          fi
-          echo "id=$CHECK_ID" >> "$GITHUB_OUTPUT"
-
       - name: Start the sync host
-        if: steps.req.outputs.follow == 'false'
         env:
           RUN_ID: ${{ steps.req.outputs.run_id }}
         run: |
@@ -194,7 +176,6 @@ jobs:
           start_host
 
       - name: Queue the run
-        if: steps.req.outputs.follow == 'false'
         env:
           COMMIT: ${{ steps.req.outputs.commit }}
           NETWORK: ${{ steps.req.outputs.network }}
@@ -203,201 +184,25 @@ jobs:
           ACTOR: ${{ steps.req.outputs.actor }}
         run: |
           source "$RUNNER_TEMP/gate.sh"
-          # Only a rejection's message reaches the check.
+          # Only a rejection's message reaches the summary.
           trap 'cat enqueue.err >&2; sed -n "s/^rejected: //p" enqueue.err | head -c 2000 > rejected.txt' EXIT
           request=(enqueue-sync "$RUN_ID" "$COMMIT" "$NETWORK" "$ACTOR" "$PARAMS")
           rc=0; gate "${request[@]}" 2> enqueue.err || rc=$?
           # The host may have begun stopping since it was started: start it again, once.
-          (( rc )) && grep -q 'undergoing maintenance' enqueue.err || exit "$rc"
-          start_host || { : > enqueue.err; exit 1; }
-          gate "${request[@]}" 2> enqueue.err
-
-      - name: Follow the run
-        id: follow
-        env:
-          RUN_ID: ${{ steps.req.outputs.run_id }}
-          CHECK_ID: ${{ steps.check.outputs.id }}
-          COMMIT: ${{ steps.req.outputs.commit }}
-        run: |
-          source "$RUNNER_TEMP/gate.sh"
-          deadline=$(( $(date +%s) + 5 * 3600 + 30 * 60 ))
-          while :; do
-            if gate status "$RUN_ID" > status.json 2> status.err && jq -e .state status.json >/dev/null; then
-              jq -e --arg run "$RUN_ID" --arg sha "$COMMIT" \
-                '.run_id == $run and .result.commit == $sha' status.json >/dev/null
-              jq '{output: {title: .title, summary: .summary}}' status.json \
-                | gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_ID" --input - >/dev/null
-              [[ "$(jq -r .state status.json)" == finished ]] && break
-            else
-              echo "::warning::could not read the run's status: $(cat status.err)"
-              # It stops only once a run is over, so a late follow-on job may find it stopped.
-              [[ "$(aws ec2 describe-instances --instance-ids "$MANAGER" --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null)" != stopped ]] \
-                || start_host || { rm -f no-capacity; exit 1; }
-            fi
-            if (( $(date +%s) > deadline )); then
-              echo "handoff=true" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            sleep 300
-          done
-          echo "handoff=false" >> "$GITHUB_OUTPUT"
-
-      - name: Hand off to a fresh job
-        if: steps.follow.outputs.handoff == 'true'
-        env:
-          RUN_ID: ${{ steps.req.outputs.run_id }}
-          CHECK_ID: ${{ steps.check.outputs.id }}
-          COMMIT: ${{ steps.req.outputs.commit }}
-        run: |
-          gh workflow run sync-test.yml --repo "$GITHUB_REPOSITORY" --ref staging \
-            -f follow_run_id="$RUN_ID" -f check_run_id="$CHECK_ID" -f commit="$COMMIT"
-          echo "Still running after 5h30m; a new run of this workflow keeps following \`$RUN_ID\`." >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Compare with the last passing run (Claude)
-        id: claude
-        continue-on-error: true
-        if: steps.follow.outputs.handoff == 'false'
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          [[ -n "$ANTHROPIC_API_KEY" ]] || { echo "No ANTHROPIC_API_KEY; skipping."; exit 0; }
-          [[ "$(jq -r '.previous != null' status.json)" == true ]] || { echo "No earlier passing run to compare with."; exit 0; }
-          jq -n --slurpfile s status.json '{
-            model: "claude-opus-5-5",
-            max_tokens: 16000,
-            output_config: {effort: "medium"},
-            fallbacks: "default",
-            system: "You review snarkOS stress test results for the engineers deciding whether to tag a release. Compare this run with the last passing run of the same tests. Point out regressions, notable changes in durations or metrics, and anything that looks suspicious even if it passed. Do not restate the results table. Use at most 150 words of GitHub markdown, bullets preferred.",
-            messages: [{role: "user", content: ("This run:\n" + ($s[0].result | tojson) + "\n\nLast passing run:\n" + ($s[0].previous | tojson))}]
-          }' > request.json
-          curl --fail --connect-timeout 15 --max-time 120 -sS https://api.anthropic.com/v1/messages \
-            -H "content-type: application/json" \
-            -H "x-api-key: $ANTHROPIC_API_KEY" \
-            -H "anthropic-version: 2026-10-21" \
-            -H "anthropic-beta: server-side-fallback-2026-07-01" \
-            -d @request.json > response.json || { echo "::warning::Claude request failed"; exit 0; }
-          if [[ "$(jq -r .stop_reason response.json)" != end_turn ]]; then
-            echo "::warning::no summary (stop_reason: $(jq -r '.stop_reason // .error.message' response.json))"
-            exit 0
+          if (( rc )); then
+            grep -q 'undergoing maintenance' enqueue.err || exit "$rc"
+            start_host || { : > enqueue.err; exit 1; }
+            gate "${request[@]}" 2> enqueue.err
           fi
-          jq -r '[.content[] | select(.type == "text") | .text] | join("\n")' response.json > claude.md
-
-      - name: Export the interactive report
-        id: export
-        if: steps.follow.outputs.handoff == 'false'
-        continue-on-error: true
-        env:
-          RUN_ID: ${{ steps.req.outputs.run_id }}
-        run: |
-          source "$RUNNER_TEMP/gate.sh"
-          mkdir -p report
-          gate report "$RUN_ID" html > report/report.html
-          gate report "$RUN_ID" json > report/report.json
-          jq -e --arg run "$RUN_ID" '.schema_version == 1 and .run.run_id == $run' report/report.json >/dev/null
-          # Artifacts bypass GitHub log masking.
-          python3 - <<'PY'
-          import ipaddress
-          import os
-          import re
-          from pathlib import Path
-
-          secrets = (os.environ["MANAGER"], os.environ["ROLE_ARN"], os.environ["ROLE_ARN"].split(":")[4])
-          cloud = re.compile(
-              r"\barn:|\bi-[0-9a-f]{8,17}\b|"
-              r"\b(?:[a-z0-9-]+\.)+(?:compute(?:-\d+)?\.amazonaws\.com(?:\.cn)?|compute\.internal|ec2\.internal)\b",
-              re.IGNORECASE)
-          addresses = re.compile(
-              r"(?<![\w:])(?:[a-f\d]{0,4}:){2,}[a-f\d:.]*(?:%[\w.-]+)?(?![\w:])|"
-              r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])", re.IGNORECASE)
-          for name in ("report.html", "report.json"):
-              content = Path("report", name).read_text()
-              blocked = any(value and value in content for value in secrets) or cloud.search(content)
-              for match in addresses.finditer(content):
-                  try:
-                      ipaddress.ip_address(match[0])
-                  except ValueError:
-                      continue
-                  blocked = True
-                  break
-              if blocked:
-                  raise SystemExit("::warning::Interactive report contains infrastructure identifiers; skipping upload.")
-          PY
-
-      - name: Upload the report
-        id: artifact
-        if: steps.follow.outputs.handoff == 'false' && steps.export.outcome == 'success'
-        continue-on-error: true
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: sync-test-${{ steps.req.outputs.run_id }}
-          path: |
-            report/report.html
-            report/report.json
-          retention-days: 14
-          if-no-files-found: error
-
-      - name: Close the check
-        if: steps.follow.outputs.handoff == 'false'
-        env:
-          CHECK_ID: ${{ steps.check.outputs.id }}
-          REPORT_URL: ${{ steps.artifact.outputs.artifact-url }}
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          state = json.loads(Path("status.json").read_text())
-          summary = state["summary"]
-          if url := os.environ.get("REPORT_URL"):
-              summary = f"[Download interactive report + JSON]({url}) · Unzip and open report.html locally.\n\n" + summary
-          extra = Path("claude.md")
-          if extra.is_file():
-              note = "\n\n### Compared with the last passing run (Claude)\n\n" + extra.read_text()
-              if len((summary + note).encode()) <= 65535:
-                  summary += note
-          Path("check.json").write_text(json.dumps({"status": "completed", "conclusion": state["conclusion"],
-                                                  "output": {"title": state["title"], "summary": summary}}))
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as out:
-              out.write(summary + "\n")
-          PY
-          gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_ID" --input check.json >/dev/null
-          [[ "$(jq -r .verdict status.json)" == pass ]]
+          echo "Queued \`$RUN_ID\`. The sync-test check on \`${COMMIT:0:10}\` reports it." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Report a rejection or an orchestration failure
-        if: failure() && steps.check.outputs.id != '' && steps.follow.outputs.handoff != 'false'
-        env:
-          CHECK_ID: ${{ steps.check.outputs.id }}
+        if: failure() && steps.req.outcome == 'success'
         run: |
           if [[ -f no-capacity ]]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_ID" \
-              -f status=completed -f conclusion=action_required \
-              -f 'output[title]=No capacity for the sync host' \
-              -f "output[summary]=EC2 had no capacity to start the sync host, so no run started and nothing was tested. Run the workflow again later." >/dev/null
-            exit 0
-          fi
-          if [[ -s rejected.txt ]]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_ID" \
-              -f status=completed -f conclusion=failure \
-              -f 'output[title]=Request rejected' \
-              -f "output[summary]=The sync host rejected this request and started no run: $(cat rejected.txt)" >/dev/null
-            exit 0
-          fi
-          gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_ID" \
-            -f status=completed -f conclusion=action_required \
-            -f 'output[title]=Orchestration interrupted' \
-            -f "output[summary]=GitHub could not queue or follow this run. The sync host may still be running it; inspect its status before retrying. See $RUN_URL." >/dev/null
-
-      - name: Cancel on the sync host
-        if: cancelled()
-        env:
-          RUN_ID: ${{ steps.req.outputs.run_id }}
-          CHECK_ID: ${{ steps.check.outputs.id }}
-        run: |
-          source "$RUNNER_TEMP/gate.sh"
-          gate cancel "$RUN_ID" || true
-          if [[ -n "$CHECK_ID" ]]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_ID" \
-              -f status=completed -f conclusion=cancelled \
-              -f 'output[title]=Cancelled' -f "output[summary]=Cancelled from GitHub; the sync host tears the devnet down." >/dev/null || true
+            echo "**No capacity for the sync host**: EC2 had none to start it, so no run started and nothing was tested. Run the workflow again later." >> "$GITHUB_STEP_SUMMARY"
+          elif [[ -s rejected.txt ]]; then
+            echo "**Request rejected**: the sync host started no run: $(cat rejected.txt)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "**Orchestration interrupted**: GitHub could not queue this run. The sync host may still be running it: look for its sync-test check before retrying." >> "$GITHUB_STEP_SUMMARY"
           fi
