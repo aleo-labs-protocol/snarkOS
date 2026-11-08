@@ -2,7 +2,9 @@
 #
 # Runs catch_up on the sync host, a Gauntlet host of its own: a client with the CDN and one
 # without start from the last release's ledger and must reach the tip. Reports it as the
-# "sync-test" check on the commit. The host owns the defaults: this sends only what's filled in.
+# "sync-test" check on the commit. With ab, the second client runs the network's last release,
+# with the CDN, and the check compares their catch-up rates. The host owns the defaults: this
+# sends only what's filled in.
 #
 #   start   "Run workflow": approval in the sync-test environment, then start the sync host
 #           if it's stopped and queue the run through its gate, which takes only sync tests.
@@ -34,6 +36,10 @@ on:
         default: testnet
       save:
         description: "If it passes, keep the ledger it reached as this release's (a release candidate)"
+        type: boolean
+        default: false
+      ab:
+        description: "A/B: run the network's last release beside it, on the same ledger with the CDN, and compare catch-up rates. Skips --nocdn"
         type: boolean
         default: false
       params:
@@ -77,6 +83,7 @@ jobs:
           IN_COMMIT: ${{ inputs.commit }}
           IN_NETWORK: ${{ inputs.network }}
           IN_SAVE: ${{ inputs.save }}
+          IN_AB: ${{ inputs.ab }}
           IN_PARAMS: ${{ inputs.params }}
           IN_FOLLOW: ${{ inputs.follow_run_id }}
           IN_CHECK: ${{ inputs.check_run_id }}
@@ -86,6 +93,22 @@ jobs:
           [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::commit must be a full 40-character SHA"; exit 1; }
           # save is a param, so the gate and the host carry it as they are.
           [[ "$IN_SAVE" != true ]] || params="save=true${params:+,$params}"
+          # The A/B's baseline, for a new run: the network's highest published release, testnet-vX.Y.Z
+          # or vX.Y.Z. Not by date or prerelease flag: neither tells the networks' releases apart.
+          if [[ "$IN_AB" == true && -z "$IN_FOLLOW" ]]; then
+            [[ "$IN_SAVE" != true ]] || { echo "::error::ab and save don't go together: an A/B skips --nocdn"; exit 1; }
+            [[ ",$IN_PARAMS" != *,baseline=* ]] || { echo "::error::ab fills in baseline itself: drop baseline= from params"; exit 1; }
+            prefix=v
+            [[ "$IN_NETWORK" != testnet ]] || prefix=testnet-v
+            tag="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" | jq -r --arg p "$prefix" '[.[] | select(.draft | not) | .tag_name
+              | select(startswith($p)) | ltrimstr($p) | select(test("^[0-9]+[.][0-9]+[.][0-9]+$"))] | max_by(split(".") | map(tonumber)) // empty
+              | $p + .')"
+            [[ -n "$tag" ]] || { echo "::error::no ${IN_NETWORK} release to compare with"; exit 1; }
+            baseline="$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)" && [[ "$baseline" =~ ^[0-9a-f]{40}$ ]] \
+              || { echo "::error::could not find the commit of ${tag}, ${IN_NETWORK}'s last release"; exit 1; }
+            params="baseline=${baseline}${params:+,$params}"
+            echo "A/B against ${IN_NETWORK}'s last release, ${tag} (\`${baseline}\`)" >> "$GITHUB_STEP_SUMMARY"
+          fi
           run_id="${IN_FOLLOW:-gh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}}"
           [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || exit 1
           if [[ -n "$IN_FOLLOW" ]]; then
