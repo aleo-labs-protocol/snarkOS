@@ -53,8 +53,9 @@ impl<N: Network> FromBytes for BatchSignature<N> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz-helpers"))]
 pub mod prop_tests {
+    #![cfg_attr(not(test), allow(unused_imports))]
     use crate::{
         BatchSignature,
         certificate_request::prop_tests::any_field,
