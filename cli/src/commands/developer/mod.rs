@@ -47,6 +47,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use std::{
     path::PathBuf,
     str::FromStr,
+    sync::atomic::{AtomicBool, Ordering},
     thread,
     time::{Duration, Instant},
 };
@@ -231,16 +232,16 @@ impl Developer {
 
         // Determine the API version we are interacting with.
         let api_version = {
-            let r = base_url.path().trim_end_matches('/');
+            let last_segment = base_url.path().trim_end_matches('/').rsplit('/').next().unwrap_or_default();
 
-            if r.ends_with(API_VERSION_V1) {
-                ApiVersion::V1
-            } else if r.ends_with(API_VERSION_V2) {
-                ApiVersion::V2
+            if last_segment == API_VERSION_V1 {
+                Some(ApiVersion::V1)
+            } else if last_segment == API_VERSION_V2 {
+                Some(ApiVersion::V2)
             } else {
-                // Default to v1.
-                // Note: If the snarkos-node-rest switches default to v2, this needs to be updated.
-                ApiVersion::V1
+                // No version given. The unversioned routes serve the deprecated v1 API, so
+                // request v2 explicitly.
+                None
             }
         };
 
@@ -249,15 +250,19 @@ impl Developer {
         // See https://github.com/hyperium/http/issues/507
         let sep = if base_url.path().ends_with('/') { "" } else { "/" };
 
-        // Build "{base}/{maybe_version}/{network}/{route}"
-        let full_uri = format!("{base_url}{sep}{network}/{route}", network = N::SHORT_NAME);
-        Ok((full_uri, api_version))
+        // Build "{base}/{version}/{network}/{route}"
+        let network = N::SHORT_NAME;
+        match api_version {
+            Some(api_version) => Ok((format!("{base_url}{sep}{network}/{route}"), api_version)),
+            None => Ok((format!("{base_url}{sep}{API_VERSION_V2}/{network}/{route}"), ApiVersion::V2)),
+        }
     }
 
     /// Converts the returned JSON error (if any) into an anyhow Error chain.
     /// If the error was 404, this simply returns `Ok(None)`.
     fn handle_ureq_result(result: Result<http::Response<ureq::Body>>) -> Result<Option<ureq::Body>> {
         let response = result?;
+        Self::warn_if_deprecated(response.headers());
 
         if response.status().is_success() {
             Ok(Some(response.into_body()))
@@ -283,6 +288,40 @@ impl Developer {
                 Err(anyhow!(err_msg))
             }
         }
+    }
+
+    /// Warns, once per run, when an endpoint reports that the API it serves is deprecated.
+    ///
+    /// A deprecated API sends a `Deprecation` header (RFC 9745), and may link a migration guide in
+    /// a `Link` header with relation type `deprecation`.
+    fn warn_if_deprecated(headers: &http::HeaderMap) {
+        static WARNED: AtomicBool = AtomicBool::new(false);
+
+        if !headers.contains_key("deprecation") || WARNED.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        match Self::deprecation_link(headers) {
+            Some(url) => {
+                eprintln!("⚠️  This endpoint serves a deprecated API that will be removed. See how to migrate: {url}")
+            }
+            None => eprintln!("⚠️  This endpoint serves a deprecated API that will be removed."),
+        }
+    }
+
+    /// Returns the target of the first `Link` with relation type `deprecation`, if any.
+    fn deprecation_link(headers: &http::HeaderMap) -> Option<String> {
+        headers
+            .get_all(http::header::LINK)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .find(|link| {
+                link.split(';').skip(1).any(|param| {
+                    let param = param.trim();
+                    param == "rel=\"deprecation\"" || param == "rel=deprecation"
+                })
+            })
+            .and_then(|link| link.split_once('<')?.1.split_once('>').map(|(url, _)| url.trim().to_owned()))
     }
 
     /// Extracts the API version from a custom endpoint.
@@ -577,10 +616,11 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_query_rest_defaults_scheme() {
+    fn test_parse_query_rest_defaults_scheme_and_version() {
+        // The unversioned routes serve the deprecated v1 API, so v2 is requested explicitly.
         let ParsedQuery { query, endpoint } = Developer::parse_query::<TestnetV0>("localhost:3030").unwrap();
         assert!(matches!(query, Query::REST(_)));
-        assert_eq!(endpoint.unwrap(), "http://localhost:3030/");
+        assert_eq!(endpoint.unwrap(), "http://localhost:3030/v2/");
     }
 
     #[test]
@@ -590,18 +630,38 @@ mod tests {
         assert_eq!(endpoint.unwrap(), DEFAULT_ENDPOINT);
     }
 
-    /// Test that the default endpoints (V1) work as expected.
-    ///
-    /// Note, if the default endpoint ever changes, this test needs to be updated.
+    /// Ensure that an endpoint without a version requests v2, since the unversioned routes serve
+    /// the deprecated v1 API.
     #[test]
-    fn test_build_endpoint_default_v1() {
-        let base_uri_str = "http://localhost:3030";
-        let base_uri = Uri::try_from(base_uri_str).unwrap();
-        let (endpoint, api_version) =
-            Developer::build_endpoint::<CurrentNetwork>(&base_uri, "transaction/broadcast").unwrap();
+    fn test_build_endpoint_default_v2() {
+        for base_uri_str in ["http://localhost:3030", "http://localhost:3030/"] {
+            let base_uri = Uri::try_from(base_uri_str).unwrap();
+            let (endpoint, api_version) =
+                Developer::build_endpoint::<CurrentNetwork>(&base_uri, "transaction/broadcast").unwrap();
 
-        assert_eq!(endpoint, format!("{base_uri_str}/{}/transaction/broadcast", CurrentNetwork::SHORT_NAME));
-        assert_eq!(api_version, ApiVersion::V1);
+            assert_eq!(
+                endpoint,
+                format!("http://localhost:3030/v2/{}/transaction/broadcast", CurrentNetwork::SHORT_NAME)
+            );
+            assert_eq!(api_version, ApiVersion::V2);
+        }
+    }
+
+    #[test]
+    fn test_deprecation_link() {
+        let mut headers = http::HeaderMap::new();
+        assert_eq!(Developer::deprecation_link(&headers), None);
+
+        headers.append(http::header::LINK, "<https://example.com/next>; rel=\"next\"".parse().unwrap());
+        assert_eq!(Developer::deprecation_link(&headers), None);
+
+        headers.append(
+            http::header::LINK,
+            "<https://example.com/a>; rel=\"alternate\", <https://example.com/migrate>; rel=\"deprecation\""
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(Developer::deprecation_link(&headers).as_deref(), Some("https://example.com/migrate"));
     }
 
     /// Ensure that the V1 endpoints work as expected.

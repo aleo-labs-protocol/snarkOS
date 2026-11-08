@@ -49,7 +49,14 @@ use anyhow::{Context, Result, ensure};
 use axum::{
     body::Body,
     extract::{ConnectInfo, DefaultBodyLimit, Query, State},
-    http::{Method, Request, StatusCode, header::CONTENT_TYPE},
+    http::{
+        HeaderName,
+        HeaderValue,
+        Method,
+        Request,
+        StatusCode,
+        header::{CONTENT_TYPE, LINK},
+    },
     middleware,
     response::Response,
     routing::{get, post},
@@ -60,7 +67,12 @@ use locktick::parking_lot::Mutex;
 use lru::LruCache;
 #[cfg(not(feature = "locktick"))]
 use parking_lot::Mutex;
-use std::{net::SocketAddr, num::NonZeroUsize, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    num::NonZeroUsize,
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 use tokio::{
     net::TcpListener,
     sync::{OwnedSemaphorePermit, Semaphore},
@@ -281,7 +293,9 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         let cors = CorsLayer::new()
             .allow_origin(Any)
             .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
-            .allow_headers([CONTENT_TYPE]);
+            .allow_headers([CONTENT_TYPE])
+            // Let browser clients read the v1 deprecation notice.
+            .expose_headers([DEPRECATION, LINK]);
 
         // Prepare the rate limiting setup.
         let governor_config = GovernorConfigBuilder::default()
@@ -473,15 +487,15 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
     /// This is separate from `spawn_server` so that the version prefixes can be exercised in tests
     /// without binding a port.
     fn build_versioned_router(&self, rest_rps: u32) -> axum::Router {
-        // Add the v1 API as default and under "/v1".
-        let default_router = axum::Router::new().nest(
-            &format!("/{}", N::SHORT_NAME),
-            self.build_routes(rest_rps).layer(middleware::map_response(v1_error_middleware)),
-        );
-        let v1_router = axum::Router::new().nest(
-            &format!("/{API_VERSION_V1}/{}", N::SHORT_NAME),
-            self.build_routes(rest_rps).layer(middleware::map_response(v1_error_middleware)),
-        );
+        // Add the v1 API as default and under "/v1". Both are deprecated; the deprecation headers
+        // are layered last, i.e. outermost, so that the error middleware cannot drop them.
+        let v1_routes = || {
+            self.build_routes(rest_rps)
+                .layer(middleware::map_response(v1_error_middleware))
+                .layer(middleware::map_response(v1_deprecation_middleware))
+        };
+        let default_router = axum::Router::new().nest(&format!("/{}", N::SHORT_NAME), v1_routes());
+        let v1_router = axum::Router::new().nest(&format!("/{API_VERSION_V1}/{}", N::SHORT_NAME), v1_routes());
 
         // Add the v2 API under "/v2".
         let v2_router =
@@ -545,6 +559,36 @@ async fn record_rest_request(request: Request<Body>, next: middleware::Next) -> 
         endpoint,
         started.elapsed().as_secs_f64(),
     );
+    response
+}
+
+/// When the v1 API (served under `/v1/<network>` and the unprefixed `/<network>`) was deprecated,
+/// as seconds since the Unix epoch: 2026-11-08T00:00:00Z.
+const V1_DEPRECATION_TIMESTAMP: i64 = 1_794_096_000;
+
+/// Where a v1 client learns how to migrate to v2.
+const V1_MIGRATION_GUIDE_URL: &str = "https://github.com/aleo-labs-protocol/snarkOS/pull/XXXX";
+
+/// The `Deprecation` response header field (RFC 9745).
+const DEPRECATION: HeaderName = HeaderName::from_static("deprecation");
+
+/// Marks every v1 response as deprecated (RFC 9745): a `Deprecation` header with the date, and a
+/// `Link` to the migration guide with relation type `deprecation`.
+///
+/// This must be layered outside `v1_error_middleware`, which rebuilds error responses from scratch
+/// and would drop any header set before it.
+async fn v1_deprecation_middleware(mut response: Response) -> Response {
+    static DEPRECATION_VALUE: LazyLock<HeaderValue> = LazyLock::new(|| {
+        HeaderValue::from_str(&format!("@{V1_DEPRECATION_TIMESTAMP}")).expect("the deprecation date is ASCII")
+    });
+    static LINK_VALUE: LazyLock<HeaderValue> = LazyLock::new(|| {
+        HeaderValue::from_str(&format!("<{V1_MIGRATION_GUIDE_URL}>; rel=\"deprecation\""))
+            .expect("the migration guide link is ASCII")
+    });
+
+    let headers = response.headers_mut();
+    headers.insert(DEPRECATION, DEPRECATION_VALUE.clone());
+    headers.append(LINK, LINK_VALUE.clone());
     response
 }
 
@@ -1166,6 +1210,53 @@ mod route_tests {
             let (status, body) = get_versioned(&rest, &format!("{prefix}/blocks/hashes?start=0&end=2")).await;
             assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{prefix} no longer forces a 500");
             assert!(!body.starts_with('{'), "{prefix} should flatten the error to a string: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn v1_responses_carry_the_deprecation_notice_and_v2_responses_do_not() {
+        let rest = sample_rest().await;
+        let router = rest.build_versioned_router(TEST_RPS);
+
+        // `send` drops the headers, and the headers are the point here, so issue requests directly.
+        let headers_of = |uri: String| {
+            let router = router.clone();
+            async move {
+                let mut request = Request::builder().uri(uri.as_str()).body(Body::empty()).unwrap();
+                request.extensions_mut().insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4130))));
+                let response = router.oneshot(request).await.unwrap();
+                (response.status(), response.headers().clone())
+            }
+        };
+
+        let expected_link = format!("<{V1_MIGRATION_GUIDE_URL}>; rel=\"deprecation\"");
+        for prefix in ["/mainnet", "/v1/mainnet"] {
+            // A success, and an error, which `v1_error_middleware` rebuilds from scratch: the notice
+            // has to survive that rebuild.
+            for (route, status) in [
+                ("blocks/hashes?start=0&end=1", StatusCode::OK),
+                ("blocks/hashes?start=0&end=2", StatusCode::INTERNAL_SERVER_ERROR),
+            ] {
+                let uri = format!("{prefix}/{route}");
+                let (actual, headers) = headers_of(uri.clone()).await;
+                assert_eq!(actual, status, "{uri} returned an unexpected status");
+                assert_eq!(
+                    headers.get(DEPRECATION).and_then(|value| value.to_str().ok()),
+                    Some(format!("@{V1_DEPRECATION_TIMESTAMP}").as_str()),
+                    "{uri} did not carry the Deprecation header"
+                );
+                assert!(
+                    headers.get_all(LINK).iter().any(|value| value.to_str().ok() == Some(expected_link.as_str())),
+                    "{uri} did not link the migration guide"
+                );
+            }
+        }
+
+        for route in ["blocks/hashes?start=0&end=1", "blocks/hashes?start=0&end=2"] {
+            let uri = format!("/v2/mainnet/{route}");
+            let (_, headers) = headers_of(uri.clone()).await;
+            assert!(headers.get(DEPRECATION).is_none(), "{uri} is not deprecated but said it was");
+            assert!(headers.get(LINK).is_none(), "{uri} linked a deprecation notice");
         }
     }
 

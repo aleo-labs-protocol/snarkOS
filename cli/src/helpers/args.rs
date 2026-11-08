@@ -25,6 +25,7 @@ use snarkvm::{
 use aleo_std::aleo_dir;
 use anyhow::{Context, Result, anyhow};
 use clap::builder::RangedU64ValueParser;
+use snarkos_node_rest::{API_VERSION_V1, API_VERSION_V2};
 use std::{path::PathBuf, str::FromStr};
 use ureq::http::{Uri, uri};
 
@@ -32,7 +33,11 @@ pub(crate) fn network_id_parser() -> RangedU64ValueParser<u16> {
     RangedU64ValueParser::<u16>::new().range((MainnetV0::ID as u64)..=(CanaryV0::ID as u64))
 }
 
-/// Make sure a proper scheme (http or https) is set for the endpoint.
+/// Make sure a proper scheme (http or https) is set for the endpoint, and that it names an API
+/// version.
+///
+/// An endpoint whose path does not end in `v1` or `v2` gets `/v2` appended: the unversioned
+/// routes of a snarkOS node serve the deprecated v1 API.
 pub(crate) fn prepare_endpoint(endpoint: Uri) -> Result<Uri> {
     let mut parts = endpoint.into_parts();
 
@@ -41,7 +46,13 @@ pub(crate) fn prepare_endpoint(endpoint: Uri) -> Result<Uri> {
         parts.scheme = Some(uri::Scheme::HTTP);
     }
 
-    if parts.path_and_query.is_none() {
+    let path = parts.path_and_query.as_ref().map(|pq| pq.path()).unwrap_or("/").trim_end_matches('/').to_owned();
+    let last_segment = path.rsplit('/').next().unwrap_or_default();
+    if last_segment != API_VERSION_V1 && last_segment != API_VERSION_V2 {
+        parts.path_and_query = Some(
+            format!("{path}/{API_VERSION_V2}/").parse().with_context(|| "Invalid endpoint URL with an API version")?,
+        );
+    } else if parts.path_and_query.is_none() {
         parts.path_and_query = Some(uri::PathAndQuery::from_static("/"));
     }
 
@@ -103,8 +114,20 @@ mod tests {
 
     #[test]
     fn test_prepare_endpoint() {
-        let before = Uri::try_from("localhost:3030").unwrap();
-        let after = prepare_endpoint(before).unwrap();
-        assert_eq!(after.to_string(), "http://localhost:3030/");
+        // No version: v2 is requested explicitly, since the unversioned routes serve the
+        // deprecated v1 API.
+        for (before, after) in [
+            ("localhost:3030", "http://localhost:3030/v2/"),
+            ("http://localhost:3030/", "http://localhost:3030/v2/"),
+            ("https://example.com/a/prefix", "https://example.com/a/prefix/v2/"),
+            // An explicit version is kept as given.
+            ("http://localhost:3030/v1", "http://localhost:3030/v1"),
+            // A path that merely ends in the same characters is not a version.
+            ("https://example.com/dev2", "https://example.com/dev2/v2/"),
+            ("https://api.explorer.provable.com/v2", "https://api.explorer.provable.com/v2"),
+        ] {
+            let prepared = prepare_endpoint(Uri::try_from(before).unwrap()).unwrap();
+            assert_eq!(prepared.to_string(), after, "unexpected endpoint for {before}");
+        }
     }
 }
