@@ -2,7 +2,7 @@
 #
 # A form for the replay_stockpile test. stress-test.yml does the rest: approval in
 # the stress-test environment and queueing the run, which the Gauntlet host reports
-# as the "stress-test" check on the commit. Its secrets are the environment's.
+# as the "stress-test" check on the commit.
 # Gauntlet owns the defaults: this sends only what's filled in.
 name: "Gauntlet: Load test"
 
@@ -64,6 +64,8 @@ jobs:
       id-token: write
       contents: read
     uses: ./.github/workflows/stress-test.yml
+    # A called workflow sees no secret it isn't passed, its environment's included.
+    secrets: inherit
     with:
       commit: ${{ inputs.commit }}
       tests: replay_stockpile
