@@ -96,9 +96,16 @@ impl<N: Network> ProposalCache<N> {
 
         // Serialize the proposal cache.
         let bytes = self.to_bytes_le()?;
-        // Store the proposal cache to the file system.
-        fs::write(&path, bytes)
-            .map_err(|err| anyhow!("Couldn't write the proposal cache to {} - {err}", path.display()))?;
+        // Store the proposal cache to a temporary file, sync it, and rename it over the cache path,
+        // so that a crash mid-write never leaves a torn cache file.
+        let tmp_path = path.with_extension("tmp");
+        let write_tmp = || -> std::io::Result<()> {
+            let mut file = fs::File::create(&tmp_path)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            fs::rename(&tmp_path, &path)
+        };
+        write_tmp().map_err(|err| anyhow!("Couldn't write the proposal cache to {} - {err}", path.display()))?;
 
         Ok(())
     }
@@ -204,5 +211,29 @@ mod tests {
             let expected_bytes = expected.to_bytes_le().unwrap();
             assert_eq!(expected, ProposalCache::read_le(&expected_bytes[..]).unwrap());
         }
+    }
+
+    #[test]
+    fn test_store_is_complete_and_loads() {
+        let rng = &mut TestRng::default();
+        let signer = PrivateKey::<CurrentNetwork>::new(rng).unwrap();
+        let dir = std::env::temp_dir().join(format!("snarkos-proposal-cache-store-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let node_data_dir = NodeDataDir::new(dir.clone());
+        let path = node_data_dir.current_proposal_cache_path();
+
+        // After a store, the cache path holds the complete serialized cache and no temporary file remains.
+        let expected = sample_proposal_cache(&signer, rng);
+        expected.store(&node_data_dir).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), expected.to_bytes_le().unwrap());
+        assert!(!path.with_extension("tmp").exists());
+
+        // A load after a store returns the same latest round, proposal, and signed proposals.
+        let expected = ProposalCache::new(7, None, sample_signed_proposals(&signer, rng), Default::default());
+        expected.store(&node_data_dir).unwrap();
+        let address = Address::try_from(&signer).unwrap();
+        assert_eq!(ProposalCache::load(address, &node_data_dir).unwrap(), expected);
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
