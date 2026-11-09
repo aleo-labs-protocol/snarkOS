@@ -253,23 +253,29 @@ impl FromBytes for ConsensusSchedule {
 pub struct HandshakeTrailer {
     /// The consensus schedule of the sender's build.
     pub schedule: Option<ConsensusSchedule>,
+    /// The little-endian bytes of the hash of the sender's genesis block, if it sent one. Bytes of
+    /// the wrong length are kept as sent, so that they fail the genesis check instead of reading as none.
+    pub genesis_hash: Option<Vec<u8>>,
 }
 
 impl HandshakeTrailer {
     /// The first event version whose handshake messages 2 and 3 must carry a trailer with a schedule.
     pub const FIRST_VERSION: u32 = 11;
+    /// The first event version whose handshake trailer must carry the genesis hash.
+    pub const GENESIS_VERSION: u32 = 12;
 
     /// Returns the trailer that this build sends.
     pub fn of<N: Network>() -> Self {
-        Self { schedule: Some(ConsensusSchedule::of::<N>()) }
+        Self { schedule: Some(ConsensusSchedule::of::<N>()), genesis_hash: None }
     }
 
     /// Parses a trailer, or returns `None` if it is malformed.
     fn parse(bytes: &[u8]) -> Option<Self> {
         let (length, rest) = bytes.split_first_chunk::<2>()?;
-        let fields = rest.get(..usize::from(u16::from_le_bytes(*length)))?;
-        let schedule = ConsensusSchedule::read_le(fields).ok()?;
-        Some(Self { schedule: Some(schedule) })
+        let mut fields = rest.get(..usize::from(u16::from_le_bytes(*length)))?;
+        let schedule = ConsensusSchedule::read_le(&mut fields).ok()?;
+        let genesis_hash = (!fields.is_empty()).then(|| fields[..fields.len().min(32)].to_vec());
+        Some(Self { schedule: Some(schedule), genesis_hash })
     }
 }
 
@@ -279,7 +285,10 @@ impl ToBytes for HandshakeTrailer {
         let Some(schedule) = &self.schedule else {
             return Ok(());
         };
-        let fields = schedule.to_bytes_le().map_err(io_error)?;
+        let mut fields = schedule.to_bytes_le().map_err(io_error)?;
+        if let Some(genesis_hash) = &self.genesis_hash {
+            fields.extend_from_slice(genesis_hash);
+        }
         u16::try_from(fields.len()).map_err(io_error)?.write_le(&mut writer)?;
         writer.write_all(&fields)
     }
@@ -396,8 +405,9 @@ impl<N: Network> FromBytes for ResponderProof<N> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz-helpers"))]
 pub mod prop_tests {
+    #![cfg_attr(not(test), allow(unused_imports))]
     use super::*;
     use crate::{challenge_request::prop_tests::any_valid_address, challenge_response::prop_tests::any_signature};
 
@@ -420,7 +430,13 @@ pub mod prop_tests {
     }
 
     pub fn any_trailer() -> BoxedStrategy<HandshakeTrailer> {
-        proptest::option::of(any_schedule()).prop_map(|schedule| HandshakeTrailer { schedule }).boxed()
+        // A genesis hash is only sent after a schedule, and may be cut short.
+        (proptest::option::of(any_schedule()), proptest::option::of(collection::vec(any::<u8>(), 1..=32)))
+            .prop_map(|(schedule, genesis_hash)| {
+                let genesis_hash = genesis_hash.filter(|_| schedule.is_some());
+                HandshakeTrailer { schedule, genesis_hash }
+            })
+            .boxed()
     }
 
     pub fn any_peer_info() -> BoxedStrategy<PeerInfo<CurrentNetwork>> {

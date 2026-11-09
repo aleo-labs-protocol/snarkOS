@@ -20,11 +20,12 @@ Jobs run in one of two places:
 |---|---|
 | Pull request | `fmt`, `deny`, `shellcheck`, `machete`, `lint`, `test`, `build-snarkos`, `devnet`, `ci-ok` |
 | Push to `staging`, `canary`, `testnet`, `mainnet`, or manual dispatch | the above, plus `devnet-merge`, `windows` |
+| Push to `canary`, `testnet`, `mainnet`, or manual dispatch | the above, plus `devnet-release` |
 
 ## Jobs
 
-A job marked "merge" runs only on the second row of the table above. The
-other jobs run on every event.
+A job marked "merge" runs only on the second row of the table above, and a job
+marked "release" only on the third. The other jobs run on every event.
 
 | Job | Runner | Trigger | Timeout (min) | What it runs |
 |---|---|---|---|---|
@@ -39,7 +40,7 @@ other jobs run on every event.
 | `test (messages)` | hosted | all | 90 | `snarkos-node-bft-events`, `-node-router-messages`, `-node-bft-ledger-service` |
 | `test (services)` | `cpu` | all | 90 | `snarkos-node-consensus`, `-node-rest`, `-cli` |
 | `test (node)` | `cpu` | all | 90 | `snarkos-node` with `snarkos-node-bft-storage-service` (features `memory,persistent`) |
-| `test (bft)` | `cpu` | all | 90 | `snarkos-node-bft` |
+| `test (bft)` | `cpu` | all | 90 | `snarkos-node-bft`; its `helpers::telemetry` tests with `metrics`, as a second build |
 | `test (router)` | `cpu` | all | 90 | `snarkos-node-router` |
 | `test (sync)` | `cpu` | all | 90 | `snarkos-node-sync` |
 | `build-snarkos` | `cpu` | all | 60 | release `snarkos` with `test_network`, as an artifact |
@@ -49,6 +50,8 @@ other jobs run on every event.
 | `devnet (chaotic-minority-reset)` | `cpu` | merge | 45 | `test_reset_minority.sh`, with delays |
 | `devnet (chaotic-majority-restart)` | `cpu` | merge | 45 | `test_restart_majority.sh`, with delays |
 | `devnet (upgrade)` | `cpu` | merge | 90 | `test_full_upgrade.sh`, `test_partial_upgrade.sh` |
+| `devnet (upgrade-required)` | `cpu` | release | 30 | `test_upgrade_required.sh` |
+| `devnet (chaotic-restart-all)` | `cpu` | release | 45 | `test_restart_all.sh`, with delays |
 | `machete` | hosted | all | | `cargo machete` |
 | `windows` | hosted (Windows) | merge | | `cargo check --examples --benches --tests` in `account`, `cli`, `display`, `node` |
 | `ci-ok` | hosted | all | | fails unless every job a pull request runs succeeded |
@@ -63,26 +66,30 @@ fails in both cases.
 
 ## Test groups
 
-Each `test` entry is one cargo build. `cargo test -p a -p b` unifies the
-features of `a` and `b`, and several crates enable features on their
+Each line of a `test` entry is one cargo build. `cargo test -p a -p b` unifies
+the features of `a` and `b`, and several crates enable features on their
 dependencies that change what those dependencies do, such as
-`snarkos-node-router/test` and `snarkvm-ledger-block/test`. So crates share an
-entry only where that unification enables no such feature on any crate.
-Helper features such as `test-helpers` and `mock` can still be unified, so a
-test may compile in its entry that would not under `cargo test -p <crate>`
-alone. Check this before moving a crate between entries, for example by
-comparing `cargo tree -e features` for the entry against each crate alone.
+`snarkos-node-router/test` and `snarkvm-ledger-block/test`. So crates share a
+line only where that unification enables no such feature on any crate. Helper
+features such as `test-helpers` and `mock` can still be unified, so a test may
+compile in its line that would not under `cargo test -p <crate>` alone. Check
+this before moving a crate between lines, for example by comparing
+`cargo tree -e features` for the line against each crate alone.
+
+`test (bft)` has a second line for the tests in `helpers::telemetry`, which
+compile only under `metrics`. That line builds the library alone. It passes
+`--no-tests=fail`, because the step otherwise lets a command match no tests.
 
 [`.config/nextest.toml`](.config/nextest.toml) sets two test threads. Each
-entry uploads nextest's JUnit report as the artifact `junit-<entry>`, with the
-time of each test.
+entry uploads nextest's JUnit reports as the artifact `junit-<entry>`, one file
+per line, with the time of each test.
 
 ## Devnets
 
 `build-snarkos` builds the node once with `--features test_network`. Each
-`devnet` and `devnet-merge` entry downloads it and runs scripts from `.ci` on
-one box. A box has one runner slot, so the nodes' fixed ports never collide
-with another job's.
+`devnet`, `devnet-merge` and `devnet-release` entry downloads it and runs
+scripts from `.ci` on one box. A box has one runner slot, so the nodes' fixed
+ports never collide with another job's.
 
 Each `test` and devnet job on the fleet gets its own home directory and
 `TMPDIR`, so ledgers and node data from one run never reach the next.

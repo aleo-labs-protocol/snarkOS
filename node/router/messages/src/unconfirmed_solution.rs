@@ -49,8 +49,9 @@ impl<N: Network> FromBytes for UnconfirmedSolution<N> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz-helpers"))]
 pub mod prop_tests {
+    #![cfg_attr(not(test), allow(unused_imports))]
     use crate::{MAX_SMALL_MESSAGE_SIZE, Solution, SolutionID, UnconfirmedSolution};
     use snarkvm::{
         ledger::{narwhal::Data, puzzle::PartialSolution},

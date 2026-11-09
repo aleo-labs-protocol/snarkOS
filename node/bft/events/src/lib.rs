@@ -175,7 +175,7 @@ impl<N: Network> Event<N> {
     /// order to force users to update.
     pub const MINIMUM_VERSION: u32 = 10;
     /// The version of the event protocol this node speaks.
-    pub const VERSION: u32 = 11;
+    pub const VERSION: u32 = 12;
 
     /// Serializes the event's [`Data`] payload, if it holds one that is not already serialized.
     ///
@@ -363,8 +363,9 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz-helpers"))]
 pub mod prop_tests {
+    #![cfg_attr(not(test), allow(unused_imports))]
     use crate::{
         Disconnect,
         DisconnectReason,
@@ -462,6 +463,7 @@ pub mod prop_tests {
                     DisconnectReason::AlreadyConnectedToAleoAddress,
                     DisconnectReason::InvalidChallengeRequest,
                     DisconnectReason::UnauthorizedValidator,
+                    DisconnectReason::GenesisMismatch,
                 ]),
                 any::<Selector>()
             )

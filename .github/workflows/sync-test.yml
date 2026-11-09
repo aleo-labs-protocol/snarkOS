@@ -1,0 +1,208 @@
+# Copy to aleo-labs-protocol/snarkOS as .github/workflows/sync-test.yml, on staging.
+#
+# Runs catch_up on the sync host, a Gauntlet host of its own: a client with the CDN and one
+# without start from the last release's ledger and must reach the tip. With ab, the second client
+# runs the network's last release, with the CDN, and the check compares their catch-up rates. The
+# host owns the defaults: this sends only what's filled in.
+#
+# "Run workflow": approval in the sync-test environment, then start the sync host if it's stopped
+# and queue the run through its gate, which takes only sync tests. The host reports the run as the
+# "sync-test" check on the commit, through its App, so this job ends once the run is queued.
+# gauntlet-report.yml adds the report when it finishes.
+#
+# It needs an IAM role that only this file on staging can assume, an Instance Connect
+# Endpoint, and these settings, in the sync-test environment:
+#   environment secret    STRESS_ROLE_ARN              the role
+#   environment secret    STRESS_MANAGER_INSTANCE_ID   the sync host
+#   environment variable  STRESS_MANAGER_HOST_KEY      the sync host's ssh host key line, over
+#                                                      the repository's, Gauntlet's
+name: "Gauntlet: Sync test"
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "snarkOS commit (full SHA). Empty: the commit this is run from."
+        required: false
+        default: ""
+      network:
+        description: "snarkOS network"
+        type: choice
+        options: [testnet, mainnet]
+        default: testnet
+      save:
+        description: "If it passes, keep the ledger it reached as this release's (a release candidate)"
+        type: boolean
+        default: false
+      ab:
+        description: "A/B: run the network's last release beside it, on the same ledger with the CDN, and compare catch-up rates. Skips --nocdn"
+        type: boolean
+        default: false
+      params:
+        description: "Test parameter overrides, e.g. deadline_hours=12"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    if: github.repository == 'aleo-labs-protocol/snarkOS'
+    runs-on: ubuntu-latest
+    environment: sync-test
+    # Past start_host's longest wait, twice: the enqueue may start the host again. Billed only if it waits.
+    timeout-minutes: 90
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: us-west-2
+      # ab's release lookup: read-only, as the job's permissions say.
+      GH_TOKEN: ${{ github.token }}
+      MANAGER: ${{ secrets.STRESS_MANAGER_INSTANCE_ID }}
+      ROLE_ARN: ${{ secrets.STRESS_ROLE_ARN }}
+      HOST_KEY: ${{ vars.STRESS_MANAGER_HOST_KEY }}
+      GATE_USER: gha-gauntlet
+    steps:
+      - name: Resolve the request
+        id: req
+        env:
+          IN_COMMIT: ${{ inputs.commit }}
+          IN_NETWORK: ${{ inputs.network }}
+          IN_SAVE: ${{ inputs.save }}
+          IN_AB: ${{ inputs.ab }}
+          IN_PARAMS: ${{ inputs.params }}
+          ACTOR: ${{ github.triggering_actor }}
+        run: |
+          commit="${IN_COMMIT:-$GITHUB_SHA}" params="$IN_PARAMS"
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::commit must be a full 40-character SHA"; exit 1; }
+          # save is a param, so the gate and the host carry it as they are.
+          [[ "$IN_SAVE" != true ]] || params="save=true${params:+,$params}"
+          # The A/B's baseline: the network's highest published release, testnet-vX.Y.Z
+          # or vX.Y.Z. Not by date or prerelease flag: neither tells the networks' releases apart.
+          if [[ "$IN_AB" == true ]]; then
+            [[ "$IN_SAVE" != true ]] || { echo "::error::ab and save don't go together: an A/B skips --nocdn"; exit 1; }
+            [[ ",$IN_PARAMS" != *,baseline=* ]] || { echo "::error::ab fills in baseline itself: drop baseline= from params"; exit 1; }
+            prefix=v
+            [[ "$IN_NETWORK" != testnet ]] || prefix=testnet-v
+            tag="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" | jq -r --arg p "$prefix" '[.[] | select(.draft | not) | .tag_name
+              | select(startswith($p)) | ltrimstr($p) | select(test("^[0-9]+[.][0-9]+[.][0-9]+$"))] | max_by(split(".") | map(tonumber)) // empty
+              | $p + .')"
+            [[ -n "$tag" ]] || { echo "::error::no ${IN_NETWORK} release to compare with"; exit 1; }
+            baseline="$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)" && [[ "$baseline" =~ ^[0-9a-f]{40}$ ]] \
+              || { echo "::error::could not find the commit of ${tag}, ${IN_NETWORK}'s last release"; exit 1; }
+            params="baseline=${baseline}${params:+,$params}"
+            echo "A/B against ${IN_NETWORK}'s last release, ${tag} (\`${baseline}\`)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          for value in "$IN_NETWORK" "$params" "$ACTOR"; do
+            [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || {
+              echo "::error::request values must be single-line"
+              exit 1
+            }
+          done
+          {
+            echo "commit=$commit"; echo "network=$IN_NETWORK"; echo "params=$params"
+            echo "run_id=gh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"; echo "actor=$ACTOR"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Connect to the sync host
+        run: |
+          : "${MANAGER:?STRESS_MANAGER_INSTANCE_ID must be configured}"
+          : "${ROLE_ARN:?STRESS_ROLE_ARN must be configured}"
+          # AWS errors quote ARNs that differ from the secret, so mask the account too.
+          echo "::add-mask::$(cut -d: -f5 <<<"$ROLE_ARN")"
+          # The sync host's gate users can only run the gate, and gha-gauntlet-status can't start
+          # a run. Each connection pushes a key that lives 60 seconds, through the Instance
+          # Connect Endpoint.
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/stress
+          : "${HOST_KEY:?STRESS_MANAGER_HOST_KEY must be configured}"
+          printf '%s %s\n' "$MANAGER" "$HOST_KEY" > ~/.ssh/known_hosts
+          cat > "$RUNNER_TEMP/gate.sh" <<'EOF'
+          # AWS credentials from GitHub's OIDC token, fresh for every call: starting the host
+          # can outlast the role's one-hour session.
+          aws_login() {
+            local token creds
+            token="$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)"
+            creds="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" \
+              --role-session-name "sync-$GITHUB_RUN_ID" --web-identity-token "$token" \
+              --duration-seconds 3600 --query Credentials --output json)"
+            export AWS_ACCESS_KEY_ID="$(jq -r .AccessKeyId <<<"$creds")"
+            export AWS_SECRET_ACCESS_KEY="$(jq -r .SecretAccessKey <<<"$creds")"
+            export AWS_SESSION_TOKEN="$(jq -r .SessionToken <<<"$creds")"
+          }
+          gate() {
+            aws_login
+            aws ec2-instance-connect send-ssh-public-key --instance-id "$MANAGER" \
+              --instance-os-user "$GATE_USER" --ssh-public-key "file://$HOME/.ssh/stress.pub" >/dev/null
+            ssh -i ~/.ssh/stress -o BatchMode=yes -o StrictHostKeyChecking=yes \
+              -o "ProxyCommand=aws ec2-instance-connect open-tunnel --instance-id $MANAGER" \
+              "$GATE_USER@$MANAGER" "$@"
+          }
+          # Starts the host, which stops itself when idle, until its gate answers. A host that is
+          # stopping is started once stopped, and holds the gate's lock until then. EC2 may have no
+          # capacity for it for a while.
+          start_host() {
+            local error="" rc
+            aws_login
+            for _ in {1..100}; do
+              if aws ec2 start-instances --instance-ids "$MANAGER" >/dev/null 2> start.err; then
+                rc=0; gate status "$RUN_ID" >/dev/null 2> probe.err || rc=$?
+                (( rc == 255 )) || grep -q 'undergoing maintenance' probe.err || return 0
+              fi
+              # Only the error's code: its message names the instance type and zone.
+              error="$(sed -n 's/.*An error occurred (\([A-Za-z.]*\)).*/\1/p' start.err)"
+              case "$error" in
+                ''|IncorrectInstanceState|InsufficientInstanceCapacity|VcpuLimitExceeded) sleep 15 ;;
+                *) echo "::error::could not start the sync host: ${error}"; return 1 ;;
+              esac
+            done
+            case "$error" in
+              InsufficientInstanceCapacity|VcpuLimitExceeded)
+                echo "::error::EC2 had no capacity to start the sync host"; touch no-capacity ;;
+              *) echo "::error::the sync host did not answer: $(tail -n 1 probe.err)" ;;
+            esac
+            return 1
+          }
+          EOF
+
+      - name: Start the sync host
+        env:
+          RUN_ID: ${{ steps.req.outputs.run_id }}
+        run: |
+          source "$RUNNER_TEMP/gate.sh"
+          start_host
+
+      - name: Queue the run
+        env:
+          COMMIT: ${{ steps.req.outputs.commit }}
+          NETWORK: ${{ steps.req.outputs.network }}
+          PARAMS: ${{ steps.req.outputs.params }}
+          RUN_ID: ${{ steps.req.outputs.run_id }}
+          ACTOR: ${{ steps.req.outputs.actor }}
+        run: |
+          source "$RUNNER_TEMP/gate.sh"
+          # Only a rejection's message reaches the summary.
+          trap 'cat enqueue.err >&2; sed -n "s/^rejected: //p" enqueue.err | head -c 2000 > rejected.txt' EXIT
+          request=(enqueue-sync "$RUN_ID" "$COMMIT" "$NETWORK" "$ACTOR" "$PARAMS")
+          rc=0; gate "${request[@]}" 2> enqueue.err || rc=$?
+          # The host may have begun stopping since it was started: start it again, once.
+          if (( rc )); then
+            grep -q 'undergoing maintenance' enqueue.err || exit "$rc"
+            start_host || { : > enqueue.err; exit 1; }
+            gate "${request[@]}" 2> enqueue.err
+          fi
+          echo "Queued \`$RUN_ID\`. The sync-test check on \`${COMMIT:0:10}\` reports it." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report a rejection or an orchestration failure
+        if: failure() && steps.req.outcome == 'success'
+        run: |
+          if [[ -f no-capacity ]]; then
+            echo "**No capacity for the sync host**: EC2 had none to start it, so no run started and nothing was tested. Run the workflow again later." >> "$GITHUB_STEP_SUMMARY"
+          elif [[ -s rejected.txt ]]; then
+            echo "**Request rejected**: the sync host started no run: $(cat rejected.txt)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "**Orchestration interrupted**: GitHub could not queue this run. The sync host may still be running it: look for its sync-test check before retrying." >> "$GITHUB_STEP_SUMMARY"
+          fi
