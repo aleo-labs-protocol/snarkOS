@@ -55,8 +55,6 @@ pub(crate) fn prepare_endpoint(endpoint: Uri) -> Result<Uri> {
         parts.path_and_query = Some(
             format!("{path}/{API_VERSION_V2}/").parse().with_context(|| "Invalid endpoint URL with an API version")?,
         );
-    } else if parts.path_and_query.is_none() {
-        parts.path_and_query = Some(uri::PathAndQuery::from_static("/"));
     }
 
     // Given that the input URI is valid and the scheme we assign is valid, this should never fail.
