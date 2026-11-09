@@ -365,10 +365,10 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             .route("/find/transactionID/{transition_id}", get(Self::find_transaction_id_from_transition_id))
             .route("/find/transitionID/{input_or_output_id}", get(Self::find_transition_id))
 
-            // GET ../connections/p2p/.. (with ../peers/.. aliases)
-            .route("/peers/count", get(Self::get_peers_count))
-            .route("/peers/all", get(Self::get_peers_all))
-            .route("/peers/all/metrics", get(Self::get_peers_all_metrics))
+            // GET ../connections/p2p/.. (with deprecated ../peers/.. aliases)
+            .route("/peers/count", get(Self::get_peers_count).layer(middleware::map_response(deprecation_middleware)))
+            .route("/peers/all", get(Self::get_peers_all).layer(middleware::map_response(deprecation_middleware)))
+            .route("/peers/all/metrics", get(Self::get_peers_all_metrics).layer(middleware::map_response(deprecation_middleware)))
             .route("/connections/p2p/count", get(Self::get_peers_count))
             .route("/connections/p2p/all", get(Self::get_peers_all))
             .route("/connections/p2p/all/metrics", get(Self::get_peers_all_metrics))
@@ -382,9 +382,8 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             .route("/program/{id}/amendment_count", get(Self::get_program_amendment_count))
             .route("/program/{id}/{edition}/amendment_count", get(Self::get_program_amendment_count_for_edition))
 
-            // GET ../sync/..
-            // Note: keeping ../sync_status for compatibility
-            .route("/sync_status", get(Self::get_sync_status))
+            // GET ../sync/.. (with the deprecated ../sync_status alias)
+            .route("/sync_status", get(Self::get_sync_status).layer(middleware::map_response(deprecation_middleware)))
             .route("/sync/status", get(Self::get_sync_status))
             .route("/sync/peers", get(Self::get_sync_peers))
             .route("/sync/requests", get(Self::get_sync_requests_summary))
@@ -492,7 +491,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         let v1_routes = || {
             self.build_routes(rest_rps)
                 .layer(middleware::map_response(v1_error_middleware))
-                .layer(middleware::map_response(v1_deprecation_middleware))
+                .layer(middleware::map_response(deprecation_middleware))
         };
         let default_router = axum::Router::new().nest(&format!("/{}", N::SHORT_NAME), v1_routes());
         let v1_router = axum::Router::new().nest(&format!("/{API_VERSION_V1}/{}", N::SHORT_NAME), v1_routes());
@@ -562,33 +561,36 @@ async fn record_rest_request(request: Request<Body>, next: middleware::Next) -> 
     response
 }
 
-/// When the v1 API (served under `/v1/<network>` and the unprefixed `/<network>`) was deprecated,
-/// as seconds since the Unix epoch: 2026-11-08T00:00:00Z.
-const V1_DEPRECATION_TIMESTAMP: i64 = 1_794_096_000;
+/// When the v1 API (served under `/v1/<network>` and the unprefixed `/<network>`) and the alias
+/// routes were deprecated, as seconds since the Unix epoch: 2026-11-08T00:00:00Z.
+const DEPRECATION_TIMESTAMP: i64 = 1_794_096_000;
 
-/// Where a v1 client learns how to migrate to v2.
-const V1_MIGRATION_GUIDE_URL: &str = "https://github.com/aleo-labs-protocol/snarkOS/pull/4650";
+/// Where a client of a deprecated route learns how to migrate.
+const MIGRATION_GUIDE_URL: &str = "https://github.com/aleo-labs-protocol/snarkOS/pull/4650";
 
 /// The `Deprecation` response header field (RFC 9745).
 const DEPRECATION: HeaderName = HeaderName::from_static("deprecation");
 
-/// Marks every v1 response as deprecated (RFC 9745): a `Deprecation` header with the date, and a
-/// `Link` to the migration guide with relation type `deprecation`.
+/// Marks a response as deprecated (RFC 9745): a `Deprecation` header with the date, and a `Link`
+/// to the migration guide with relation type `deprecation`. Applying it twice, as happens to an
+/// alias route under v1, adds the headers once.
 ///
-/// This must be layered outside `v1_error_middleware`, which rebuilds error responses from scratch
-/// and would drop any header set before it.
-async fn v1_deprecation_middleware(mut response: Response) -> Response {
+/// On v1 this must be layered outside `v1_error_middleware`, which rebuilds error responses from
+/// scratch and would drop any header set before it.
+async fn deprecation_middleware(mut response: Response) -> Response {
     static DEPRECATION_VALUE: LazyLock<HeaderValue> = LazyLock::new(|| {
-        HeaderValue::from_str(&format!("@{V1_DEPRECATION_TIMESTAMP}")).expect("the deprecation date is ASCII")
+        HeaderValue::from_str(&format!("@{DEPRECATION_TIMESTAMP}")).expect("the deprecation date is ASCII")
     });
     static LINK_VALUE: LazyLock<HeaderValue> = LazyLock::new(|| {
-        HeaderValue::from_str(&format!("<{V1_MIGRATION_GUIDE_URL}>; rel=\"deprecation\""))
+        HeaderValue::from_str(&format!("<{MIGRATION_GUIDE_URL}>; rel=\"deprecation\""))
             .expect("the migration guide link is ASCII")
     });
 
     let headers = response.headers_mut();
     headers.insert(DEPRECATION, DEPRECATION_VALUE.clone());
-    headers.append(LINK, LINK_VALUE.clone());
+    if !headers.get_all(LINK).iter().any(|value| value == *LINK_VALUE) {
+        headers.append(LINK, LINK_VALUE.clone());
+    }
     response
 }
 
@@ -1229,7 +1231,7 @@ mod route_tests {
             }
         };
 
-        let expected_link = format!("<{V1_MIGRATION_GUIDE_URL}>; rel=\"deprecation\"");
+        let expected_link = format!("<{MIGRATION_GUIDE_URL}>; rel=\"deprecation\"");
         for prefix in ["/mainnet", "/v1/mainnet"] {
             // A success, and an error, which `v1_error_middleware` rebuilds from scratch: the notice
             // has to survive that rebuild.
@@ -1242,7 +1244,7 @@ mod route_tests {
                 assert_eq!(actual, status, "{uri} returned an unexpected status");
                 assert_eq!(
                     headers.get(DEPRECATION).and_then(|value| value.to_str().ok()),
-                    Some(format!("@{V1_DEPRECATION_TIMESTAMP}").as_str()),
+                    Some(format!("@{DEPRECATION_TIMESTAMP}").as_str()),
                     "{uri} did not carry the Deprecation header"
                 );
                 assert!(
@@ -1255,6 +1257,44 @@ mod route_tests {
         for route in ["blocks/hashes?start=0&end=1", "blocks/hashes?start=0&end=2"] {
             let uri = format!("/v2/mainnet/{route}");
             let (_, headers) = headers_of(uri.clone()).await;
+            assert!(headers.get(DEPRECATION).is_none(), "{uri} is not deprecated but said it was");
+            assert!(headers.get(LINK).is_none(), "{uri} linked a deprecation notice");
+        }
+    }
+
+    #[tokio::test]
+    async fn alias_routes_carry_the_deprecation_notice_once_and_their_targets_do_not() {
+        let rest = sample_rest().await;
+        let router = rest.build_versioned_router(TEST_RPS);
+
+        let headers_of = |uri: String| {
+            let router = router.clone();
+            async move {
+                let mut request = Request::builder().uri(uri.as_str()).body(Body::empty()).unwrap();
+                request.extensions_mut().insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4130))));
+                router.oneshot(request).await.unwrap().headers().clone()
+            }
+        };
+
+        let expected_link = format!("<{MIGRATION_GUIDE_URL}>; rel=\"deprecation\"");
+        // Under v1 the alias is deprecated twice over, by the route and by the version.
+        for prefix in ["/v2/mainnet", "/v1/mainnet", "/mainnet"] {
+            for alias in ["sync_status", "peers/count", "peers/all", "peers/all/metrics"] {
+                let uri = format!("{prefix}/{alias}");
+                let headers = headers_of(uri.clone()).await;
+                assert_eq!(
+                    headers.get(DEPRECATION).and_then(|value| value.to_str().ok()),
+                    Some(format!("@{DEPRECATION_TIMESTAMP}").as_str()),
+                    "{uri} did not carry the Deprecation header"
+                );
+                let links: Vec<_> = headers.get_all(LINK).iter().filter_map(|value| value.to_str().ok()).collect();
+                assert_eq!(links, [expected_link.as_str()], "{uri} should link the migration guide exactly once");
+            }
+        }
+
+        for target in ["sync/status", "connections/p2p/count", "connections/p2p/all", "connections/p2p/all/metrics"] {
+            let uri = format!("/v2/mainnet/{target}");
+            let headers = headers_of(uri.clone()).await;
             assert!(headers.get(DEPRECATION).is_none(), "{uri} is not deprecated but said it was");
             assert!(headers.get(LINK).is_none(), "{uri} linked a deprecation notice");
         }
