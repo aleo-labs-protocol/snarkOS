@@ -47,12 +47,14 @@ use serde::{Serialize, de::DeserializeOwned};
 use std::{
     path::PathBuf,
     str::FromStr,
-    sync::atomic::{AtomicBool, Ordering},
     thread,
     time::{Duration, Instant},
 };
 use tracing::debug;
-use ureq::http::{self, Uri};
+use ureq::{
+    ResponseExt,
+    http::{self, Uri},
+};
 
 /// The format to store a generated transaction as.
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -262,7 +264,7 @@ impl Developer {
     /// If the error was 404, this simply returns `Ok(None)`.
     fn handle_ureq_result(result: Result<http::Response<ureq::Body>>) -> Result<Option<ureq::Body>> {
         let response = result?;
-        Self::warn_if_deprecated(response.headers());
+        Self::warn_if_deprecated(&response);
 
         if response.status().is_success() {
             Ok(Some(response.into_body()))
@@ -290,21 +292,18 @@ impl Developer {
         }
     }
 
-    /// Warns, once per run, when an endpoint reports that the API it serves is deprecated.
+    /// Warns when a response reports that its endpoint is deprecated.
     ///
-    /// A deprecated API sends a `Deprecation` header (RFC 9745), and may link a migration guide in
-    /// a `Link` header with relation type `deprecation`.
-    fn warn_if_deprecated(headers: &http::HeaderMap) {
-        static WARNED: AtomicBool = AtomicBool::new(false);
-
-        if !headers.contains_key("deprecation") || WARNED.swap(true, Ordering::Relaxed) {
+    /// A deprecated endpoint sends a `Deprecation` header (RFC 9745), and may link a migration guide
+    /// in a `Link` header with relation type `deprecation`.
+    fn warn_if_deprecated(response: &http::Response<ureq::Body>) {
+        if !response.headers().contains_key("deprecation") {
             return;
         }
-        match Self::deprecation_link(headers) {
-            Some(url) => {
-                eprintln!("⚠️  This endpoint serves a deprecated API that will be removed. See how to migrate: {url}")
-            }
-            None => eprintln!("⚠️  This endpoint serves a deprecated API that will be removed."),
+        let uri = response.get_uri();
+        match Self::deprecation_link(response.headers()) {
+            Some(url) => eprintln!("⚠️  {uri} is deprecated and will be removed. See how to migrate: {url}"),
+            None => eprintln!("⚠️  {uri} is deprecated and will be removed."),
         }
     }
 
