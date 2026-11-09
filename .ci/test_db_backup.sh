@@ -180,8 +180,9 @@ while (( total_wait < 600 )); do  # 10 minutes max
         # Add 1-second delay between starting nodes to avoid hitting rate limits
         sleep 1
 
-        # The REST server starts after the ledger loads and before the node connects to peers,
-        # so the first height it reports is the height of the ledger it loaded.
+        # The REST server starts after the ledger loads and shortly before the node connects to
+        # peers. The first height it reports is the loaded height, or a little above it if the node
+        # synced blocks from a quorum that is already running.
         port=$((3030 + validator_index))
         height=""
         for ((attempt = 0; attempt < 120; attempt++)); do
@@ -202,8 +203,8 @@ while (( total_wait < 600 )); do  # 10 minutes max
         log "Node #${validator_index} height after restart: $height"
 
         # A node that ignored the checkpoint starts either at genesis or at its pre-shutdown height.
-        if (( height != checkpoint_floor )); then
-          log "❌ Node #${validator_index} restarted at height $height, expected $checkpoint_floor"
+        if (( height < checkpoint_floor || height >= rollback_height )); then
+          log "❌ Node #${validator_index} restarted at height $height, expected at least $checkpoint_floor and below $rollback_height"
           log "❌ Test failed!"
           exit 1
         fi
