@@ -1,0 +1,49 @@
+[package]
+name = "snarkos-tx-events-sink"
+version = "4.12.0"
+authors = [ "The Aleo Team <hello@aleo.org>" ]
+description = "A receiver for the transaction events of snarkOS nodes"
+homepage = "https://aleo.org"
+repository = "https://github.com/ProvableHQ/snarkOS"
+license = "Apache-2.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "tx-events-sink"
+path = "src/main.rs"
+
+[dependencies.anyhow]
+workspace = true
+
+[dependencies.axum]
+workspace = true
+
+[dependencies.clap]
+workspace = true
+features = [ "derive", "help", "usage" ]
+
+[dependencies.lru]
+workspace = true
+
+[dependencies.serde]
+workspace = true
+features = [ "derive" ]
+
+[dependencies.serde_json]
+workspace = true
+
+[dependencies.tokio]
+workspace = true
+features = [ "macros", "net", "rt-multi-thread" ]
+
+[dev-dependencies.snarkos-node-metrics]
+workspace = true
+
+[dev-dependencies.snarkvm]
+workspace = true
+features = [ "console" ]
+
+[dev-dependencies.tokio]
+workspace = true
+features = [ "io-util", "time" ]
