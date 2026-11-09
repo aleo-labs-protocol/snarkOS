@@ -29,11 +29,10 @@ mod transfer_private;
 pub use transfer_private::*;
 
 use crate::helpers::{
-    args::{network_id_parser, prepare_endpoint},
+    args::{api_version_of, network_id_parser, prepare_endpoint},
     logger::initialize_terminal_logger,
 };
 
-use snarkos_node_rest::{API_VERSION_V1, API_VERSION_V2};
 use snarkvm::{
     ledger::store::helpers::memory::BlockMemory,
     package::Package,
@@ -232,32 +231,16 @@ impl Developer {
         // This function is only called internally but check for additional sanity.
         ensure!(!route.starts_with('/'), "path cannot start with a slash");
 
-        // Determine the API version we are interacting with.
-        let api_version = {
-            let last_segment = base_url.path().trim_end_matches('/').rsplit('/').next().unwrap_or_default();
-
-            if last_segment == API_VERSION_V1 {
-                Some(ApiVersion::V1)
-            } else if last_segment == API_VERSION_V2 {
-                Some(ApiVersion::V2)
-            } else {
-                // No version given. The unversioned routes serve the deprecated v1 API, so
-                // request v2 explicitly.
-                None
-            }
-        };
+        let api_version = api_version_of(base_url.path())
+            .context("The endpoint URL must end in an API version (v1 or v2). Use `prepare_endpoint` first")?;
 
         // Work around a bug in the `http` crate where empty paths will be set to '/'
         // but other paths are not appended with a slash.
         // See https://github.com/hyperium/http/issues/507
         let sep = if base_url.path().ends_with('/') { "" } else { "/" };
 
-        // Build "{base}/{version}/{network}/{route}"
-        let network = N::SHORT_NAME;
-        match api_version {
-            Some(api_version) => Ok((format!("{base_url}{sep}{network}/{route}"), api_version)),
-            None => Ok((format!("{base_url}{sep}{API_VERSION_V2}/{network}/{route}"), ApiVersion::V2)),
-        }
+        // Build "{base}/{network}/{route}"
+        Ok((format!("{base_url}{sep}{network}/{route}", network = N::SHORT_NAME), api_version))
     }
 
     /// Converts the returned JSON error (if any) into an anyhow Error chain.
@@ -323,18 +306,6 @@ impl Developer {
             .and_then(|link| link.split_once('<')?.1.split_once('>').map(|(url, _)| url.trim().to_owned()))
     }
 
-    /// Extracts the API version from a custom endpoint.
-    fn parse_custom_endpoint<N: Network>(url: &Uri) -> (String, ApiVersion) {
-        // Determine API version for custom endpoint.
-        if let Some(pq) = url.path_and_query()
-            && pq.path().ends_with(&format!("{API_VERSION_V2}/{}/transaction/broadcast", N::SHORT_NAME))
-        {
-            (url.to_string(), ApiVersion::V2)
-        } else {
-            (url.to_string(), ApiVersion::V1)
-        }
-    }
-
     /// Helper function to send a POST request with a JSON body to an endpoint and await a JSON response.
     fn http_post_json<I: Serialize, O: DeserializeOwned>(path: &str, arg: &I) -> Result<Option<O>> {
         debug!("Issuing POST request to \"{path}\"");
@@ -383,8 +354,9 @@ impl Developer {
         endpoint: &Uri,
         transaction_id: &N::TransactionID,
         timeout_seconds: u64,
-        api_version: ApiVersion,
     ) -> Result<()> {
+        // The polled URL, not the broadcast URL, decides how a response is read.
+        let api_version = api_version_of(endpoint.path()).context("The endpoint URL must end in an API version")?;
         let start_time = Instant::now();
         let timeout_duration = Duration::from_secs(timeout_seconds);
         let poll_interval = Duration::from_secs(1); // Poll every second
@@ -505,13 +477,13 @@ impl Developer {
 
         // Determine if the transaction should be broadcast to the network.
         if let Some(broadcast_value) = broadcast {
-            let (broadcast_endpoint, api_version) = if let Some(url) = broadcast_value {
+            let broadcast_endpoint = if let Some(url) = broadcast_value {
                 debug!("Using custom endpoint for broadcasting: {url}");
-                Self::parse_custom_endpoint::<N>(url)
+                url.to_string()
             } else {
                 let endpoint = endpoint
                     .context("Cannot broadcast a transaction built from a static query without a broadcast URL")?;
-                Self::build_endpoint::<N>(endpoint, "transaction/broadcast")?
+                Self::build_endpoint::<N>(endpoint, "transaction/broadcast")?.0
             };
 
             let result: Result<String> = match Self::http_post_json(&broadcast_endpoint, &transaction) {
@@ -550,7 +522,7 @@ impl Developer {
                         let endpoint = endpoint
                             .context("Cannot wait for confirmation of a transaction built from a static query")?;
                         println!("⏳ Waiting for transaction confirmation (timeout: {timeout}s)...");
-                        Self::wait_for_transaction_confirmation::<N>(endpoint, &transaction_id, timeout, api_version)?;
+                        Self::wait_for_transaction_confirmation::<N>(endpoint, &transaction_id, timeout)?;
 
                         match transaction {
                             Transaction::Deploy(..) => {
@@ -629,20 +601,12 @@ mod tests {
         assert_eq!(endpoint.unwrap(), DEFAULT_ENDPOINT);
     }
 
-    /// Ensure that an endpoint without a version requests v2, since the unversioned routes serve
-    /// the deprecated v1 API.
+    /// Ensure that an endpoint must name an API version. `prepare_endpoint` adds one.
     #[test]
-    fn test_build_endpoint_default_v2() {
-        for base_uri_str in ["http://localhost:3030", "http://localhost:3030/"] {
+    fn test_build_endpoint_requires_version() {
+        for base_uri_str in ["http://localhost:3030", "http://localhost:3030/", "http://localhost:3030/dev2"] {
             let base_uri = Uri::try_from(base_uri_str).unwrap();
-            let (endpoint, api_version) =
-                Developer::build_endpoint::<CurrentNetwork>(&base_uri, "transaction/broadcast").unwrap();
-
-            assert_eq!(
-                endpoint,
-                format!("http://localhost:3030/v2/{}/transaction/broadcast", CurrentNetwork::SHORT_NAME)
-            );
-            assert_eq!(api_version, ApiVersion::V2);
+            assert!(Developer::build_endpoint::<CurrentNetwork>(&base_uri, "transaction/broadcast").is_err());
         }
     }
 
@@ -684,28 +648,6 @@ mod tests {
             Developer::build_endpoint::<CurrentNetwork>(&base_uri, "transaction/broadcast").unwrap();
 
         assert_eq!(endpoint, format!("{base_uri_str}/{}/transaction/broadcast", CurrentNetwork::SHORT_NAME));
-        assert_eq!(api_version, ApiVersion::V2);
-    }
-
-    #[test]
-    fn test_custom_endpoint_v1() {
-        let endpoint_str = "http://localhost:3030/v1/mainnet/transaction/broadcast";
-        let endpoint = Uri::try_from(endpoint_str).unwrap();
-
-        let (parsed, api_version) = Developer::parse_custom_endpoint::<CurrentNetwork>(&endpoint);
-
-        assert_eq!(parsed, endpoint_str);
-        assert_eq!(api_version, ApiVersion::V1);
-    }
-
-    #[test]
-    fn test_custom_endpoint_v2() {
-        let endpoint_str = "http://localhost:3030/v2/mainnet/transaction/broadcast";
-        let endpoint = Uri::try_from(endpoint_str).unwrap();
-
-        let (parsed, api_version) = Developer::parse_custom_endpoint::<CurrentNetwork>(&endpoint);
-
-        assert_eq!(parsed, endpoint_str);
         assert_eq!(api_version, ApiVersion::V2);
     }
 }

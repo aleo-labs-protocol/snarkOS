@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::helpers::dev::get_development_key;
+use crate::{commands::ApiVersion, helpers::dev::get_development_key};
 
 use snarkos_utilities::NodeDataDir;
 
@@ -50,8 +50,7 @@ pub(crate) fn prepare_endpoint(endpoint: Uri) -> Result<Uri> {
     }
 
     let path = parts.path_and_query.as_ref().map(|pq| pq.path()).unwrap_or("/").trim_end_matches('/').to_owned();
-    let last_segment = path.rsplit('/').next().unwrap_or_default();
-    if last_segment != API_VERSION_V1 && last_segment != API_VERSION_V2 {
+    if api_version_of(&path).is_none() {
         parts.path_and_query = Some(
             format!("{path}/{API_VERSION_V2}/").parse().with_context(|| "Invalid endpoint URL with an API version")?,
         );
@@ -59,6 +58,15 @@ pub(crate) fn prepare_endpoint(endpoint: Uri) -> Result<Uri> {
 
     // Given that the input URI is valid and the scheme we assign is valid, this should never fail.
     Uri::from_parts(parts).with_context(|| "Invalid endpoint URL")
+}
+
+/// Returns the API version named by the last segment of a URL path, if any.
+pub(crate) fn api_version_of(path: &str) -> Option<ApiVersion> {
+    match path.trim_end_matches('/').rsplit('/').next() {
+        Some(API_VERSION_V1) => Some(ApiVersion::V1),
+        Some(API_VERSION_V2) => Some(ApiVersion::V2),
+        _ => None,
+    }
 }
 
 /// Fetch the private key, either from the commandline or from a file.
