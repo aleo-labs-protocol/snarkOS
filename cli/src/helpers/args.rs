@@ -41,7 +41,7 @@ pub(crate) fn network_id_parser() -> RangedU64ValueParser<u16> {
 ///
 /// An endpoint with a query string is rejected, since request routes are appended to its path.
 pub(crate) fn prepare_endpoint(endpoint: Uri) -> Result<Uri> {
-    ensure!(endpoint.query().is_none(), "The endpoint URL must not have a query string: {endpoint}");
+    ensure!(endpoint.query().is_none(), "The endpoint URL must not have a query string");
     let mut parts = endpoint.into_parts();
 
     if parts.scheme.is_none() {
