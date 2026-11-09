@@ -21,7 +21,7 @@ use snarkos_utilities::{SignalHandler, Stoppable};
 
 use snarkvm::{
     console::account::ComputeKeyCache,
-    prelude::{Deserialize, FromBytes, Ledger, Network, Serialize, block::Block, store::ConsensusStorage},
+    prelude::{Deserialize, Ledger, Network, Serialize, block::Block, store::ConsensusStorage},
     utilities::flatten_error,
 };
 
@@ -496,7 +496,7 @@ async fn cdn_get_blocks<N: Network>(client: Client, url: &str, ctx: &str) -> Res
 
     // Parse the blocks.
     match tokio::task::spawn_blocking(move || (read_blocks::<N>(&bytes), bytes)).await {
-        Ok((Ok(objects), _)) => Ok(objects),
+        Ok((Ok(blocks), _)) => Ok(blocks),
         Ok((Err(error), response_bytes)) => {
             let bytes_as_string = String::from_utf8_lossy(&response_bytes);
             bail!("Failed to deserialize {ctx} - {error} - {bytes_as_string}")
@@ -507,23 +507,16 @@ async fn cdn_get_blocks<N: Network>(client: Client, url: &str, ctx: &str) -> Res
     }
 }
 
-/// Reads a CDN file of blocks without checking them. The file is the bincode encoding of a `Vec<Block<N>>`.
+/// Reads a CDN file of blocks, the bincode encoding of a `Vec<Block<N>>`, without checking them.
 ///
-/// The blocks share one compute-key cache, so each signer's key is decoded once per file.
-fn read_blocks<N: Network>(mut bytes: &[u8]) -> Result<Vec<Block<N>>> {
-    // bincode prefixes the vector, and the bytes of each block, with a little-endian `u64` length.
-    let num_blocks = u64::read_le(&mut bytes)?;
-    let mut blocks = Vec::with_capacity(cmp::min(num_blocks, u64::from(BLOCKS_PER_FILE)) as usize);
+/// The blocks share one compute-key cache.
+fn read_blocks<N: Network>(bytes: &[u8]) -> Result<Vec<Block<N>>> {
+    // bincode encodes each block as its length-prefixed `to_bytes_le` bytes.
     let mut cache = ComputeKeyCache::default();
-    for _ in 0..num_blocks {
-        let num_bytes = usize::try_from(u64::read_le(&mut bytes)?)?;
-        let Some((block_bytes, rest)) = bytes.split_at_checked(num_bytes) else {
-            bail!("The block length ({num_bytes}) exceeds the remaining bytes ({})", bytes.len());
-        };
-        blocks.push(Block::read_le_with_cache(block_bytes, true, &mut cache)?);
-        bytes = rest;
-    }
-    Ok(blocks)
+    bincode::deserialize::<Vec<&[u8]>>(bytes)?
+        .into_iter()
+        .map(|block_bytes| Ok(Block::read_le_with_cache(block_bytes, true, &mut cache)?))
+        .collect()
 }
 
 /// Converts a duration into a string that humans can read easily.
@@ -649,10 +642,13 @@ mod tests {
         (url, handle)
     }
 
+    fn sample_genesis() -> Block<CurrentNetwork> {
+        Block::from_bytes_le(CurrentNetwork::genesis_bytes()).unwrap()
+    }
+
     /// Returns a CDN file that compresses well: the genesis block, repeated.
     fn sample_payload() -> (Vec<Block<CurrentNetwork>>, Vec<u8>) {
-        let genesis = Block::<CurrentNetwork>::from_bytes_le(CurrentNetwork::genesis_bytes()).unwrap();
-        let blocks = vec![genesis; 3];
+        let blocks = vec![sample_genesis(); 3];
         let bytes = bincode::serialize(&blocks).unwrap();
         (blocks, bytes)
     }
@@ -709,19 +705,49 @@ mod tests {
 
     #[test]
     fn test_read_blocks_matches_unchecked_deserialize() {
-        let genesis = Block::<CurrentNetwork>::from_bytes_le(CurrentNetwork::genesis_bytes()).unwrap();
+        let genesis = sample_genesis();
         for num_blocks in [0, 1, 3] {
             let bytes = bincode::serialize(&vec![genesis.clone(); num_blocks]).unwrap();
             let expected: Vec<Block<CurrentNetwork>> = unchecked_deserialize(&bytes).unwrap();
             assert_eq!(read_blocks::<CurrentNetwork>(&bytes).unwrap(), expected);
             // Truncated files fail on both paths.
-            for len in [0, 7, 8, bytes.len() / 2, bytes.len() - 1] {
-                if len >= bytes.len() {
-                    continue;
-                }
+            for len in [0, 7, 8, bytes.len() / 2, bytes.len() - 1].into_iter().filter(|&len| len < bytes.len()) {
                 let truncated = &bytes[..len];
                 assert!(unchecked_deserialize::<Vec<Block<CurrentNetwork>>>(truncated).is_err());
                 assert!(read_blocks::<CurrentNetwork>(truncated).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn test_read_blocks_matches_unchecked_deserialize_on_malformed_files() {
+        let bytes = bincode::serialize(&vec![sample_genesis(); 2]).unwrap();
+        let with_count = |count: u64| [&count.to_le_bytes()[..], &bytes[8..]].concat();
+        // The first block starts after the vector length and its own length.
+        let first_block_at = 16;
+        let with_flipped_byte = |at: usize| {
+            let mut file = bytes.clone();
+            file[at] ^= 1;
+            file
+        };
+
+        // Each file, and whether both paths accept it.
+        let files = [
+            ([&bytes[..], &[0u8; 3]].concat(), true),
+            (with_count(1), true),
+            (with_count(3), false),
+            ([&1u64.to_le_bytes()[..], &0u64.to_le_bytes()].concat(), false),
+            (with_flipped_byte(first_block_at), false),
+            // An unchecked read trusts the stored block hash.
+            (with_flipped_byte(first_block_at + 1), true),
+        ];
+        for (i, (file, accepted)) in files.into_iter().enumerate() {
+            let expected = unchecked_deserialize::<Vec<Block<CurrentNetwork>>>(&file);
+            let actual = read_blocks::<CurrentNetwork>(&file);
+            assert_eq!(expected.is_ok(), accepted, "file {i}");
+            assert_eq!(actual.is_ok(), accepted, "file {i}");
+            if let (Ok(expected), Ok(actual)) = (expected, actual) {
+                assert_eq!(expected, actual, "file {i}");
             }
         }
     }

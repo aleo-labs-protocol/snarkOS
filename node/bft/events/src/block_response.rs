@@ -174,7 +174,7 @@ impl<N: Network> FromBytes for DataBlocks<N> {
         if num_blocks > Self::MAXIMUM_NUMBER_OF_BLOCKS {
             return Err(error("Block response exceeds maximum number of blocks"));
         }
-        // Read the blocks. They share one compute-key cache, so each signer's key is decoded once per response.
+        // Read the blocks through one compute-key cache.
         let mut cache = ComputeKeyCache::default();
         let blocks = (0..num_blocks)
             .map(|_| Block::read_le_with_cache(&mut reader, false, &mut cache))
@@ -191,7 +191,7 @@ pub mod prop_tests {
     use snarkvm::{
         console::network::ConsensusVersion,
         ledger::{narwhal::Data, test_helpers::sample_genesis_block},
-        prelude::{FromBytes, TestRng, ToBytes},
+        prelude::{FromBytes, TestRng, ToBytes, block::Block},
     };
 
     use bytes::{Buf, BufMut, BytesMut};
@@ -263,5 +263,23 @@ pub mod prop_tests {
         assert_eq!(response.request, request);
         assert_eq!(response.latest_consensus_version, None);
         assert_eq!(response.blocks.deserialize_blocking().unwrap(), blocks);
+    }
+
+    #[test]
+    fn read_rejects_a_bad_compute_key_after_a_good_one() {
+        let block = sample_genesis_block(&mut TestRng::default());
+        let block_bytes = block.to_bytes_le().unwrap();
+        // The authority follows the version, the block hash, the previous hash and the header.
+        let authority_at = 1 + 32 + 32 + block.header().to_bytes_le().unwrap().len();
+        assert!(block_bytes[authority_at..].starts_with(&block.authority().to_bytes_le().unwrap()));
+        // The beacon signature's `pk_sig` follows the authority variant, the challenge and the response.
+        let pk_sig_at = authority_at + 1 + 64;
+        let mut bad_block_bytes = block_bytes.clone();
+        bad_block_bytes[pk_sig_at..pk_sig_at + 32].fill(0xFF);
+        let expected = Block::<CurrentNetwork>::read_le(&bad_block_bytes[..]).unwrap_err().to_string();
+
+        let bytes = [&[2u8][..], &block_bytes, &bad_block_bytes].concat();
+        let error = DataBlocks::<CurrentNetwork>::read_le(&bytes[..]).unwrap_err().to_string();
+        assert_eq!(error, expected);
     }
 }
