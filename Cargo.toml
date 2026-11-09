@@ -49,7 +49,7 @@ default-features = false
 [workspace.dependencies.snarkvm]
 #path = "../snarkVM"
 git = "https://github.com/aleo-labs-protocol/snarkVM.git"
-rev = "2d2e3aa550d6c99952076f69470f495ef8476a76" # snarkVM#3671
+rev = "b358e22b4528cad870cd2efa2667c4c749d93936" # snarkVM#3671
 #version = "=4.12.0"
 default-features = false
 
