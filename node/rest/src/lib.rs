@@ -366,9 +366,9 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             .route("/find/transitionID/{input_or_output_id}", get(Self::find_transition_id))
 
             // GET ../connections/p2p/.. (with deprecated ../peers/.. aliases)
-            .route("/peers/count", get(Self::get_peers_count).layer(middleware::map_response(deprecation_middleware)))
-            .route("/peers/all", get(Self::get_peers_all).layer(middleware::map_response(deprecation_middleware)))
-            .route("/peers/all/metrics", get(Self::get_peers_all_metrics).layer(middleware::map_response(deprecation_middleware)))
+            .route("/peers/count", get(Self::get_peers_count))
+            .route("/peers/all", get(Self::get_peers_all))
+            .route("/peers/all/metrics", get(Self::get_peers_all_metrics))
             .route("/connections/p2p/count", get(Self::get_peers_count))
             .route("/connections/p2p/all", get(Self::get_peers_all))
             .route("/connections/p2p/all/metrics", get(Self::get_peers_all_metrics))
@@ -383,7 +383,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             .route("/program/{id}/{edition}/amendment_count", get(Self::get_program_amendment_count_for_edition))
 
             // GET ../sync/.. (with the deprecated ../sync_status alias)
-            .route("/sync_status", get(Self::get_sync_status).layer(middleware::map_response(deprecation_middleware)))
+            .route("/sync_status", get(Self::get_sync_status))
             .route("/sync/status", get(Self::get_sync_status))
             .route("/sync/peers", get(Self::get_sync_peers))
             .route("/sync/requests", get(Self::get_sync_requests_summary))
@@ -474,6 +474,8 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             // `LATEST_MAX_TRANSACTION_SIZE`.
             .layer(DefaultBodyLimit::max(2 * N::LATEST_MAX_TRANSACTION_SIZE()))
             .layer(governor_layer)
+            // Outside the rate and body limits, so that their rejections carry the notice too.
+            .layer(middleware::from_fn(deprecated_alias_middleware))
             // Enable CORS.
             .layer(cors)
             // Enable tower-http tracing.
@@ -593,6 +595,17 @@ async fn deprecation_middleware(mut response: Response) -> Response {
         headers.append(LINK, LINK_VALUE.clone());
     }
     response
+}
+
+/// The alias routes, which duplicate other routes and are deprecated on every API version.
+const DEPRECATED_ALIASES: [&str; 4] = ["/peers/count", "/peers/all", "/peers/all/metrics", "/sync_status"];
+
+/// Marks every response to a request for an alias route as deprecated, including rejections by
+/// the layers it wraps.
+async fn deprecated_alias_middleware(request: Request<Body>, next: middleware::Next) -> Response {
+    let is_alias = DEPRECATED_ALIASES.contains(&request.uri().path());
+    let response = next.run(request).await;
+    if is_alias { deprecation_middleware(response).await } else { response }
 }
 
 /// Converts errors to the old style for the v1 API.
@@ -1299,6 +1312,22 @@ mod route_tests {
             assert!(headers.get(DEPRECATION).is_none(), "{uri} is not deprecated but said it was");
             assert!(headers.get(LINK).is_none(), "{uri} linked a deprecation notice");
         }
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_alias_route_carries_the_deprecation_notice() {
+        let rest = sample_rest().await;
+        let router = rest.build_versioned_router(1);
+
+        let mut statuses = vec![];
+        for _ in 0..2 {
+            let mut request = Request::builder().uri("/v2/mainnet/peers/count").body(Body::empty()).unwrap();
+            request.extensions_mut().insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4130))));
+            let response = router.clone().oneshot(request).await.unwrap();
+            assert!(response.headers().contains_key(DEPRECATION), "a {} lacked the notice", response.status());
+            statuses.push(response.status());
+        }
+        assert_eq!(statuses, [StatusCode::OK, StatusCode::TOO_MANY_REQUESTS]);
     }
 
     #[tokio::test]
