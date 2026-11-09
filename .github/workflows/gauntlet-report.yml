@@ -7,9 +7,9 @@
 #
 # It reads the host through its gate as gha-gauntlet-status, which can't start a run, with an IAM
 # role that only this file on staging can assume. stress-test-status and sync-test-status each hold:
-#   environment secret  STRESS_ROLE_ARN              the role
-#   environment secret  STRESS_MANAGER_INSTANCE_ID   the host
-# and the variable STRESS_MANAGER_HOST_KEY, the host's ssh host key line, and optionally the secret
+#   environment secret  GAUNTLET_ROLE_ARN           the role
+#   environment secret  GAUNTLET_HOST_INSTANCE_ID   the host
+# and the variable GAUNTLET_HOST_KEY, the host's ssh host key line, and optionally the secret
 # ANTHROPIC_API_KEY, for the comparison.
 name: "Gauntlet: Report"
 
@@ -39,9 +39,9 @@ jobs:
     env:
       AWS_REGION: us-west-2
       GH_TOKEN: ${{ github.token }}
-      MANAGER: ${{ secrets.STRESS_MANAGER_INSTANCE_ID }}
-      ROLE_ARN: ${{ secrets.STRESS_ROLE_ARN }}
-      HOST_KEY: ${{ vars.STRESS_MANAGER_HOST_KEY }}
+      HOST_ID: ${{ secrets.GAUNTLET_HOST_INSTANCE_ID }}
+      ROLE_ARN: ${{ secrets.GAUNTLET_ROLE_ARN }}
+      HOST_KEY: ${{ vars.GAUNTLET_HOST_KEY }}
       GATE_USER: gha-gauntlet-status
       NAME: ${{ github.event.check_run.name }}
       RUN_ID: ${{ github.event.check_run.external_id }}
@@ -55,16 +55,16 @@ jobs:
 
       - name: Connect to the host
         run: |
-          : "${MANAGER:?STRESS_MANAGER_INSTANCE_ID must be configured}"
-          : "${ROLE_ARN:?STRESS_ROLE_ARN must be configured}"
+          : "${HOST_ID:?GAUNTLET_HOST_INSTANCE_ID must be configured}"
+          : "${ROLE_ARN:?GAUNTLET_ROLE_ARN must be configured}"
           # AWS errors quote ARNs that differ from the secret, so mask the account too.
           echo "::add-mask::$(cut -d: -f5 <<<"$ROLE_ARN")"
           # gha-gauntlet-status can only run the gate's status, report and cancel. Each connection
           # pushes a key that lives 60 seconds, through the Instance Connect Endpoint.
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/stress
-          : "${HOST_KEY:?STRESS_MANAGER_HOST_KEY must be configured}"
-          printf '%s %s\n' "$MANAGER" "$HOST_KEY" > ~/.ssh/known_hosts
+          : "${HOST_KEY:?GAUNTLET_HOST_KEY must be configured}"
+          printf '%s %s\n' "$HOST_ID" "$HOST_KEY" > ~/.ssh/known_hosts
           cat > "$RUNNER_TEMP/gate.sh" <<'EOF'
           # AWS credentials from GitHub's OIDC token, fresh for every call.
           aws_login() {
@@ -80,11 +80,11 @@ jobs:
           }
           gate() {
             aws_login
-            aws ec2-instance-connect send-ssh-public-key --instance-id "$MANAGER" \
+            aws ec2-instance-connect send-ssh-public-key --instance-id "$HOST_ID" \
               --instance-os-user "$GATE_USER" --ssh-public-key "file://$HOME/.ssh/stress.pub" >/dev/null
             ssh -i ~/.ssh/stress -o BatchMode=yes -o StrictHostKeyChecking=yes \
-              -o "ProxyCommand=aws ec2-instance-connect open-tunnel --instance-id $MANAGER" \
-              "$GATE_USER@$MANAGER" "$@"
+              -o "ProxyCommand=aws ec2-instance-connect open-tunnel --instance-id $HOST_ID" \
+              "$GATE_USER@$HOST_ID" "$@"
           }
           # Starts the host, which stops itself when idle, until its gate answers. A host that is
           # stopping is started once stopped, and holds the gate's lock until then. EC2 may have no
@@ -93,7 +93,7 @@ jobs:
             local error="" rc
             aws_login
             for _ in {1..100}; do
-              if aws ec2 start-instances --instance-ids "$MANAGER" >/dev/null 2> start.err; then
+              if aws ec2 start-instances --instance-ids "$HOST_ID" >/dev/null 2> start.err; then
                 rc=0; gate status "$RUN_ID" >/dev/null 2> probe.err || rc=$?
                 (( rc == 255 )) || grep -q 'undergoing maintenance' probe.err || return 0
               fi
@@ -163,7 +163,7 @@ jobs:
           import re
           from pathlib import Path
 
-          secrets = (os.environ["MANAGER"], os.environ["ROLE_ARN"], os.environ["ROLE_ARN"].split(":")[4])
+          secrets = (os.environ["HOST_ID"], os.environ["ROLE_ARN"], os.environ["ROLE_ARN"].split(":")[4])
           cloud = re.compile(
               r"\barn:|\bi-[0-9a-f]{8,17}\b|"
               r"\b(?:[a-z0-9-]+\.)+(?:compute(?:-\d+)?\.amazonaws\.com(?:\.cn)?|compute\.internal|ec2\.internal)\b",
