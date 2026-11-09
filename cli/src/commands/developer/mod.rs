@@ -300,10 +300,10 @@ impl Developer {
         if !response.headers().contains_key("deprecation") {
             return;
         }
-        let uri = response.get_uri();
+        let path = response.get_uri().path();
         match Self::deprecation_link(response.headers()) {
-            Some(url) => eprintln!("⚠️  {uri} is deprecated and will be removed. See how to migrate: {url}"),
-            None => eprintln!("⚠️  {uri} is deprecated and will be removed."),
+            Some(url) => eprintln!("⚠️  {path} is deprecated and will be removed. See how to migrate: {url}"),
+            None => eprintln!("⚠️  {path} is deprecated and will be removed."),
         }
     }
 
