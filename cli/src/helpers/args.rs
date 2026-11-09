@@ -23,7 +23,7 @@ use snarkvm::{
 };
 
 use aleo_std::aleo_dir;
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
 use clap::builder::RangedU64ValueParser;
 use snarkos_node_rest::{API_VERSION_V1, API_VERSION_V2};
 use std::{path::PathBuf, str::FromStr};
@@ -38,7 +38,10 @@ pub(crate) fn network_id_parser() -> RangedU64ValueParser<u16> {
 ///
 /// An endpoint whose path does not end in `v1` or `v2` gets `/v2` appended: the unversioned
 /// routes of a snarkOS node serve the deprecated v1 API.
+///
+/// An endpoint with a query string is rejected, since request routes are appended to its path.
 pub(crate) fn prepare_endpoint(endpoint: Uri) -> Result<Uri> {
+    ensure!(endpoint.query().is_none(), "The endpoint URL must not have a query string: {endpoint}");
     let mut parts = endpoint.into_parts();
 
     if parts.scheme.is_none() {
@@ -128,6 +131,10 @@ mod tests {
         ] {
             let prepared = prepare_endpoint(Uri::try_from(before).unwrap()).unwrap();
             assert_eq!(prepared.to_string(), after, "unexpected endpoint for {before}");
+        }
+
+        for endpoint in ["http://localhost:3030/?foo=bar", "http://localhost:3030/v2?foo=bar"] {
+            assert!(prepare_endpoint(Uri::try_from(endpoint).unwrap()).is_err(), "accepted {endpoint}");
         }
     }
 }
