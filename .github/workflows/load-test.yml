@@ -57,6 +57,10 @@ on:
         type: choice
         options: ["0", "1", "5", "10", "20", "30", "50", "70"]
         default: "0"
+      deploy_rate:
+        description: "Deployments per second beside the transactions, from a stockpile with deployments. Needs a duration over 0 or a ramp."
+        required: false
+        default: "0"
 
 jobs:
   load:
@@ -72,11 +76,12 @@ jobs:
       validators: ${{ inputs.validators }}
       network: ${{ startsWith(inputs.stockpile, 'mainnet-') && 'mainnet' || 'testnet' }}
       params: >-
-        ${{ format('stockpile={0}{1}{2}{3}{4}{5}{6}{7}', inputs.stockpile,
+        ${{ format('stockpile={0}{1}{2}{3}{4}{5}{6}{7}{8}', inputs.stockpile,
         inputs.rate && format(',rate={0}', inputs.rate) || '',
         inputs.duration && format(',duration={0}', inputs.duration) || '',
         inputs.ramp && format(',ramp={0}', inputs.ramp) || '',
         inputs.targets != 'default' && format(',targets={0}', inputs.targets) || '',
         inputs.replay_mode != 'default' && format(',replay_mode={0}', inputs.replay_mode) || '',
         inputs.min_inclusion && format(',min_inclusion={0}', inputs.min_inclusion) || '',
-        inputs.packet_loss != '0' && format(',packet_loss={0}', inputs.packet_loss) || '') }}
+        inputs.packet_loss != '0' && format(',packet_loss={0}', inputs.packet_loss) || '',
+        inputs.deploy_rate && inputs.deploy_rate != '0' && format(',deploy_rate={0}', inputs.deploy_rate) || '') }}
