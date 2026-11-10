@@ -25,7 +25,10 @@ use std::{
 };
 use tokio::task;
 
+/// The number of blocks between automatic database checkpoints.
 const CHECKPOINT_BLOCK_FREQUENCY: u32 = 1000;
+
+/// The maximum number of automatic database checkpoints kept at any time.
 const MAX_AUTO_CHECKPOINTS: usize = 5;
 
 fn existing_startup_checkpoint_height(auto_checkpoint_path: &Path, startup_height: u32) -> Option<u32> {
@@ -47,48 +50,61 @@ pub(crate) fn spawn_auto_checkpoints<N: Network>(
     }
 
     let startup_height = ledger.vm().block_store().current_block_height();
-    let mut initialized = false;
-    let mut last_checkpoint_height = None;
-    let mut existing_checkpoints = Vec::with_capacity(MAX_AUTO_CHECKPOINTS + 1);
+    let mut last_checkpoint_height = existing_startup_checkpoint_height(&auto_checkpoint_path, startup_height);
     let mut block_tree_path = aleo_ledger_dir(N::ID, ledger.vm().block_store().storage_mode());
     block_tree_path.push("block_tree");
 
-    Ok(spawn_checkpoint_loop(move || {
-        if !initialized {
-            last_checkpoint_height = existing_startup_checkpoint_height(&auto_checkpoint_path, startup_height);
-            initialized = true;
-        }
-        // Skip if we've already created a checkpoint during this run, and the
-        // number of blocks baked since then is lower than the configured threshold.
-        let current_height = ledger.vm().block_store().current_block_height();
-        if last_checkpoint_height.is_some_and(|checkpoint_height| {
-            current_height.saturating_sub(checkpoint_height) < CHECKPOINT_BLOCK_FREQUENCY
-        }) {
-            return;
-        }
+    let handle = tokio::spawn(async move {
+        info!("The automatic ledger checkpoint routine started");
+        loop {
+            tokio::time::sleep(Duration::from_millis(500)).await;
 
-        // Create a checkpoint.
-        let mut checkpoint_path = auto_checkpoint_path.clone();
-        checkpoint_path.push(format!("checkpoint_{current_height}"));
-        if let Err(e) = ledger.backup_database(&checkpoint_path) {
-            warn!("Couldn't automatically store a checkpoint at {}: {e}", checkpoint_path.display());
-            return;
-        }
-        last_checkpoint_height = Some(current_height);
+            // Skip if we've already created a checkpoint during this run, and the
+            // number of blocks baked since then is lower than the configured threshold.
+            let current_height = ledger.vm().block_store().current_block_height();
+            if last_checkpoint_height.is_some_and(|checkpoint_height| {
+                current_height.saturating_sub(checkpoint_height) < CHECKPOINT_BLOCK_FREQUENCY
+            }) {
+                continue;
+            }
 
-        if let Err(e) = ledger.cache_block_tree() {
-            warn!("The block tree cache failed: {e}");
-        } else if let Err(e) = fs::copy(&block_tree_path, checkpoint_path.join("block_tree")) {
-            warn!("The checkpoint block tree copy failed: {e}");
-        }
+            let ledger = ledger.clone();
+            let auto_checkpoint_path = auto_checkpoint_path.clone();
+            let block_tree_path = block_tree_path.clone();
+            match task::spawn_blocking(move || {
+                let checkpoint_path = auto_checkpoint_path.join(format!("checkpoint_{current_height}"));
+                if let Err(e) = ledger.backup_database(&checkpoint_path) {
+                    warn!("Couldn't automatically store a checkpoint at {}: {e}", checkpoint_path.display());
+                    return false;
+                }
 
-        prune_auto_checkpoints(&auto_checkpoint_path, &mut existing_checkpoints);
-    }))
+                if let Err(e) = ledger.cache_block_tree() {
+                    warn!("The block tree cache failed: {e}");
+                } else if let Err(e) = fs::copy(&block_tree_path, checkpoint_path.join("block_tree")) {
+                    warn!("The checkpoint block tree copy failed: {e}");
+                }
+
+                prune_auto_checkpoints(&auto_checkpoint_path);
+                true
+            })
+            .await
+            {
+                Ok(true) => last_checkpoint_height = Some(current_height),
+                Ok(false) => (),
+                Err(error) => {
+                    warn!("The automatic ledger checkpoint task failed: {error}");
+                    return;
+                }
+            }
+        }
+    });
+
+    Ok(handle)
 }
 
-fn prune_auto_checkpoints(auto_checkpoint_path: &Path, existing_checkpoints: &mut Vec<(PathBuf, u32)>) {
+fn prune_auto_checkpoints(auto_checkpoint_path: &Path) {
     // Count the existing auto checkpoints.
-    existing_checkpoints.clear();
+    let mut existing_checkpoints = Vec::with_capacity(MAX_AUTO_CHECKPOINTS + 1);
     let checkpoint_dir = match auto_checkpoint_path.read_dir() {
         Ok(dir) => dir,
         Err(e) => {
@@ -137,27 +153,6 @@ fn prune_auto_checkpoints(auto_checkpoint_path: &Path, existing_checkpoints: &mu
             warn!("Couldn't remove an automatic ledger checkpoint: {e}");
         }
     }
-}
-
-fn spawn_checkpoint_loop(mut checkpoint: impl FnMut() + Send + 'static) -> task::JoinHandle<()> {
-    tokio::spawn(async move {
-        info!("The automatic ledger checkpoint routine started");
-        loop {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            match task::spawn_blocking(move || {
-                checkpoint();
-                checkpoint
-            })
-            .await
-            {
-                Ok(next) => checkpoint = next,
-                Err(error) => {
-                    warn!("The automatic ledger checkpoint task failed: {error}");
-                    return;
-                }
-            }
-        }
-    })
 }
 
 #[cfg(test)]
