@@ -118,7 +118,7 @@ jobs:
           # start a run. Each connection pushes a key that lives 60 seconds, through the
           # Instance Connect Endpoint.
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/stress
+          ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/gauntlet
           : "${HOST_KEY:?GAUNTLET_HOST_KEY must be configured}"
           printf '%s %s\n' "$HOST_ID" "$HOST_KEY" > ~/.ssh/known_hosts
           cat > "$RUNNER_TEMP/gate.sh" <<'EOF'
@@ -138,8 +138,8 @@ jobs:
           gate() {
             aws_login
             aws ec2-instance-connect send-ssh-public-key --instance-id "$HOST_ID" \
-              --instance-os-user "$GATE_USER" --ssh-public-key "file://$HOME/.ssh/stress.pub" >/dev/null
-            ssh -i ~/.ssh/stress -o BatchMode=yes -o StrictHostKeyChecking=yes \
+              --instance-os-user "$GATE_USER" --ssh-public-key "file://$HOME/.ssh/gauntlet.pub" >/dev/null
+            ssh -i ~/.ssh/gauntlet -o BatchMode=yes -o StrictHostKeyChecking=yes \
               -o "ProxyCommand=aws ec2-instance-connect open-tunnel --instance-id $HOST_ID" \
               "$GATE_USER@$HOST_ID" "$@"
           }
