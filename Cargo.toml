@@ -278,7 +278,7 @@ name = "snarkos"
 path = "snarkos/main.rs"
 
 [features]
-default = [ "snarkos-cli/metrics", "snarkos-node-metrics", "snarkos-node/metrics", "snarkos-node-cdn/metrics" ]
+default = [ "snarkos-cli/metrics", "snarkos-node-metrics", "snarkos-node/metrics", "snarkos-node-cdn/metrics", "prune-authority-data" ]
 # The compile-time history features no longer select snarkVM code.
 # The names stay so existing build commands keep resolving.
 history = []
