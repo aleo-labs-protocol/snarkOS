@@ -29,11 +29,10 @@ mod transfer_private;
 pub use transfer_private::*;
 
 use crate::helpers::{
-    args::{network_id_parser, prepare_endpoint},
+    args::{api_version_of, network_id_parser, prepare_endpoint},
     logger::initialize_terminal_logger,
 };
 
-use snarkos_node_rest::{API_VERSION_V1, API_VERSION_V2};
 use snarkvm::{
     ledger::store::helpers::memory::BlockMemory,
     package::Package,
@@ -51,7 +50,10 @@ use std::{
     time::{Duration, Instant},
 };
 use tracing::debug;
-use ureq::http::{self, Uri};
+use ureq::{
+    ResponseExt,
+    http::{self, Uri},
+};
 
 /// The format to store a generated transaction as.
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -229,35 +231,23 @@ impl Developer {
         // This function is only called internally but check for additional sanity.
         ensure!(!route.starts_with('/'), "path cannot start with a slash");
 
-        // Determine the API version we are interacting with.
-        let api_version = {
-            let r = base_url.path().trim_end_matches('/');
-
-            if r.ends_with(API_VERSION_V1) {
-                ApiVersion::V1
-            } else if r.ends_with(API_VERSION_V2) {
-                ApiVersion::V2
-            } else {
-                // Default to v1.
-                // Note: If the snarkos-node-rest switches default to v2, this needs to be updated.
-                ApiVersion::V1
-            }
-        };
+        let api_version = api_version_of(base_url.path())
+            .context("The endpoint URL must end in an API version (v1 or v2). Use `prepare_endpoint` first")?;
 
         // Work around a bug in the `http` crate where empty paths will be set to '/'
         // but other paths are not appended with a slash.
         // See https://github.com/hyperium/http/issues/507
         let sep = if base_url.path().ends_with('/') { "" } else { "/" };
 
-        // Build "{base}/{maybe_version}/{network}/{route}"
-        let full_uri = format!("{base_url}{sep}{network}/{route}", network = N::SHORT_NAME);
-        Ok((full_uri, api_version))
+        // Build "{base}/{network}/{route}"
+        Ok((format!("{base_url}{sep}{network}/{route}", network = N::SHORT_NAME), api_version))
     }
 
     /// Converts the returned JSON error (if any) into an anyhow Error chain.
     /// If the error was 404, this simply returns `Ok(None)`.
     fn handle_ureq_result(result: Result<http::Response<ureq::Body>>) -> Result<Option<ureq::Body>> {
         let response = result?;
+        Self::warn_if_deprecated(&response);
 
         if response.status().is_success() {
             Ok(Some(response.into_body()))
@@ -285,16 +275,35 @@ impl Developer {
         }
     }
 
-    /// Extracts the API version from a custom endpoint.
-    fn parse_custom_endpoint<N: Network>(url: &Uri) -> (String, ApiVersion) {
-        // Determine API version for custom endpoint.
-        if let Some(pq) = url.path_and_query()
-            && pq.path().ends_with(&format!("{API_VERSION_V2}/{}/transaction/broadcast", N::SHORT_NAME))
-        {
-            (url.to_string(), ApiVersion::V2)
-        } else {
-            (url.to_string(), ApiVersion::V1)
+    /// Warns when a response reports that its endpoint is deprecated.
+    ///
+    /// A deprecated endpoint sends a `Deprecation` header (RFC 9745), and may link a migration guide
+    /// in a `Link` header with relation type `deprecation`.
+    fn warn_if_deprecated(response: &http::Response<ureq::Body>) {
+        if !response.headers().contains_key("deprecation") {
+            return;
         }
+        let path = response.get_uri().path();
+        match Self::deprecation_link(response.headers()) {
+            Some(url) => eprintln!("⚠️  {path} is deprecated and will be removed. See how to migrate: {url}"),
+            None => eprintln!("⚠️  {path} is deprecated and will be removed."),
+        }
+    }
+
+    /// Returns the target of the first `Link` with relation type `deprecation`, if any.
+    fn deprecation_link(headers: &http::HeaderMap) -> Option<String> {
+        headers
+            .get_all(http::header::LINK)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .find(|link| {
+                link.split(';').skip(1).any(|param| {
+                    let param = param.trim();
+                    param == "rel=\"deprecation\"" || param == "rel=deprecation"
+                })
+            })
+            .and_then(|link| link.split_once('<')?.1.split_once('>').map(|(url, _)| url.trim().to_owned()))
     }
 
     /// Helper function to send a POST request with a JSON body to an endpoint and await a JSON response.
@@ -345,8 +354,9 @@ impl Developer {
         endpoint: &Uri,
         transaction_id: &N::TransactionID,
         timeout_seconds: u64,
-        api_version: ApiVersion,
     ) -> Result<()> {
+        // The polled URL, not the broadcast URL, decides how a response is read.
+        let api_version = api_version_of(endpoint.path()).context("The endpoint URL must end in an API version")?;
         let start_time = Instant::now();
         let timeout_duration = Duration::from_secs(timeout_seconds);
         let poll_interval = Duration::from_secs(1); // Poll every second
@@ -467,13 +477,13 @@ impl Developer {
 
         // Determine if the transaction should be broadcast to the network.
         if let Some(broadcast_value) = broadcast {
-            let (broadcast_endpoint, api_version) = if let Some(url) = broadcast_value {
+            let broadcast_endpoint = if let Some(url) = broadcast_value {
                 debug!("Using custom endpoint for broadcasting: {url}");
-                Self::parse_custom_endpoint::<N>(url)
+                url.to_string()
             } else {
                 let endpoint = endpoint
                     .context("Cannot broadcast a transaction built from a static query without a broadcast URL")?;
-                Self::build_endpoint::<N>(endpoint, "transaction/broadcast")?
+                Self::build_endpoint::<N>(endpoint, "transaction/broadcast")?.0
             };
 
             let result: Result<String> = match Self::http_post_json(&broadcast_endpoint, &transaction) {
@@ -512,7 +522,7 @@ impl Developer {
                         let endpoint = endpoint
                             .context("Cannot wait for confirmation of a transaction built from a static query")?;
                         println!("⏳ Waiting for transaction confirmation (timeout: {timeout}s)...");
-                        Self::wait_for_transaction_confirmation::<N>(endpoint, &transaction_id, timeout, api_version)?;
+                        Self::wait_for_transaction_confirmation::<N>(endpoint, &transaction_id, timeout)?;
 
                         match transaction {
                             Transaction::Deploy(..) => {
@@ -577,10 +587,11 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_query_rest_defaults_scheme() {
+    fn test_parse_query_rest_defaults_scheme_and_version() {
+        // The unversioned routes serve the deprecated v1 API, so v2 is requested explicitly.
         let ParsedQuery { query, endpoint } = Developer::parse_query::<TestnetV0>("localhost:3030").unwrap();
         assert!(matches!(query, Query::REST(_)));
-        assert_eq!(endpoint.unwrap(), "http://localhost:3030/");
+        assert_eq!(endpoint.unwrap(), "http://localhost:3030/v2/");
     }
 
     #[test]
@@ -590,18 +601,30 @@ mod tests {
         assert_eq!(endpoint.unwrap(), DEFAULT_ENDPOINT);
     }
 
-    /// Test that the default endpoints (V1) work as expected.
-    ///
-    /// Note, if the default endpoint ever changes, this test needs to be updated.
+    /// Ensure that an endpoint must name an API version. `prepare_endpoint` adds one.
     #[test]
-    fn test_build_endpoint_default_v1() {
-        let base_uri_str = "http://localhost:3030";
-        let base_uri = Uri::try_from(base_uri_str).unwrap();
-        let (endpoint, api_version) =
-            Developer::build_endpoint::<CurrentNetwork>(&base_uri, "transaction/broadcast").unwrap();
+    fn test_build_endpoint_requires_version() {
+        for base_uri_str in ["http://localhost:3030", "http://localhost:3030/", "http://localhost:3030/dev2"] {
+            let base_uri = Uri::try_from(base_uri_str).unwrap();
+            assert!(Developer::build_endpoint::<CurrentNetwork>(&base_uri, "transaction/broadcast").is_err());
+        }
+    }
 
-        assert_eq!(endpoint, format!("{base_uri_str}/{}/transaction/broadcast", CurrentNetwork::SHORT_NAME));
-        assert_eq!(api_version, ApiVersion::V1);
+    #[test]
+    fn test_deprecation_link() {
+        let mut headers = http::HeaderMap::new();
+        assert_eq!(Developer::deprecation_link(&headers), None);
+
+        headers.append(http::header::LINK, "<https://example.com/next>; rel=\"next\"".parse().unwrap());
+        assert_eq!(Developer::deprecation_link(&headers), None);
+
+        headers.append(
+            http::header::LINK,
+            "<https://example.com/a>; rel=\"alternate\", <https://example.com/migrate>; rel=\"deprecation\""
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(Developer::deprecation_link(&headers).as_deref(), Some("https://example.com/migrate"));
     }
 
     /// Ensure that the V1 endpoints work as expected.
@@ -625,28 +648,6 @@ mod tests {
             Developer::build_endpoint::<CurrentNetwork>(&base_uri, "transaction/broadcast").unwrap();
 
         assert_eq!(endpoint, format!("{base_uri_str}/{}/transaction/broadcast", CurrentNetwork::SHORT_NAME));
-        assert_eq!(api_version, ApiVersion::V2);
-    }
-
-    #[test]
-    fn test_custom_endpoint_v1() {
-        let endpoint_str = "http://localhost:3030/v1/mainnet/transaction/broadcast";
-        let endpoint = Uri::try_from(endpoint_str).unwrap();
-
-        let (parsed, api_version) = Developer::parse_custom_endpoint::<CurrentNetwork>(&endpoint);
-
-        assert_eq!(parsed, endpoint_str);
-        assert_eq!(api_version, ApiVersion::V1);
-    }
-
-    #[test]
-    fn test_custom_endpoint_v2() {
-        let endpoint_str = "http://localhost:3030/v2/mainnet/transaction/broadcast";
-        let endpoint = Uri::try_from(endpoint_str).unwrap();
-
-        let (parsed, api_version) = Developer::parse_custom_endpoint::<CurrentNetwork>(&endpoint);
-
-        assert_eq!(parsed, endpoint_str);
         assert_eq!(api_version, ApiVersion::V2);
     }
 }

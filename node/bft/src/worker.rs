@@ -36,7 +36,6 @@ use snarkvm::{
 };
 
 use anyhow::Context;
-use colored::{ColoredString, Colorize};
 use indexmap::{IndexMap, IndexSet};
 #[cfg(feature = "locktick")]
 use locktick::parking_lot::{Mutex, RwLock};
@@ -174,14 +173,13 @@ impl<N: Network> Worker<N> {
 
 impl<N: Network> Worker<N> {
     // Helper to print the transmission ID and checksum (if any).
-    fn format_transmission_id(&self, transmission_id: TransmissionID<N>) -> ColoredString {
+    fn format_transmission_id(&self, transmission_id: TransmissionID<N>) -> String {
         if let Some(checksum) = transmission_id.checksum() {
             // fmt_id will suffix with `..`, so we should not use `.`  as a separator.
             format!("{}:{}", fmt_id(transmission_id), fmt_id(checksum))
         } else {
             fmt_id(transmission_id)
         }
-        .dimmed()
     }
 
     /// Returns `true` if the transmission ID exists in the ready queue, proposed batch, storage, or ledger.
@@ -411,9 +409,15 @@ impl<N: Network> Worker<N> {
         if inserted {
             // Eagerly verify a newly-inserted execution to warm the verification cache.
             if let Some((tx_id, tx)) = execution_to_verify {
+                #[cfg(feature = "metrics")]
+                let site = if enforce_capacity_limit { "worker_ping" } else { "peer_proposal" };
                 let self_ = self.clone();
                 tokio::spawn(async move {
-                    let _ = self_.ledger.check_transaction_basic(tx_id, tx).await;
+                    #[cfg(feature = "metrics")]
+                    let timer = metrics::TransactionCheckTimer::start(site, &tx);
+                    let _result = self_.ledger.check_transaction_basic(tx_id, tx).await;
+                    #[cfg(feature = "metrics")]
+                    timer.finish(&_result);
                 });
             }
             trace!(
@@ -449,7 +453,10 @@ impl<N: Network> Worker<N> {
             return Ok(false);
         }
         // Check that the solution is well-formed and unique.
-        self.ledger.check_solution_basic(solution_id, solution).await?;
+        let result = self.ledger.check_solution_basic(solution_id, solution).await;
+        #[cfg(feature = "metrics")]
+        metrics::record_solution_check("worker", result.is_ok());
+        result?;
         // Adds the solution to the ready queue.
         if self.ready.write().insert(transmission_id, transmission) {
             trace!(
@@ -488,7 +495,12 @@ impl<N: Network> Worker<N> {
         let transaction = spawn_blocking!(deserialize_transaction_strict(transaction))?;
 
         // Check that the transaction is well-formed and unique.
-        self.ledger.check_transaction_basic(transaction_id, transaction).await?;
+        #[cfg(feature = "metrics")]
+        let timer = metrics::TransactionCheckTimer::start("worker", &transaction);
+        let result = self.ledger.check_transaction_basic(transaction_id, transaction).await;
+        #[cfg(feature = "metrics")]
+        timer.finish(&result);
+        result?;
         // Adds the transaction to the ready queue.
         if self.ready.write().insert(transmission_id, transmission) {
             trace!(
@@ -619,7 +631,14 @@ impl<N: Network> Worker<N> {
         // If the peer IP exists, finish the pending request.
         if exists {
             // Ensure the transmission is not a fee and matches the transmission ID.
-            match self.ledger.ensure_transmission_is_well_formed(transmission_id, &mut transmission) {
+            let result = self.ledger.ensure_transmission_is_well_formed(transmission_id, &mut transmission);
+            #[cfg(feature = "metrics")]
+            metrics::increment_counter_1(
+                metrics::bft::TRANSMISSION_RESPONSES,
+                "outcome",
+                if result.is_ok() { "well_formed" } else { "malformed" },
+            );
+            match result {
                 Ok(()) => {
                     trace!(
                         "Received valid transmission response from peer '{peer_ip}' for transmission '{}'",

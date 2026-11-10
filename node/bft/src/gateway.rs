@@ -22,7 +22,7 @@ use crate::{
     MEMORY_POOL_PORT,
     Worker,
     events::{DisconnectReason, EventCodec, PrimaryPing},
-    helpers::{Cache, PrimarySender, Storage, SyncSender, WorkerSender, assign_to_worker},
+    helpers::{Cache, PrimarySender, Storage, SyncSender, UpgradeMonitor, WorkerSender, assign_to_worker},
     spawn_blocking,
 };
 use smol_str::SmolStr;
@@ -32,12 +32,15 @@ use snarkos_node_bft_events::{
     BlockResponse,
     CertificateRequest,
     CertificateResponse,
+    ConsensusSchedule,
     DataBlocks,
     Event,
     HANDSHAKE_DOMAIN,
     HandshakeHint,
+    HandshakeTrailer,
     InitiatorInfo,
     PeerInfo,
+    ResponderInfo,
     ResponderProof,
     TransmissionRequest,
     TransmissionResponse,
@@ -88,7 +91,6 @@ use snarkvm::{
     utilities::flatten_error,
 };
 
-use colored::Colorize;
 use futures::future::join_all;
 use indexmap::IndexMap;
 #[cfg(feature = "locktick")]
@@ -211,6 +213,8 @@ pub struct InnerGateway<N: Network> {
     worker_senders: OnceCell<IndexMap<u8, WorkerSender<N>>>,
     /// The sync sender.
     sync_sender: OnceCell<SyncSender<N>>,
+    /// Tracks the consensus schedules of validators, and whether this build may build a block.
+    upgrade_monitor: UpgradeMonitor<N>,
     /// The spawned handles.
     handles: Mutex<Vec<JoinHandle<()>>>,
     /// The storage mode.
@@ -294,6 +298,8 @@ impl<N: Network> Gateway<N> {
         #[cfg(feature = "metrics")]
         let (validator_telemetry, telemetry_worker) = Telemetry::new();
 
+        let upgrade_monitor = UpgradeMonitor::new(account.address(), node_data_dir.required_consensus_upgrade_path());
+
         // Return the gateway.
         Ok(Self(Arc::new(InnerGateway {
             account,
@@ -310,6 +316,7 @@ impl<N: Network> Gateway<N> {
             primary_sender: Default::default(),
             worker_senders: Default::default(),
             sync_sender: Default::default(),
+            upgrade_monitor,
             handles: Default::default(),
             node_data_dir,
             trusted_peers_only,
@@ -444,6 +451,40 @@ impl<N: Network> Gateway<N> {
     /// Returns the resolver.
     pub fn resolver(&self) -> &RwLock<Resolver<N>> {
         &self.resolver
+    }
+
+    /// Returns the upgrade monitor.
+    pub fn upgrade_monitor(&self) -> &UpgradeMonitor<N> {
+        &self.upgrade_monitor
+    }
+
+    /// Returns the committee and the addresses of the connected validators, as the upgrade monitor
+    /// weighs them.
+    ///
+    /// The committee is the lookback committee for the current round, which certifies the blocks
+    /// this validator builds next.
+    fn upgrade_evidence(&self) -> Result<(Committee<N>, HashSet<Address<N>>)> {
+        let committee = self.ledger.get_committee_lookback_for_round(self.storage.current_round())?;
+        Ok((committee, self.connected_addresses()))
+    }
+
+    /// Re-evaluates the upgrade status for the next block.
+    fn update_upgrade_status(&self) {
+        let (committee, connected) = match self.upgrade_evidence() {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                warn!("{CONTEXT} Unable to retrieve the committee to evaluate consensus schedules - {error}");
+                return;
+            }
+        };
+        let next_height = self.ledger.latest_block_height().saturating_add(1);
+        self.upgrade_monitor.update(&committee, &connected, next_height);
+    }
+
+    /// Returns an error unless this build may build the block at `height`.
+    pub fn ensure_block_may_be_built(&self, height: u32) -> Result<()> {
+        let (committee, connected) = self.upgrade_evidence()?;
+        self.upgrade_monitor.ensure_block_may_be_built(&committee, &connected, height)
     }
 
     /// Returns the listener IP address from the (ambiguous) peer address.
@@ -651,6 +692,7 @@ impl<N: Network> Gateway<N> {
             Event::BlockRequest(_) => {
                 let num_events = self.cache.insert_inbound_block_request(peer_ip, CACHE_REQUESTS_INTERVAL);
                 if num_events >= self.max_cache_duplicates() {
+                    trace!("{CONTEXT} Dropping a block request from '{peer_ip}' (rate limit exceeded)");
                     return Ok(true);
                 }
             }
@@ -811,7 +853,7 @@ impl<N: Network> Gateway<N> {
                 let PrimaryPing { version, block_locators, primary_certificate } = ping;
 
                 // Ensure the event version is not outdated.
-                if version < Event::<N>::VERSION {
+                if version < Event::<N>::MINIMUM_VERSION {
                     bail!("Dropping '{peer_ip}' on event version {version} (outdated)");
                 }
 
@@ -980,6 +1022,8 @@ impl<N: Network> Gateway<N> {
     async fn heartbeat(&self) {
         // Log the connected validators.
         self.log_connected_validators();
+        // Re-evaluate whether validators run a consensus version this build lacks.
+        self.update_upgrade_status();
         // Log the validator participation scores.
         #[cfg(feature = "metrics")]
         self.log_participation_scores();
@@ -1012,13 +1056,12 @@ impl<N: Network> Gateway<N> {
         // Resolve the total number of connectable validators.
         let validators_total = committee.num_members().saturating_sub(1);
         // Format the total validators message.
-        let total_validators = format!("(of {validators_total} bonded validators)").dimmed();
-        // Construct the connections message.
-        let connections_msg = match connected_validators.len() {
-            0 => "No connected validators".to_string(),
-            num_connected => format!("Connected to {num_connected} validators {total_validators}"),
-        };
-        info!("{connections_msg}");
+        let total_validators = format!("(of {validators_total} bonded validators)");
+        // Log the connections.
+        match connected_validators.len() {
+            0 => info!("No connected validators"),
+            num_connected => info!("Connected to {num_connected} validators {total_validators}"),
+        }
 
         // Collect the connected validator addresses and stake.
         let mut connected_validator_addresses = HashSet::with_capacity(connected_validators.len());
@@ -1040,21 +1083,18 @@ impl<N: Network> Gateway<N> {
             *connected_validator_shas.entry(short_peer_sha.clone()).or_default() += address_stake;
 
             debug!(
-                "{}",
-                format!(
-                    "  Connected to: {} - {} (connection age {:?})",
-                    peer.listener_addr,
-                    peer.aleo_addr,
-                    peer.first_seen.elapsed()
-                )
-                .dimmed()
+                dim = true,
+                "  Connected to: {} - {} (connection age {:?})",
+                peer.listener_addr,
+                peer.aleo_addr,
+                peer.first_seen.elapsed()
             );
         }
 
         // Log how much of the stake uses our git commit hash.
         if let Some(combined_stake) = connected_validator_shas.get(&our_sha) {
             let percentage = *combined_stake as f64 / committee.total_stake() as f64 * 100.0;
-            debug!("{}", format!("  Combined stake @ {our_sha}: {percentage:.2}%").dimmed());
+            debug!(dim = true, "  Combined stake @ {our_sha}: {percentage:.2}%");
             #[cfg(feature = "metrics")]
             metrics::gauge(metrics::bft::CONNECTED_STAKE_WITH_MATCHING_SHA, percentage);
         }
@@ -1077,9 +1117,8 @@ impl<N: Network> Gateway<N> {
                     let address_stake_as_percentage =
                         if total_stake == 0 { 0.0 } else { address_stake as f64 / total_stake_f64 * 100.0 };
                     debug!(
-                        "{}",
-                        format!("  Not connected to {address} ({address_stake_as_percentage:.2}% of total stake)")
-                            .dimmed()
+                        dim = true,
+                        "  Not connected to {address} ({address_stake_as_percentage:.2}% of total stake)"
                     );
                     address_stake
                 })
@@ -1120,10 +1159,7 @@ impl<N: Network> Gateway<N> {
             // Log the participation scores.
             debug!("Participation Scores (in the last {} rounds):", self.storage.max_gc_rounds());
             for (address, (cert_score, sig_score)) in participation_scores {
-                debug!(
-                    "{}",
-                    format!("  {address} - certificates: {cert_score:.2}%  signatures: {sig_score:.2}%").dimmed()
-                );
+                debug!(dim = true, "  {address} - certificates: {cert_score:.2}%  signatures: {sig_score:.2}%");
             }
         }
     }
@@ -1606,6 +1642,13 @@ impl<N: Network> Handshake for Gateway<N> {
 
         // Retrieve the restrictions ID.
         let restrictions_id = self.ledger.latest_restrictions_id();
+        // Retrieve the hash of our genesis block, which the peer must share.
+        let genesis_hash = self.ledger.get_block_hash(0).map_err(ConnectError::other)?;
+        let genesis_hash: [u8; 32] = genesis_hash
+            .to_bytes_le()
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| ConnectError::other(anyhow!("Failed to encode the genesis hash")))?;
 
         // Perform the handshake; we pass on a mutable reference to peer_ip in case the process is broken at any point in time.
         //
@@ -1613,11 +1656,18 @@ impl<N: Network> Handshake for Gateway<N> {
         // away before any key is derived.
         let handshake_result = if peer_side == ConnectionSide::Responder {
             write_noise_magic(stream).await?;
-            self.handshake_inner_initiator_noise(peer_addr, restrictions_id, stream).await
+            self.handshake_inner_initiator_noise(peer_addr, restrictions_id, genesis_hash, stream).await
         } else {
             match detect_handshake_protocol(stream).await? {
                 (HandshakeProtocol::Noise, _) => {
-                    self.handshake_inner_responder_noise(peer_addr, &mut listener_addr, restrictions_id, stream).await
+                    self.handshake_inner_responder_noise(
+                        peer_addr,
+                        &mut listener_addr,
+                        restrictions_id,
+                        genesis_hash,
+                        stream,
+                    )
+                    .await
                 }
                 (HandshakeProtocol::Legacy, _) => {
                     Err(ConnectError::other(format!("'{peer_addr}' did not offer the Noise handshake")))
@@ -1628,13 +1678,17 @@ impl<N: Network> Handshake for Gateway<N> {
         // Register the peer, or roll it back, if the handshake got far enough to learn its listening
         // address.
         match (&handshake_result, listener_addr) {
-            (Ok(peer_info), Some(addr)) => {
+            (Ok((peer_info, peer_schedule)), Some(addr)) => {
                 let node_type = if bootstrap_peers::<N>(self.is_dev()).contains(&addr) {
                     NodeType::BootstrapClient
                 } else {
                     NodeType::Validator
                 };
-
+                // A block check reads the connected validators before their schedules, so the schedule
+                // is recorded before the validator counts as connected.
+                if node_type == NodeType::Validator {
+                    self.upgrade_monitor.record_schedule(peer_info.address, peer_schedule.as_ref());
+                }
                 let mut peer_pool = self.peer_pool.write();
 
                 // Validators may change their listening address, but not the Aleo address; traverse
@@ -1652,17 +1706,28 @@ impl<N: Network> Handshake for Gateway<N> {
                     }
                 });
 
-                if let Some(peer) = peer_pool.get_mut(&addr) {
-                    self.resolver.write().insert_peer(addr, peer_addr, Some(peer_info.address));
-                    peer.upgrade_to_connected(
-                        peer_addr,
-                        peer_info.listener_port,
-                        peer_info.address,
-                        node_type,
-                        peer_info.version,
-                        peer_info.snarkos_sha,
-                        ConnectionMode::Gateway,
-                    );
+                let is_connected = match peer_pool.get_mut(&addr) {
+                    Some(peer) => {
+                        self.resolver.write().insert_peer(addr, peer_addr, Some(peer_info.address));
+                        peer.upgrade_to_connected(
+                            peer_addr,
+                            peer_info.listener_port,
+                            peer_info.address,
+                            node_type,
+                            peer_info.version,
+                            peer_info.snarkos_sha,
+                            ConnectionMode::Gateway,
+                        );
+                        true
+                    }
+                    None => false,
+                };
+                // The upgrade status reads the peer pool, so the lock is released first.
+                drop(peer_pool);
+
+                if is_connected && node_type == NodeType::Validator {
+                    log_schedule_difference::<N>(addr, peer_schedule.as_ref());
+                    self.update_upgrade_status();
                 }
                 info!("{CONTEXT} Connected to '{addr}'");
             }
@@ -1692,6 +1757,25 @@ impl<N: Network> Handshake for Gateway<N> {
         handshake_result?;
 
         Ok(connection)
+    }
+}
+
+/// Logs where the consensus schedule of the validator at `addr` differs from this build's.
+fn log_schedule_difference<N: Network>(addr: SocketAddr, peer_schedule: Option<&ConsensusSchedule>) {
+    let Some(peer_schedule) = peer_schedule else {
+        return;
+    };
+    let ours = ConsensusSchedule::of::<N>();
+    let (ours, theirs) = (ours.heights(), peer_schedule.heights());
+    // A version missing from a schedule is not scheduled, like one at `u32::MAX`.
+    let at = |heights: &[u32], index: usize| heights.get(index).copied().unwrap_or(u32::MAX);
+    let show = |height: u32| if height == u32::MAX { "never".to_string() } else { height.to_string() };
+    let differences: Vec<_> = (0..ours.len().max(theirs.len()))
+        .filter(|index| at(ours, *index) != at(theirs, *index))
+        .map(|index| format!("V{} at {} (this build: {})", index + 1, show(at(theirs, index)), show(at(ours, index))))
+        .collect();
+    if !differences.is_empty() {
+        info!("{CONTEXT} Validator '{addr}' schedules {}", differences.join(", "));
     }
 }
 
@@ -1764,8 +1848,9 @@ impl<N: Network> Gateway<N> {
         &'a self,
         peer_addr: SocketAddr,
         restrictions_id: Field<N>,
+        genesis_hash: [u8; 32],
         stream: &'a mut TcpStream,
-    ) -> Result<PeerInfo<N>, ConnectError> {
+    ) -> Result<(PeerInfo<N>, Option<ConsensusSchedule>), ConnectError> {
         // Note who answered here last time, before the pool entry becomes a connecting one and stops
         // carrying it.
         let expected_address = match self.peer_pool.read().get(&peer_addr) {
@@ -1791,7 +1876,7 @@ impl<N: Network> Gateway<N> {
 
         /* Message 2: receive the responder's metadata, which deliberately carries no signature. */
 
-        let peer_info: PeerInfo<N> = decode_payload(peer_addr, &noise.recv().await?)?;
+        let ResponderInfo { info: peer_info, trailer: peer_trailer } = decode_payload(peer_addr, &noise.recv().await?)?;
 
         // The handshake hash at this point already commits to both ephemeral keys, the responder's
         // static key and every payload exchanged so far, so a signature over it is only valid for
@@ -1799,7 +1884,8 @@ impl<N: Network> Gateway<N> {
         let binding = binding_message(HANDSHAKE_DOMAIN, Role::Initiator, &noise.handshake_hash()?);
 
         // Check the peer over before signing anything for it.
-        if let Some(reason) = self.verify_peer_info(peer_addr, &peer_info, restrictions_id) {
+        if let Some(reason) = self.verify_peer_info(peer_addr, &peer_info, &peer_trailer, restrictions_id, genesis_hash)
+        {
             return Err(reason.into_connect_error(peer_addr));
         }
 
@@ -1818,7 +1904,11 @@ impl<N: Network> Gateway<N> {
         let Ok(our_signature) = self.account.sign_bytes(&binding, &mut rand::rng()) else {
             return Err(ConnectError::other(anyhow!("Failed to sign the handshake binding")));
         };
-        let our_message = InitiatorInfo { info: our_info, signature: Data::Object(our_signature) };
+        let our_message = InitiatorInfo {
+            info: our_info,
+            signature: Data::Object(our_signature),
+            trailer: HandshakeTrailer { genesis_hash: Some(genesis_hash.to_vec()), ..HandshakeTrailer::of::<N>() },
+        };
         noise.send(&encode_payload(&our_message)?).await?;
 
         // Capture the binding for the responder's proof before the hash becomes unavailable; it
@@ -1849,7 +1939,7 @@ impl<N: Network> Gateway<N> {
             return Err(reason.into_connect_error(peer_addr));
         }
 
-        Ok(peer_info)
+        Ok((peer_info, peer_trailer.schedule))
     }
 
     /// The connection responder side of the Noise handshake.
@@ -1867,8 +1957,9 @@ impl<N: Network> Gateway<N> {
         peer_addr: SocketAddr,
         peer_ip: &mut Option<SocketAddr>,
         restrictions_id: Field<N>,
+        genesis_hash: [u8; 32],
         stream: &'a mut TcpStream,
-    ) -> Result<PeerInfo<N>, ConnectError> {
+    ) -> Result<(PeerInfo<N>, Option<ConsensusSchedule>), ConnectError> {
         /* Message 1: the peer's cleartext hint. Everything it claims is re-checked in message 3. */
 
         // The first message is read without deriving any keys, so that everything below costs the
@@ -1903,14 +1994,19 @@ impl<N: Network> Gateway<N> {
 
         let our_info =
             PeerInfo::new(self.local_ip().port(), self.account.address(), restrictions_id, self.snarkos_sha());
-        noise.send(&encode_payload(&our_info)?).await?;
+        noise
+            .send(&encode_payload(&ResponderInfo {
+                info: our_info,
+                trailer: HandshakeTrailer { genesis_hash: Some(genesis_hash.to_vec()), ..HandshakeTrailer::of::<N>() },
+            })?)
+            .await?;
 
         // The binding the initiator is expected to have signed.
         let peer_binding = binding_message(HANDSHAKE_DOMAIN, Role::Initiator, &noise.handshake_hash()?);
 
         /* Message 3: the peer's authenticated metadata and its proof of identity. */
 
-        let InitiatorInfo { info: peer_info, signature: peer_signature } =
+        let InitiatorInfo { info: peer_info, signature: peer_signature, trailer: peer_trailer } =
             decode_payload::<InitiatorInfo<N>>(peer_addr, &noise.recv().await?)?;
 
         // Our own binding additionally commits to the peer's static key and to the message it has
@@ -1929,7 +2025,8 @@ impl<N: Network> Gateway<N> {
 
         // Everything below is a lookup or a comparison; only once all of it passes is the peer
         // worth the cost of a signature verification.
-        if let Some(reason) = self.verify_peer_info(peer_addr, &peer_info, restrictions_id) {
+        if let Some(reason) = self.verify_peer_info(peer_addr, &peer_info, &peer_trailer, restrictions_id, genesis_hash)
+        {
             return self.reject_noise_handshake(peer_addr, noise, reason).await;
         }
 
@@ -1948,7 +2045,7 @@ impl<N: Network> Gateway<N> {
 
         finish_noise_handshake(noise);
 
-        Ok(peer_info)
+        Ok((peer_info, peer_trailer.schedule))
     }
 
     /// Tells the initiator why it was turned away, and fails the handshake with that reason.
@@ -1957,7 +2054,7 @@ impl<N: Network> Gateway<N> {
         peer_addr: SocketAddr,
         mut noise: NoiseSession<&mut TcpStream>,
         reason: DisconnectReason,
-    ) -> Result<PeerInfo<N>, ConnectError> {
+    ) -> Result<(PeerInfo<N>, Option<ConsensusSchedule>), ConnectError> {
         noise.send(&encode_payload(&ResponderProof::<N>::Rejected { reason })?).await?;
 
         Err(reason.into_connect_error(peer_addr))
@@ -1973,9 +2070,36 @@ impl<N: Network> Gateway<N> {
         &self,
         peer_addr: SocketAddr,
         info: &PeerInfo<N>,
+        trailer: &HandshakeTrailer,
         expected_restrictions_id: Field<N>,
+        expected_genesis_hash: [u8; 32],
     ) -> Option<DisconnectReason> {
         log_repo_sha_comparison(peer_addr, &info.snarkos_sha, CONTEXT);
+
+        // A peer at a version that requires a schedule and sent none, or a malformed one, is not read
+        // as a peer that predates it.
+        if info.version >= HandshakeTrailer::FIRST_VERSION && trailer.schedule.is_none() {
+            warn!(
+                "{CONTEXT} Handshake with '{peer_addr}' failed (version {} sent no consensus schedule)",
+                info.version
+            );
+            return Some(DisconnectReason::ProtocolViolation);
+        }
+
+        // Likewise, a peer at a version that requires the genesis hash and sent none is not read as a
+        // peer that predates it.
+        if info.version >= HandshakeTrailer::GENESIS_VERSION && trailer.genesis_hash.is_none() {
+            warn!("{CONTEXT} Handshake with '{peer_addr}' failed (version {} sent no genesis hash)", info.version);
+            return Some(DisconnectReason::ProtocolViolation);
+        }
+
+        // Ensure the peer shares our genesis block. A hash sent incomplete fails the comparison.
+        if let Some(genesis_hash) = &trailer.genesis_hash
+            && genesis_hash[..] != expected_genesis_hash[..]
+        {
+            warn!("{CONTEXT} Handshake with '{peer_addr}' failed (incorrect genesis hash)");
+            return Some(DisconnectReason::GenesisMismatch);
+        }
 
         // Verify the restrictions ID. This is the only check here that the cleartext hint cannot
         // carry, as the peer would simply state the expected value; it is left to this point.
@@ -2021,7 +2145,7 @@ impl<N: Network> Gateway<N> {
         let listener_addr = SocketAddr::new(peer_addr.ip(), listener_port);
 
         // Ensure the event protocol version is not outdated.
-        if version < Event::<N>::VERSION {
+        if version < Event::<N>::MINIMUM_VERSION {
             return Some(DisconnectReason::OutdatedClientVersion);
         }
         // If the node is in trusted peers only mode, ensure the peer is trusted.

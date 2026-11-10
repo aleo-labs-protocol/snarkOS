@@ -1,0 +1,107 @@
+[package]
+name = "snarkos-ledger-distribution"
+version = "4.12.0"
+authors = [ "The Aleo Team <hello@aleo.org>" ]
+description = "Uploads the ledger's blocks to the bucket that serves the snarkOS block CDN"
+homepage = "https://aleo.org"
+repository = "https://github.com/ProvableHQ/snarkOS"
+keywords = [
+  "aleo",
+  "cryptography",
+  "blockchain",
+  "decentralized",
+  "zero-knowledge"
+]
+categories = [ "cryptography", "cryptography::cryptocurrencies", "os" ]
+license = "Apache-2.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "ledger-distribution"
+path = "src/main.rs"
+
+[dependencies.aleo-std]
+workspace = true
+features = [ "storage" ]
+
+[dependencies.anyhow]
+workspace = true
+
+[dependencies.axum]
+workspace = true
+
+[dependencies.bincode]
+workspace = true
+
+[dependencies.dotenvy]
+version = "0.15"
+
+[dependencies.futures]
+workspace = true
+
+[dependencies.num_cpus]
+workspace = true
+
+[dependencies.object_store]
+version = "0.14"
+features = [ "aws", "gcp" ]
+
+[dependencies.serde]
+workspace = true
+
+[dependencies.serde_json]
+workspace = true
+features = [ "preserve_order" ]
+
+[dependencies.sha2]
+version = "0.11"
+default-features = false
+
+[dependencies.snarkvm]
+workspace = true
+features = [ "console", "ledger", "rocks", "utilities" ]
+
+[dependencies.tokio]
+workspace = true
+features = [ "full" ]
+
+[dependencies.tower-http]
+version = "0.7"
+features = [ "trace" ]
+
+[dependencies.tracing]
+workspace = true
+
+[dependencies.tracing-subscriber]
+workspace = true
+features = [ "env-filter", "parking_lot" ]
+
+[dev-dependencies.async-trait]
+workspace = true
+
+[dev-dependencies.hyper-util]
+version = "0.1"
+features = [ "server-auto", "http1", "tokio" ]
+
+[dev-dependencies.s3s]
+version = "0.17"
+
+[dev-dependencies.s3s-fs]
+version = "0.17"
+
+[dev-dependencies.snarkos-node-cdn]
+workspace = true
+
+[dev-dependencies.snarkos-utilities]
+workspace = true
+
+[dev-dependencies.snarkvm]
+workspace = true
+features = [ "synthesizer" ]
+
+[dev-dependencies.tempfile]
+version = "3"
+
+[package.metadata.cargo-machete]
+ignored = ["serde"]

@@ -65,13 +65,13 @@ source = "$(cksum <<< "$1" | cut -d' ' -f1)"
 EOF
 }
 
-staging_pin='git = "https://github.com/ProvableHQ/snarkVM.git"
+staging_pin='git = "https://github.com/aleo-labs-protocol/snarkVM.git"
 rev = "1111111" #staging'
-staging_bump='git = "https://github.com/ProvableHQ/snarkVM.git"
+staging_bump='git = "https://github.com/aleo-labs-protocol/snarkVM.git"
 rev = "3333333" #staging'
-release_pin='#git = "https://github.com/ProvableHQ/snarkVM.git"
+release_pin='#git = "https://github.com/aleo-labs-protocol/snarkVM.git"
 version = "=4.12.0"'
-release_rev='git = "https://github.com/ProvableHQ/snarkVM.git"
+release_rev='git = "https://github.com/aleo-labs-protocol/snarkVM.git"
 rev = "2222222" #test_net_v4120'
 
 # Makes a repository at $repo whose branches staging and release start at a

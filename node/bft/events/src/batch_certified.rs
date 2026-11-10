@@ -57,8 +57,9 @@ impl<N: Network> FromBytes for BatchCertified<N> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz-helpers"))]
 pub mod prop_tests {
+    #![cfg_attr(not(test), allow(unused_imports))]
     use crate::{BatchCertified, certificate_response::prop_tests::any_batch_certificate};
     use snarkvm::console::prelude::{FromBytes, ToBytes};
 

@@ -69,9 +69,6 @@ workspace = true
 [dependencies.bytes]
 workspace = true
 
-[dependencies.colored]
-workspace = true
-
 [dependencies.futures]
 workspace = true
 features = [ "thread-pool" ]
@@ -173,7 +170,7 @@ features = [ "derive" ]
 version = "0.2"
 
 [dev-dependencies.itertools]
-version = "0.14"
+version = "0.15"
 
 [dev-dependencies.open]
 version = "5"
@@ -230,4 +227,4 @@ features = [ "env-filter" ]
 workspace = true
 
 [dev-dependencies.mockall]
-version = "0.13"
+version = "0.15"

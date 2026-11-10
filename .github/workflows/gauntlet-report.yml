@@ -1,0 +1,231 @@
+# Copy to aleo-labs-protocol/snarkOS as .github/workflows/gauntlet-report.yml, on staging.
+#
+# When the Gauntlet host or the sync host closes a run's check (stress-test.yml, sync-test.yml),
+# adds a "<check> report" check beside it on the same commit: the run's interactive report, as this
+# job's artifact, and Claude's comparison with the last passing run of the same tests. GitHub runs
+# this file as it is on the default branch, staging.
+#
+# It reads the host through its gate as gha-gauntlet-status, which can't start a run, with an IAM
+# role that only this file on staging can assume. stress-test-status and sync-test-status each hold:
+#   environment secret  GAUNTLET_ROLE_ARN           the role
+#   environment secret  GAUNTLET_HOST_INSTANCE_ID   the host
+# and the variable GAUNTLET_HOST_KEY, the host's ssh host key line, and optionally the secret
+# ANTHROPIC_API_KEY, for the comparison.
+name: "Gauntlet: Report"
+
+on:
+  check_run:
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    # Only the hosts' App's checks, and only a run that has a report: not one cancelled or never run.
+    # neutral is a run whose verdict or status the host couldn't read: its report says why.
+    if: >-
+      github.repository == 'aleo-labs-protocol/snarkOS'
+      && github.event.check_run.app.slug == 'snarkos-gauntlet'
+      && (github.event.check_run.name == 'stress-test' || github.event.check_run.name == 'sync-test')
+      && contains(fromJSON('["success", "failure", "action_required", "neutral"]'), github.event.check_run.conclusion)
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.check_run.name }}-status
+    timeout-minutes: 60
+    permissions:
+      id-token: write
+      checks: write
+      contents: read
+    env:
+      AWS_REGION: us-west-2
+      GH_TOKEN: ${{ github.token }}
+      HOST_ID: ${{ secrets.GAUNTLET_HOST_INSTANCE_ID }}
+      ROLE_ARN: ${{ secrets.GAUNTLET_ROLE_ARN }}
+      HOST_KEY: ${{ vars.GAUNTLET_HOST_KEY }}
+      GATE_USER: gha-gauntlet-status
+      NAME: ${{ github.event.check_run.name }}
+      RUN_ID: ${{ github.event.check_run.external_id }}
+      COMMIT: ${{ github.event.check_run.head_sha }}
+    steps:
+      - name: Check the run
+        id: run
+        run: |
+          [[ "$RUN_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ && "$COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::the check names no run"; exit 1; }
+
+      - name: Connect to the host
+        run: |
+          : "${HOST_ID:?GAUNTLET_HOST_INSTANCE_ID must be configured}"
+          : "${ROLE_ARN:?GAUNTLET_ROLE_ARN must be configured}"
+          # AWS errors quote ARNs that differ from the secret, so mask the account too.
+          echo "::add-mask::$(cut -d: -f5 <<<"$ROLE_ARN")"
+          # gha-gauntlet-status can only run the gate's status, report and cancel. Each connection
+          # pushes a key that lives 60 seconds, through the Instance Connect Endpoint.
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/gauntlet
+          : "${HOST_KEY:?GAUNTLET_HOST_KEY must be configured}"
+          printf '%s %s\n' "$HOST_ID" "$HOST_KEY" > ~/.ssh/known_hosts
+          cat > "$RUNNER_TEMP/gate.sh" <<'EOF'
+          # AWS credentials from GitHub's OIDC token, fresh for every call.
+          aws_login() {
+            local token creds
+            token="$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)"
+            creds="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" \
+              --role-session-name "report-$GITHUB_RUN_ID" --web-identity-token "$token" \
+              --duration-seconds 3600 --query Credentials --output json)"
+            export AWS_ACCESS_KEY_ID="$(jq -r .AccessKeyId <<<"$creds")"
+            export AWS_SECRET_ACCESS_KEY="$(jq -r .SecretAccessKey <<<"$creds")"
+            export AWS_SESSION_TOKEN="$(jq -r .SessionToken <<<"$creds")"
+          }
+          gate() {
+            aws_login
+            aws ec2-instance-connect send-ssh-public-key --instance-id "$HOST_ID" \
+              --instance-os-user "$GATE_USER" --ssh-public-key "file://$HOME/.ssh/gauntlet.pub" >/dev/null
+            ssh -i ~/.ssh/gauntlet -o BatchMode=yes -o StrictHostKeyChecking=yes \
+              -o "ProxyCommand=aws ec2-instance-connect open-tunnel --instance-id $HOST_ID" \
+              "$GATE_USER@$HOST_ID" "$@"
+          }
+          # Starts the host, which stops itself when idle, until its gate answers. A host that is
+          # stopping is started once stopped, and holds the gate's lock until then. EC2 may have no
+          # capacity for it for a while.
+          start_host() {
+            local error="" rc
+            aws_login
+            for _ in {1..100}; do
+              if aws ec2 start-instances --instance-ids "$HOST_ID" >/dev/null 2> start.err; then
+                rc=0; gate status "$RUN_ID" >/dev/null 2> probe.err || rc=$?
+                (( rc == 255 )) || grep -q 'undergoing maintenance' probe.err || return 0
+              fi
+              # Only the error's code: its message names the instance type and zone.
+              error="$(sed -n 's/.*An error occurred (\([A-Za-z.]*\)).*/\1/p' start.err)"
+              case "$error" in
+                ''|IncorrectInstanceState|InsufficientInstanceCapacity|VcpuLimitExceeded) sleep 15 ;;
+                *) echo "::error::could not start the host: ${error}"; return 1 ;;
+              esac
+            done
+            case "$error" in
+              InsufficientInstanceCapacity|VcpuLimitExceeded)
+                echo "::error::EC2 had no capacity to start the host"; touch no-capacity ;;
+              *) echo "::error::the host did not answer: $(tail -n 1 probe.err)" ;;
+            esac
+            return 1
+          }
+          EOF
+
+      - name: Read the run's status
+        run: |
+          source "$RUNNER_TEMP/gate.sh"
+          start_host
+          gate status "$RUN_ID" > status.json
+          jq -e --arg run "$RUN_ID" --arg sha "$COMMIT" '.run_id == $run and .result.commit == $sha' status.json >/dev/null
+
+      - name: Compare with the last passing run (Claude)
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          [[ -n "$ANTHROPIC_API_KEY" ]] || { echo "No ANTHROPIC_API_KEY; skipping."; exit 0; }
+          [[ "$(jq -r '.previous != null' status.json)" == true ]] || { echo "No earlier passing run to compare with."; exit 0; }
+          jq -n --slurpfile s status.json '{
+            model: "claude-opus-5-5",
+            max_tokens: 16000,
+            output_config: {effort: "medium"},
+            fallbacks: "default",
+            system: "You review snarkOS stress test results for the engineers deciding whether to tag a release. Compare this run with the last passing run of the same tests. Point out regressions, notable changes in durations or metrics, and anything that looks suspicious even if it passed. Do not restate the results table. Use at most 150 words of GitHub markdown, bullets preferred.",
+            messages: [{role: "user", content: ("This run:\n" + ($s[0].result | tojson) + "\n\nLast passing run:\n" + ($s[0].previous | tojson))}]
+          }' > request.json
+          curl --fail --connect-timeout 15 --max-time 120 -sS https://api.anthropic.com/v1/messages \
+            -H "content-type: application/json" \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2026-10-21" \
+            -H "anthropic-beta: server-side-fallback-2026-07-01" \
+            -d @request.json > response.json || { echo "::warning::Claude request failed"; exit 0; }
+          if [[ "$(jq -r .stop_reason response.json)" != end_turn ]]; then
+            echo "::warning::no summary (stop_reason: $(jq -r '.stop_reason // .error.message' response.json))"
+            exit 0
+          fi
+          jq -r '[.content[] | select(.type == "text") | .text] | join("\n")' response.json > claude.md
+
+      - name: Export the interactive report
+        id: export
+        continue-on-error: true
+        run: |
+          source "$RUNNER_TEMP/gate.sh"
+          mkdir -p report
+          gate report "$RUN_ID" html > report/report.html
+          gate report "$RUN_ID" json > report/report.json
+          jq -e --arg run "$RUN_ID" '.schema_version == 1 and .run.run_id == $run' report/report.json >/dev/null
+          # Artifacts bypass GitHub log masking.
+          python3 - <<'PY'
+          import ipaddress
+          import os
+          import re
+          from pathlib import Path
+
+          secrets = (os.environ["HOST_ID"], os.environ["ROLE_ARN"], os.environ["ROLE_ARN"].split(":")[4])
+          cloud = re.compile(
+              r"\barn:|\bi-[0-9a-f]{8,17}\b|"
+              r"\b(?:[a-z0-9-]+\.)+(?:compute(?:-\d+)?\.amazonaws\.com(?:\.cn)?|compute\.internal|ec2\.internal)\b",
+              re.IGNORECASE)
+          addresses = re.compile(
+              r"(?<![\w:])(?:[a-f\d]{0,4}:){2,}[a-f\d:.]*(?:%[\w.-]+)?(?![\w:])|"
+              r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])", re.IGNORECASE)
+          for name in ("report.html", "report.json"):
+              content = Path("report", name).read_text()
+              blocked = any(value and value in content for value in secrets) or cloud.search(content)
+              for match in addresses.finditer(content):
+                  try:
+                      ipaddress.ip_address(match[0])
+                  except ValueError:
+                      continue
+                  blocked = True
+                  break
+              if blocked:
+                  raise SystemExit("::warning::Interactive report contains infrastructure identifiers; skipping upload.")
+          PY
+
+      - name: Upload the report
+        id: artifact
+        if: steps.export.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ github.event.check_run.name }}-${{ github.event.check_run.external_id }}
+          path: |
+            report/report.html
+            report/report.json
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Add the report check
+        # Even when the host couldn't be read: the commit then says where to look.
+        if: always() && steps.run.outcome == 'success'
+        env:
+          REPORT_URL: ${{ steps.artifact.outputs.artifact-url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          parts = []
+          if url := os.environ.get("REPORT_URL"):
+              parts.append(f"[Download interactive report + JSON]({url}) · Unzip and open report.html locally.")
+          else:
+              parts.append("No interactive report: see this job's log.")
+          extra = Path("claude.md")
+          if extra.is_file():
+              parts.append("### Compared with the last passing run (Claude)\n\n" + extra.read_text())
+          summary = "\n\n".join(parts)
+          if len(summary.encode()) > 65535:
+              summary = parts[0]
+          Path("check.json").write_text(json.dumps({
+              "name": f"{os.environ['NAME']} report", "head_sha": os.environ["COMMIT"], "external_id": os.environ["RUN_ID"],
+              "details_url": os.environ["RUN_URL"], "status": "completed", "conclusion": "neutral",
+              "output": {"title": f"Run {os.environ['RUN_ID']}", "summary": summary}}))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as out:
+              out.write(summary + "\n")
+          PY
+          gh api "repos/$GITHUB_REPOSITORY/check-runs" --input check.json >/dev/null

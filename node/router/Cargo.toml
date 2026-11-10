@@ -38,9 +38,6 @@ workspace = true
 [dependencies.async-trait]
 workspace = true
 
-[dependencies.colored]
-workspace = true
-
 [dependencies.futures]
 version = "0.3.30"
 features = [ "thread-pool" ]
@@ -117,7 +114,7 @@ workspace = true
 features = [ "codec" ]
 
 [dependencies.tokio-stream]
-version = "=0.1"
+version = "0.1"
 
 [dependencies.tracing]
 workspace = true

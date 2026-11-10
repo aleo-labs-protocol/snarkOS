@@ -50,7 +50,6 @@ use snarkvm::{
 };
 
 use anyhow::Result;
-use colored::Colorize;
 use core::{marker::PhantomData, time::Duration};
 #[cfg(feature = "locktick")]
 use locktick::parking_lot::{Mutex, RwLock};
@@ -267,9 +266,9 @@ impl<N: Network, C: ConsensusStorage<N>> Prover<N, C> {
         self.increment_puzzle_instances();
 
         debug!(
-            "Proving 'Puzzle' for Epoch '{}' {}",
-            fmt_id(epoch_hash),
-            format!("(Coinbase Target {coinbase_target}, Proof Target {proof_target})").dimmed()
+            dim = true,
+            "Proving 'Puzzle' for Epoch '{}' (Coinbase Target {coinbase_target}, Proof Target {proof_target})",
+            fmt_id(epoch_hash)
         );
 
         // Compute the solution.

@@ -45,9 +45,6 @@ workspace = true
 [dependencies.cfg-if]
 workspace = true
 
-[dependencies.colored]
-workspace = true
-
 [dependencies.indexmap]
 workspace = true
 features = [ "serde", "rayon" ]

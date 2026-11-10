@@ -15,7 +15,7 @@
 
 use crate::{
     MAX_LEADER_CERTIFICATE_DELAY,
-    helpers::{ConsensusSender, DAG, PrimaryReceiver, PrimarySender, Storage, fmt_id, now},
+    helpers::{BlockHeldBack, ConsensusSender, DAG, PrimaryReceiver, PrimarySender, Storage, fmt_id, now},
     primary::{Primary, PrimaryCallback},
     sync::SyncCallback,
 };
@@ -38,7 +38,6 @@ use snarkvm::{
 };
 
 use anyhow::Context;
-use colored::Colorize;
 use indexmap::{IndexMap, IndexSet};
 #[cfg(feature = "locktick")]
 use locktick::parking_lot::RwLock;
@@ -263,7 +262,7 @@ impl<N: Network> PrimaryCallback<N> for BFT<N> {
             } else {
                 match is_ready {
                     true => info!("Round {current_round} reached quorum without a leader"),
-                    false => info!("{}", format!("Round {current_round} did not elect a leader (yet)").dimmed()),
+                    false => info!(dim = true, "Round {current_round} did not elect a leader (yet)"),
                 }
             }
         }
@@ -726,7 +725,7 @@ impl<N: Network> BFT<N> {
                         format!(
                             "BFT failed to retrieve transmission '{}.{}' from round {}",
                             fmt_id(transmission_id),
-                            fmt_id(transmission_id.checksum().unwrap_or_default()).dimmed(),
+                            fmt_id(transmission_id.checksum().unwrap_or_default()),
                             certificate.round()
                         )
                     })?;
@@ -775,8 +774,14 @@ impl<N: Network> BFT<N> {
                     Ok(Ok(true)) => (),
                     Ok(Ok(false)) => ledger_already_advanced = true,
                     Ok(Err(err)) => {
+                        // A held-back block is retried with the next commit, as the subdag stays uncommitted.
+                        let is_held_back = err.downcast_ref::<BlockHeldBack>().is_some();
                         let err = err.context(format!("BFT failed to advance the subdag for round {anchor_round}"));
-                        error!("{}", &flatten_error(err));
+                        if is_held_back {
+                            warn!("{}", &flatten_error(err));
+                        } else {
+                            error!("{}", &flatten_error(err));
+                        }
                         return Ok(());
                     }
                     Err(err) => {
