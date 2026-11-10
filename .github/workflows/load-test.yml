@@ -1,0 +1,87 @@
+# Copy to aleo-labs-protocol/snarkOS as .github/workflows/load-test.yml.
+#
+# A form for the replay_stockpile test. stress-test.yml does the rest: approval in
+# the stress-test environment and queueing the run, which the Gauntlet host reports
+# as the "stress-test" check on the commit.
+# Gauntlet owns the defaults: this sends only what's filled in.
+name: "Gauntlet: Load test"
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "snarkOS commit (full SHA). Empty: the commit this is run from."
+        required: false
+        default: ""
+      validators:
+        description: "Network size, in validators"
+        type: choice
+        options: ["5", "10", "16"]
+        default: "5"
+      stockpile:
+        description: "Stockpile to replay. Its network is the devnet's."
+        type: choice
+        options:
+          - testnet-V22-h25-p1000x20-stockpile-1
+          - testnet-V22-h25-p10000x20-stockpile-2
+          - testnet-V22-h25-p10000x10-stockpile-3
+        default: testnet-V22-h25-p1000x20-stockpile-1
+      rate:
+        description: "Transactions per second. Empty: Gauntlet's default."
+        required: false
+        default: ""
+      duration:
+        description: "Seconds to send for. 0 sends the whole stockpile. Empty: Gauntlet's default."
+        required: false
+        default: ""
+      ramp:
+        description: "FROM:TO:STEP tx/s, instead of rate and duration. Lower min_inclusion with it."
+        required: false
+        default: ""
+      targets:
+        description: "Nodes to send to"
+        type: choice
+        options: [default, clients, validators, both]
+        default: default
+      replay_mode:
+        description: "per-payer for a build with input locks"
+        type: choice
+        options: [default, open, per-payer]
+        default: default
+      min_inclusion:
+        description: "Share of the transactions sent that must land. Empty: Gauntlet's default."
+        required: false
+        default: ""
+      packet_loss:
+        description: "Percent of P2P packets every node drops while sending; on the wire it comes in bursts. Inclusion is then reported, not judged. Not with a ramp."
+        type: choice
+        options: ["0", "1", "5", "10", "20", "30", "50", "70"]
+        default: "0"
+      deploy_rate:
+        description: "Deployments per second beside the transactions, from a stockpile with deployments. Needs a duration over 0 or a ramp."
+        required: false
+        default: "0"
+
+jobs:
+  load:
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/stress-test.yml
+    # A called workflow sees no secret it isn't passed, its environment's included.
+    secrets: inherit
+    with:
+      commit: ${{ inputs.commit }}
+      tests: replay_stockpile
+      validators: ${{ inputs.validators }}
+      network: ${{ startsWith(inputs.stockpile, 'mainnet-') && 'mainnet' || 'testnet' }}
+      params: >-
+        ${{ format('stockpile={0}{1}{2}{3}{4}{5}{6}{7}{8}', inputs.stockpile,
+        inputs.rate && format(',rate={0}', inputs.rate) || '',
+        inputs.duration && format(',duration={0}', inputs.duration) || '',
+        inputs.ramp && format(',ramp={0}', inputs.ramp) || '',
+        inputs.targets != 'default' && format(',targets={0}', inputs.targets) || '',
+        inputs.replay_mode != 'default' && format(',replay_mode={0}', inputs.replay_mode) || '',
+        inputs.min_inclusion && format(',min_inclusion={0}', inputs.min_inclusion) || '',
+        inputs.packet_loss != '0' && format(',packet_loss={0}', inputs.packet_loss) || '',
+        inputs.deploy_rate && inputs.deploy_rate != '0' && format(',deploy_rate={0}', inputs.deploy_rate) || '') }}

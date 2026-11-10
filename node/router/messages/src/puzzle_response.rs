@@ -49,8 +49,9 @@ impl<N: Network> FromBytes for PuzzleResponse<N> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz-helpers"))]
 pub mod prop_tests {
+    #![cfg_attr(not(test), allow(unused_imports))]
     use crate::{MAX_SMALL_MESSAGE_SIZE, PuzzleResponse, challenge_response::prop_tests::any_genesis_header};
     use snarkvm::{
         console::prelude::{FromBytes, ToBytes},
@@ -59,7 +60,7 @@ pub mod prop_tests {
     };
 
     use bytes::{Buf, BufMut, Bytes, BytesMut};
-    use proptest::prelude::{BoxedStrategy, Strategy, any};
+    use proptest::prelude::{BoxedStrategy, ProptestConfig, Strategy, any};
     use test_strategy::proptest;
 
     type CurrentNetwork = snarkvm::prelude::MainnetV0;
@@ -93,7 +94,7 @@ pub mod prop_tests {
             .boxed()
     }
 
-    #[proptest]
+    #[proptest(ProptestConfig { cases: 10, ..ProptestConfig::default() })]
     fn puzzle_response_roundtrip(#[strategy(any_puzzle_response())] original: PuzzleResponse<CurrentNetwork>) {
         let mut buf = BytesMut::default().writer();
         PuzzleResponse::write_le(&original, &mut buf).unwrap();

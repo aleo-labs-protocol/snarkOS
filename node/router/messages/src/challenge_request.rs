@@ -92,8 +92,9 @@ impl<N: Network> ChallengeRequest<N> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz-helpers"))]
 pub mod prop_tests {
+    #![cfg_attr(not(test), allow(unused_imports))]
     use super::*;
 
     use snarkvm::{

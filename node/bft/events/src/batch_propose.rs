@@ -60,8 +60,9 @@ impl<N: Network> FromBytes for BatchPropose<N> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz-helpers"))]
 pub mod prop_tests {
+    #![cfg_attr(not(test), allow(unused_imports))]
     use crate::{
         BatchPropose,
         certificate_response::prop_tests::any_batch_header,

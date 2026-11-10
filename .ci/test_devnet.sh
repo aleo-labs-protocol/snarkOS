@@ -286,14 +286,13 @@ else
 fi
 
 # Use the old flags here `--query` and `--broadcast=URL` to test they still work.
-# Also, use the v1 API to test it still works.
-log "● Testing program execution with V1 API..."
-execute_result=$(cd program && snarkos developer execute --dev-key 0 --network "$network_id" "--query=http://$localhost:3030/v1" \
-    "--broadcast=http://$localhost:3030/v1/$network_name/transaction/broadcast" "$program_name" main 1u32 1u32 --wait --timeout 10)
+log "● Testing program execution with an explicit API version and broadcast URL..."
+execute_result=$(cd program && snarkos developer execute --dev-key 0 --network "$network_id" "--query=http://$localhost:3030/v2" \
+    "--broadcast=http://$localhost:3030/v2/$network_name/transaction/broadcast" "$program_name" main 1u32 1u32 --wait --timeout 10)
 
 # Fail if the execution transaction does not exist.
 tx=$(echo "$execute_result" | tail -n 1)
-found=$(curl -s -o /dev/null -w "%{http_code}" "http://$localhost:3030/v1/$network_name/transaction/$tx")
+found=$(curl -s -o /dev/null -w "%{http_code}" "http://$localhost:3030/v2/$network_name/transaction/$tx")
 # Fail if the HTTP response is not 2X.
 if (( found < 200 || found >= 300 )); then
   printf "❌ Test failed! Transaction does not exist or contains an error: \nexecute_result: %s\nfound: %s\n" \
@@ -301,6 +300,16 @@ if (( found < 200 || found >= 300 )); then
   exit 1
 else
   log "✅ Transaction executed successfully: $execute_result"
+fi
+
+# The deprecated v1 API is still served, and every response carries the deprecation notice.
+log "● Testing the deprecated v1 API..."
+v1_headers=$(curl -s -o /dev/null -D - "http://$localhost:3030/v1/$network_name/transaction/$tx")
+if ! grep -q '^HTTP/[0-9.]* 2[0-9][0-9] ' <<< "$v1_headers" || ! grep -qi '^deprecation:' <<< "$v1_headers"; then
+  printf "❌ Test failed! The v1 API did not return 2XX with a Deprecation header:\n%s\n" "$v1_headers"
+  exit 1
+else
+  log "✅ The v1 API returned 2XX with a Deprecation header"
 fi
 
 # Fail if status does not exist or is not set to "accepted".

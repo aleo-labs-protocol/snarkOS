@@ -263,7 +263,7 @@ impl TestNetwork {
 
     // Connects all nodes to each other.
     pub async fn connect_all(&self) {
-        for (validator, other_validator) in self.validators.values().tuple_combinations() {
+        for [validator, other_validator] in self.validators.values().array_combinations() {
             // Connect to the node.
             let ip = other_validator.primary.gateway().local_ip();
             let _ = validator.primary.gateway().connect(ip);

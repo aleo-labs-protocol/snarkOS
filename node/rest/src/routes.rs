@@ -306,22 +306,22 @@ struct SyncStatus<'a> {
 impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
     /// GET /<network>/version
     pub(crate) async fn get_version() -> ErasedJson {
-        ErasedJson::pretty(VersionInfo::get::<N>())
+        ErasedJson::new(VersionInfo::get::<N>())
     }
 
     /// Get /<network>/consensus_version
     pub(crate) async fn get_consensus_version(State(rest): State<Self>) -> Result<ErasedJson, RestError> {
-        Ok(ErasedJson::pretty(N::CONSENSUS_VERSION(rest.ledger.latest_height())? as u16))
+        Ok(ErasedJson::new(N::CONSENSUS_VERSION(rest.ledger.latest_height())? as u16))
     }
 
     /// GET /<network>/block/height/latest
     pub(crate) async fn get_block_height_latest(State(rest): State<Self>) -> ErasedJson {
-        ErasedJson::pretty(rest.ledger.latest_height())
+        ErasedJson::new(rest.ledger.latest_height())
     }
 
     /// GET /<network>/block/hash/latest
     pub(crate) async fn get_block_hash_latest(State(rest): State<Self>) -> ErasedJson {
-        ErasedJson::pretty(rest.ledger.latest_hash())
+        ErasedJson::new(rest.ledger.latest_hash())
     }
 
     /// GET /<network>/block/latest
@@ -329,7 +329,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         let block = rest.ledger.latest_block();
         let hash = block.hash();
         // When present, this is 3x faster than serializing the block from the ledger.
-        rest.block_cache.lock().get_or_insert(hash, || ErasedJson::pretty(block)).clone()
+        rest.block_cache.lock().get_or_insert(hash, || ErasedJson::new(block)).clone()
     }
 
     /// GET /<network>/block/{height}
@@ -358,7 +358,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
 
         // Retrieve the block from the database.
         let json_block = match tokio::task::spawn_blocking(move || match rest.ledger.try_get_block_by_hash(&hash) {
-            Ok(Some(block)) => Some(ErasedJson::pretty(block)),
+            Ok(Some(block)) => Some(ErasedJson::new(block)),
             Ok(None) => None,
             Err(e) => {
                 error!("Couldn't find a block: {e}");
@@ -394,7 +394,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
                 .map(|height| rest.ledger.get_block(height).map_err(map_missing_resource_error))
                 .collect::<Result<Vec<_>, _>>()?;
 
-            Ok(ErasedJson::pretty(blocks))
+            Ok(ErasedJson::new(blocks))
         };
 
         // Fetch the blocks from ledger and serialize to json.
@@ -437,7 +437,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
                 .map(|height| rest.ledger.get_hash(height).map_err(map_missing_resource_error))
                 .collect::<Result<Vec<_>, _>>()?;
 
-            Ok(ErasedJson::pretty(hashes))
+            Ok(ErasedJson::new(hashes))
         };
 
         // Fetch the block hashes from the ledger and serialize to json.
@@ -476,7 +476,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
                 .map(|height| rest.ledger.get_header(height).map_err(map_missing_resource_error))
                 .collect::<Result<Vec<_>, _>>()?;
 
-            Ok(ErasedJson::pretty(headers))
+            Ok(ErasedJson::new(headers))
         };
 
         // Fetch the block headers from the ledger and serialize to json.
@@ -528,7 +528,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
                 .map(|height| rest.ledger.get_transactions(height).map_err(map_missing_resource_error))
                 .collect::<Result<Vec<_>, _>>()?;
 
-            Ok(ErasedJson::pretty(transactions))
+            Ok(ErasedJson::new(transactions))
         };
 
         // Fetch the transactions from the ledger and serialize to json.
@@ -581,7 +581,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
-            Ok(ErasedJson::pretty(state_roots))
+            Ok(ErasedJson::new(state_roots))
         };
 
         // Fetch the state roots from the ledger and serialize to json.
@@ -597,7 +597,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         }
     }
 
-    /// GET /<network>/sync/status
+    /// GET /<network>/sync/status (deprecated alias: /sync_status)
     pub(crate) async fn get_sync_status(State(rest): State<Self>) -> Result<ErasedJson, RestError> {
         // Get the CDN height (if we are syncing from a CDN)
         let (cdn_sync, cdn_height) = if let Some(cdn_sync) = &rest.cdn_sync {
@@ -620,7 +620,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             BftSyncMode::Dag => "dag",
         });
 
-        Ok(ErasedJson::pretty(SyncStatus {
+        Ok(ErasedJson::new(SyncStatus {
             sync_mode,
             bft_sync_mode,
             cdn_height,
@@ -636,19 +636,19 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
     pub(crate) async fn get_sync_peers(State(rest): State<Self>) -> Result<ErasedJson, RestError> {
         let peers: HashMap<String, u32> =
             rest.block_sync.get_peer_heights().into_iter().map(|(addr, height)| (addr.to_string(), height)).collect();
-        Ok(ErasedJson::pretty(peers))
+        Ok(ErasedJson::new(peers))
     }
 
     /// GET /<network>/sync/requests
     pub(crate) async fn get_sync_requests_summary(State(rest): State<Self>) -> Result<ErasedJson, RestError> {
         let summary = rest.block_sync.get_block_requests_summary();
-        Ok(ErasedJson::pretty(summary))
+        Ok(ErasedJson::new(summary))
     }
 
     /// GET /<network>/sync/requests/list
     pub(crate) async fn get_sync_requests_list(State(rest): State<Self>) -> Result<ErasedJson, RestError> {
         let requests = rest.block_sync.get_block_requests_info();
-        Ok(ErasedJson::pretty(requests))
+        Ok(ErasedJson::new(requests))
     }
 
     /// GET /<network>/height/{blockHash}
@@ -656,7 +656,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         State(rest): State<Self>,
         Path(hash): Path<N::BlockHash>,
     ) -> Result<ErasedJson, RestError> {
-        Ok(ErasedJson::pretty(rest.ledger.get_height(&hash).map_err(map_missing_resource_error)?))
+        Ok(ErasedJson::new(rest.ledger.get_height(&hash).map_err(map_missing_resource_error)?))
     }
 
     /// GET /<network>/block/{height}/header
@@ -664,7 +664,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         State(rest): State<Self>,
         Path(height): Path<u32>,
     ) -> Result<ErasedJson, RestError> {
-        Ok(ErasedJson::pretty(rest.ledger.get_header(height)?))
+        Ok(ErasedJson::new(rest.ledger.get_header(height)?))
     }
 
     /// GET /<network>/block/{height}/transactions
@@ -672,7 +672,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         State(rest): State<Self>,
         Path(height): Path<u32>,
     ) -> Result<ErasedJson, RestError> {
-        Ok(ErasedJson::pretty(rest.ledger.get_transactions(height)?))
+        Ok(ErasedJson::new(rest.ledger.get_transactions(height)?))
     }
 
     /// GET /<network>/transaction/{transactionID}
@@ -691,9 +691,9 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             // Get the block hash and height for the transaction, if it exists.
             let block_hash = rest.ledger.find_block_hash(&tx_id).ok().flatten();
             let block_height = block_hash.and_then(|hash| rest.ledger.get_height(&hash).ok());
-            Ok(ErasedJson::pretty(TransactionWithMetadata::<_, N> { transaction, block_hash, block_height }))
+            Ok(ErasedJson::new(TransactionWithMetadata::<_, N> { transaction, block_hash, block_height }))
         } else {
-            Ok(ErasedJson::pretty(transaction))
+            Ok(ErasedJson::new(transaction))
         }
     }
 
@@ -716,13 +716,13 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
                 .find_block_hash(&tx_id)?
                 .ok_or_else(|| anyhow!("Block hash not found for transaction {tx_id}"))?;
             let block_height = rest.ledger.get_height(&block_hash)?;
-            Ok(ErasedJson::pretty(TransactionWithMetadata::<_, N> {
+            Ok(ErasedJson::new(TransactionWithMetadata::<_, N> {
                 transaction,
                 block_hash: Some(block_hash),
                 block_height: Some(block_height),
             }))
         } else {
-            Ok(ErasedJson::pretty(transaction))
+            Ok(ErasedJson::new(transaction))
         }
     }
 
@@ -732,7 +732,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         Path(tx_id): Path<N::TransactionID>,
     ) -> Result<ErasedJson, RestError> {
         // Ledger returns a generic anyhow::Error, so checking the message is the only way to parse it.
-        Ok(ErasedJson::pretty(rest.ledger.get_unconfirmed_transaction(&tx_id).map_err(|err| {
+        Ok(ErasedJson::new(rest.ledger.get_unconfirmed_transaction(&tx_id).map_err(|err| {
             if err.to_string().contains("Missing") { RestError::not_found(err) } else { RestError::from(err) }
         })?))
     }
@@ -744,7 +744,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
     ) -> Result<ErasedJson, RestError> {
         let rejection_reason = Self::lookup_transaction_rejection_reason(&rest, &tx_id)?;
         match rejection_reason {
-            Some(reason) => Ok(ErasedJson::pretty(reason)),
+            Some(reason) => Ok(ErasedJson::new(reason)),
             None => Err(RestError::not_found(anyhow!("Rejection reason not found for transaction {tx_id}"))),
         }
     }
@@ -783,9 +783,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
     /// GET /<network>/memoryPool/transmissions
     pub(crate) async fn get_memory_pool_transmissions(State(rest): State<Self>) -> Result<ErasedJson, RestError> {
         match rest.consensus {
-            Some(consensus) => {
-                Ok(ErasedJson::pretty(consensus.unconfirmed_transmissions().collect::<IndexMap<_, _>>()))
-            }
+            Some(consensus) => Ok(ErasedJson::new(consensus.unconfirmed_transmissions().collect::<IndexMap<_, _>>())),
             None => Err(RestError::service_unavailable(anyhow!("Route isn't available for this node type"))),
         }
     }
@@ -793,7 +791,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
     /// GET /<network>/memoryPool/solutions
     pub(crate) async fn get_memory_pool_solutions(State(rest): State<Self>) -> Result<ErasedJson, RestError> {
         match rest.consensus {
-            Some(consensus) => Ok(ErasedJson::pretty(consensus.unconfirmed_solutions().collect::<IndexMap<_, _>>())),
+            Some(consensus) => Ok(ErasedJson::new(consensus.unconfirmed_solutions().collect::<IndexMap<_, _>>())),
             None => Err(RestError::service_unavailable(anyhow!("Route isn't available for this node type"))),
         }
     }
@@ -801,7 +799,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
     /// GET /<network>/memoryPool/transactions
     pub(crate) async fn get_memory_pool_transactions(State(rest): State<Self>) -> Result<ErasedJson, RestError> {
         match rest.consensus {
-            Some(consensus) => Ok(ErasedJson::pretty(consensus.unconfirmed_transactions().collect::<IndexMap<_, _>>())),
+            Some(consensus) => Ok(ErasedJson::new(consensus.unconfirmed_transactions().collect::<IndexMap<_, _>>())),
             None => Err(RestError::service_unavailable(anyhow!("Route isn't available for this node type"))),
         }
     }
@@ -826,7 +824,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             return rest.return_program_with_metadata(program, edition);
         }
         // Return the program without metadata.
-        Ok(ErasedJson::pretty(program))
+        Ok(ErasedJson::new(program))
     }
 
     /// GET /<network>/program/{programID}/{edition}
@@ -847,7 +845,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
                 if metadata.metadata.unwrap_or(false) {
                     rest.return_program_with_metadata(program, edition)
                 } else {
-                    Ok(ErasedJson::pretty(program))
+                    Ok(ErasedJson::new(program))
                 }
             }
             None => Err(RestError::not_found(anyhow!("No program `{id}` exists for edition {edition}"))),
@@ -876,7 +874,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         // Get the amendment count for this program and edition.
         let amendment_count =
             self.ledger.vm().block_store().transaction_store().get_amendment_count(id, edition)?.unwrap_or(0);
-        Ok(ErasedJson::pretty(json!({
+        Ok(ErasedJson::new(json!({
             "program": program,
             "edition": edition,
             "transaction_id": tx_id,
@@ -890,7 +888,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         State(rest): State<Self>,
         Path(id): Path<ProgramID<N>>,
     ) -> Result<ErasedJson, RestError> {
-        Ok(ErasedJson::pretty(rest.ledger.get_latest_edition_for_program(&id)?))
+        Ok(ErasedJson::new(rest.ledger.get_latest_edition_for_program(&id)?))
     }
 
     /// GET /<network>/program/{programID}/mappings
@@ -898,7 +896,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         State(rest): State<Self>,
         Path(id): Path<ProgramID<N>>,
     ) -> Result<ErasedJson, RestError> {
-        Ok(ErasedJson::pretty(rest.ledger.vm().finalize_store().get_mapping_names_confirmed(&id)?))
+        Ok(ErasedJson::new(rest.ledger.vm().finalize_store().get_mapping_names_confirmed(&id)?))
     }
 
     /// GET /<network>/program/{programID}/mapping/{mappingName}/{mappingKey}
@@ -913,14 +911,14 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
 
         // Check if metadata is requested and return the value with metadata if so.
         if metadata.metadata.unwrap_or(false) {
-            return Ok(ErasedJson::pretty(json!({
+            return Ok(ErasedJson::new(json!({
                 "data": mapping_value,
                 "height": rest.ledger.latest_height(),
             })));
         }
 
         // Return the value without metadata.
-        Ok(ErasedJson::pretty(mapping_value))
+        Ok(ErasedJson::new(mapping_value))
     }
 
     /// GET /<network>/program/{programID}/mapping/{mappingName}?all={true}&metadata={true}
@@ -946,14 +944,14 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             Ok(Ok(mapping_values)) => {
                 // Check if metadata is requested and return the mapping with metadata if so.
                 if metadata.metadata.unwrap_or(false) {
-                    return Ok(ErasedJson::pretty(json!({
+                    return Ok(ErasedJson::new(json!({
                         "data": mapping_values,
                         "height": height,
                     })));
                 }
 
                 // Return the full mapping without metadata.
-                Ok(ErasedJson::pretty(mapping_values))
+                Ok(ErasedJson::new(mapping_values))
             }
             Ok(Err(err)) => Err(RestError::internal_server_error(err.context("Unable to read mapping"))),
             Err(err) => Err(RestError::internal_server_error(anyhow!("Tokio error: {err}"))),
@@ -971,7 +969,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         let amendment_count =
             rest.ledger.vm().block_store().transaction_store().get_amendment_count(&id, edition)?.unwrap_or(0);
 
-        Ok(ErasedJson::pretty(json!({
+        Ok(ErasedJson::new(json!({
             "program_id": id,
             "edition": edition,
             "amendment_count": amendment_count,
@@ -987,7 +985,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         let amendment_count =
             rest.ledger.vm().block_store().transaction_store().get_amendment_count(&id, edition)?.unwrap_or(0);
 
-        Ok(ErasedJson::pretty(json!({
+        Ok(ErasedJson::new(json!({
             "program_id": id,
             "edition": edition,
             "amendment_count": amendment_count,
@@ -999,7 +997,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         State(rest): State<Self>,
         Path(commitment): Path<Field<N>>,
     ) -> Result<ErasedJson, RestError> {
-        Ok(ErasedJson::pretty(rest.ledger.get_state_path_for_commitment(&commitment)?))
+        Ok(ErasedJson::new(rest.ledger.get_state_path_for_commitment(&commitment)?))
     }
 
     /// GET /<network>/statePaths?commitments=cm1,cm2,...
@@ -1032,7 +1030,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
-            Ok(ErasedJson::pretty(rest.ledger.get_state_paths_for_commitments(&commitments)?))
+            Ok(ErasedJson::new(rest.ledger.get_state_paths_for_commitments(&commitments)?))
         };
 
         match tokio::task::spawn_blocking(get_json_state_paths).await {
@@ -1046,7 +1044,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
 
     /// GET /<network>/stateRoot/latest
     pub(crate) async fn get_state_root_latest(State(rest): State<Self>) -> ErasedJson {
-        ErasedJson::pretty(rest.ledger.latest_state_root())
+        ErasedJson::new(rest.ledger.latest_state_root())
     }
 
     /// GET /<network>/stateRoot/{height}
@@ -1054,12 +1052,12 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         State(rest): State<Self>,
         Path(height): Path<u32>,
     ) -> Result<ErasedJson, RestError> {
-        Ok(ErasedJson::pretty(rest.ledger.get_state_root(height)?))
+        Ok(ErasedJson::new(rest.ledger.get_state_root(height)?))
     }
 
     /// GET /<network>/committee/latest
     pub(crate) async fn get_committee_latest(State(rest): State<Self>) -> Result<ErasedJson, RestError> {
-        Ok(ErasedJson::pretty(rest.ledger.latest_committee()?))
+        Ok(ErasedJson::new(rest.ledger.latest_committee()?))
     }
 
     /// GET /<network>/committee/{height}
@@ -1067,7 +1065,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         State(rest): State<Self>,
         Path(height): Path<u32>,
     ) -> Result<ErasedJson, RestError> {
-        Ok(ErasedJson::pretty(rest.ledger.get_committee(height)?))
+        Ok(ErasedJson::new(rest.ledger.get_committee(height)?))
     }
 
     /// GET /<network>/delegators/{validator}
@@ -1082,31 +1080,31 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
 
         // Return the delegators for the given validator.
         match tokio::task::spawn_blocking(move || rest.ledger.get_delegators_for_validator(&validator)).await {
-            Ok(Ok(delegators)) => Ok(ErasedJson::pretty(delegators)),
+            Ok(Ok(delegators)) => Ok(ErasedJson::new(delegators)),
             Ok(Err(err)) => Err(RestError::internal_server_error(err.context("Unable to request delegators"))),
             Err(err) => Err(RestError::internal_server_error(anyhow!(err).context("Tokio error"))),
         }
     }
 
-    /// GET /<network>/peers/count (alias: /connections/p2p/count)
+    /// GET /<network>/connections/p2p/count (deprecated alias: /peers/count)
     pub(crate) async fn get_peers_count(State(rest): State<Self>) -> ErasedJson {
-        ErasedJson::pretty(rest.routing.router().number_of_connected_peers())
+        ErasedJson::new(rest.routing.router().number_of_connected_peers())
     }
 
-    /// GET /<network>/peers/all (alias: /connections/p2p/all)
+    /// GET /<network>/connections/p2p/all (deprecated alias: /peers/all)
     pub(crate) async fn get_peers_all(State(rest): State<Self>) -> ErasedJson {
-        ErasedJson::pretty(rest.routing.router().connected_peers())
+        ErasedJson::new(rest.routing.router().connected_peers())
     }
 
-    /// GET /<network>/peers/all/metrics (alias: /connections/p2p/all/metrics)
+    /// GET /<network>/connections/p2p/all/metrics (deprecated alias: /peers/all/metrics)
     pub(crate) async fn get_peers_all_metrics(State(rest): State<Self>) -> ErasedJson {
-        ErasedJson::pretty(rest.routing.router().connected_metrics())
+        ErasedJson::new(rest.routing.router().connected_metrics())
     }
 
     /// GET /<network>/connections/bft/count
     pub(crate) async fn get_bft_connections_count(State(rest): State<Self>) -> Result<ErasedJson, RestError> {
         match rest.consensus {
-            Some(consensus) => Ok(ErasedJson::pretty(consensus.bft().primary().gateway().number_of_connected_peers())),
+            Some(consensus) => Ok(ErasedJson::new(consensus.bft().primary().gateway().number_of_connected_peers())),
             None => Err(RestError::service_unavailable(anyhow!("Route isn't available for this node type"))),
         }
     }
@@ -1114,14 +1112,14 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
     /// GET /<network>/connections/bft/all
     pub(crate) async fn get_bft_connections_all(State(rest): State<Self>) -> Result<ErasedJson, RestError> {
         match rest.consensus {
-            Some(consensus) => Ok(ErasedJson::pretty(consensus.bft().primary().gateway().connected_peers())),
+            Some(consensus) => Ok(ErasedJson::new(consensus.bft().primary().gateway().connected_peers())),
             None => Err(RestError::service_unavailable(anyhow!("Route isn't available for this node type"))),
         }
     }
 
     /// GET /<network>/node/address
     pub(crate) async fn get_node_address(State(rest): State<Self>) -> ErasedJson {
-        ErasedJson::pretty(rest.routing.router().address())
+        ErasedJson::new(rest.routing.router().address())
     }
 
     /// GET /<network>/find/blockHash/{transactionID}
@@ -1129,7 +1127,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         State(rest): State<Self>,
         Path(tx_id): Path<N::TransactionID>,
     ) -> Result<ErasedJson, RestError> {
-        Ok(ErasedJson::pretty(rest.ledger.find_block_hash(&tx_id)?))
+        Ok(ErasedJson::new(rest.ledger.find_block_hash(&tx_id)?))
     }
 
     /// GET /<network>/block/{height}/history/{mapping}
@@ -1158,7 +1156,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         State(rest): State<Self>,
         Path(state_root): Path<N::StateRoot>,
     ) -> Result<ErasedJson, RestError> {
-        Ok(ErasedJson::pretty(rest.ledger.find_block_height_from_state_root(state_root)?))
+        Ok(ErasedJson::new(rest.ledger.find_block_height_from_state_root(state_root)?))
     }
 
     /// GET /<network>/find/transactionID/deployment/{programID}
@@ -1166,7 +1164,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         State(rest): State<Self>,
         Path(program_id): Path<ProgramID<N>>,
     ) -> Result<ErasedJson, RestError> {
-        Ok(ErasedJson::pretty(rest.ledger.find_latest_transaction_id_from_program_id(&program_id)?))
+        Ok(ErasedJson::new(rest.ledger.find_latest_transaction_id_from_program_id(&program_id)?))
     }
 
     /// GET /<network>/find/transactionID/deployment/{programID}/{edition}
@@ -1174,9 +1172,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         State(rest): State<Self>,
         Path((program_id, edition)): Path<(ProgramID<N>, u16)>,
     ) -> Result<ErasedJson, RestError> {
-        Ok(ErasedJson::pretty(
-            rest.ledger.find_latest_transaction_id_from_program_id_and_edition(&program_id, edition)?,
-        ))
+        Ok(ErasedJson::new(rest.ledger.find_latest_transaction_id_from_program_id_and_edition(&program_id, edition)?))
     }
 
     /// GET /<network>/find/transactionID/deployment/{programID}/{edition}/original
@@ -1185,9 +1181,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         State(rest): State<Self>,
         Path((program_id, edition)): Path<(ProgramID<N>, u16)>,
     ) -> Result<ErasedJson, RestError> {
-        Ok(ErasedJson::pretty(
-            rest.ledger.find_original_transaction_id_from_program_id_and_edition(&program_id, edition)?,
-        ))
+        Ok(ErasedJson::new(rest.ledger.find_original_transaction_id_from_program_id_and_edition(&program_id, edition)?))
     }
 
     /// GET /<network>/find/transactionID/deployment/{programID}/{edition}/{amendment}
@@ -1196,7 +1190,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         State(rest): State<Self>,
         Path((program_id, edition, amendment)): Path<(ProgramID<N>, u16, u64)>,
     ) -> Result<ErasedJson, RestError> {
-        Ok(ErasedJson::pretty(rest.ledger.find_transaction_id_from_program_id_edition_and_amendment(
+        Ok(ErasedJson::new(rest.ledger.find_transaction_id_from_program_id_edition_and_amendment(
             &program_id,
             edition,
             amendment,
@@ -1208,7 +1202,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         State(rest): State<Self>,
         Path(transition_id): Path<N::TransitionID>,
     ) -> Result<ErasedJson, RestError> {
-        Ok(ErasedJson::pretty(rest.ledger.find_transaction_id_from_transition_id(&transition_id)?))
+        Ok(ErasedJson::new(rest.ledger.find_transaction_id_from_transition_id(&transition_id)?))
     }
 
     /// GET /<network>/find/transitionID/{inputOrOutputID}
@@ -1216,7 +1210,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         State(rest): State<Self>,
         Path(input_or_output_id): Path<Field<N>>,
     ) -> Result<ErasedJson, RestError> {
-        Ok(ErasedJson::pretty(rest.ledger.find_transition_id(&input_or_output_id).map_err(map_missing_resource_error)?))
+        Ok(ErasedJson::new(rest.ledger.find_transition_id(&input_or_output_id).map_err(map_missing_resource_error)?))
     }
 
     /// POST /<network>/transaction/broadcast
@@ -1291,7 +1285,12 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             match tokio::task::spawn_blocking(move || {
                 // Hold the slot until verification finishes, even if the client disconnects.
                 let _verification_slot = verification_slot;
-                ledger.check_transaction_basic(&tx, None, &mut rand::rng()).map(|()| tx)
+                #[cfg(feature = "metrics")]
+                let timer = metrics::TransactionCheckTimer::start("rest", &tx);
+                let result = ledger.check_transaction_basic(&tx, None, &mut rand::rng());
+                #[cfg(feature = "metrics")]
+                timer.finish(&result);
+                result.map(|()| tx)
             })
             .await
             {
@@ -1320,13 +1319,15 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
 
         // Broadcast the transaction.
         rest.routing.propagate(message, &[]);
+        #[cfg(feature = "metrics")]
+        metrics::increment_counter_1(metrics::router::UNCONFIRMED_TRANSACTIONS_PROPAGATED, "site", "rest");
 
         // Determine if the node is synced and if the transaction was checked.
         match !is_within_sync_leniency && check_transaction {
             // If the node is not synced and we validated the transaction, return a 203.
-            true => Ok((StatusCode::NON_AUTHORITATIVE_INFORMATION, ErasedJson::pretty(tx_id))),
+            true => Ok((StatusCode::NON_AUTHORITATIVE_INFORMATION, ErasedJson::new(tx_id))),
             // Otherwise, return a 200.
-            false => Ok((StatusCode::OK, ErasedJson::pretty(tx_id))),
+            false => Ok((StatusCode::OK, ErasedJson::new(tx_id))),
         }
     }
 
@@ -1387,7 +1388,10 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             let res: Result<(), anyhow::Error> = match tokio::task::spawn_blocking(move || {
                 // Hold the slot until verification finishes, even if the client disconnects.
                 let _verification_slot = verification_slot;
-                puzzle.check_solution(&solution, epoch_hash, proof_target)
+                let result = puzzle.check_solution(&solution, epoch_hash, proof_target);
+                #[cfg(feature = "metrics")]
+                metrics::record_solution_check("rest", result.is_ok());
+                result
             })
             .await
             {
@@ -1426,13 +1430,15 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
 
         // Broadcast the unconfirmed solution message.
         rest.routing.propagate(message, &[]);
+        #[cfg(feature = "metrics")]
+        metrics::increment_counter_1(metrics::router::UNCONFIRMED_SOLUTIONS_PROPAGATED, "site", "rest");
 
         // Determine if the node is synced and if the solution was checked.
         match !is_within_sync_leniency && check_solution {
             // If the node is not synced and we validated the solution, return a 203.
-            true => Ok((StatusCode::NON_AUTHORITATIVE_INFORMATION, ErasedJson::pretty(solution_id))),
+            true => Ok((StatusCode::NON_AUTHORITATIVE_INFORMATION, ErasedJson::new(solution_id))),
             // Otherwise, return a 200.
-            false => Ok((StatusCode::OK, ErasedJson::pretty(solution_id))),
+            false => Ok((StatusCode::OK, ErasedJson::new(solution_id))),
         }
     }
 
@@ -1446,7 +1452,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         rest.ledger.backup_database(&backup_path)?;
 
         // Dump the block tree.
-        let ret = ErasedJson::pretty(());
+        let ret = ErasedJson::new(());
         if let Err(e) = rest.ledger.cache_block_tree() {
             warn!("Couldn't cache the block tree for a ledger checkpoint: {e}");
             return Ok(ret);
@@ -1468,7 +1474,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         State(rest): State<Self>,
         Path(prover_address): Path<Address<N>>,
     ) -> Result<ErasedJson, RestError> {
-        Ok(ErasedJson::pretty(json!({
+        Ok(ErasedJson::new(json!({
             "is_limit_reached": rest.ledger.is_solution_limit_reached(&prover_address, 0),
             "num_remaining_solutions": rest.ledger.num_remaining_solutions(&prover_address, 0),
             "latest_epoch_hash": rest.ledger.latest_epoch_hash()?,
@@ -1550,13 +1556,13 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
 
         // Check if metadata is requested and return the outputs with the sampled height if so.
         if metadata.metadata.unwrap_or(false) {
-            return Ok(ErasedJson::pretty(json!({
+            return Ok(ErasedJson::new(json!({
                 "data": output_strings,
                 "height": height,
             })));
         }
 
-        Ok(ErasedJson::pretty(output_strings))
+        Ok(ErasedJson::new(output_strings))
     }
 
     /// Returns the history compatibility upstream, which is present whenever these routes are registered.
@@ -1596,7 +1602,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         // (the upstream keys are `Plaintext::to_string` output; a client may have spelled the same
         // plaintext differently).
         let value = snapshot.get(&mapping_key.to_string());
-        Ok((StatusCode::OK, ErasedJson::pretty(value)))
+        Ok((StatusCode::OK, ErasedJson::new(value)))
     }
 
     /// GET /{network}/program/{id}/mapping/{name}/history/{height}?keys=key1,key2,...
@@ -1627,7 +1633,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             .zip(&mapping_keys)
             .map(|(key, mapping_key)| json!({ "key": key, "value": snapshot.get(&mapping_key.to_string()) }))
             .collect::<Vec<_>>();
-        Ok((StatusCode::OK, ErasedJson::pretty(values)))
+        Ok((StatusCode::OK, ErasedJson::new(values)))
     }
 
     /// POST /{network}/program/{id}/view/{functionName}/{height}
@@ -1678,7 +1684,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         let staker = address.to_string();
         let rewards = rest.history_compat().staking_rewards(height).await?;
         let Some((validator, reward)) = rewards.get(&staker) else {
-            return Ok((StatusCode::OK, ErasedJson::pretty(None::<()>)));
+            return Ok((StatusCode::OK, ErasedJson::new(None::<()>)));
         };
         let bonded = rest.history_compat().mapping(height, SnapshotMapping::Bonded).await?;
         let Some(bonded_value) = bonded.get(&staker) else {
@@ -1692,7 +1698,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             Plaintext::Literal(Literal::U64(microcredits), _) => *microcredits,
             other => return Err(RestError::internal_server_error(anyhow!("Unexpected bonded stake: {other}"))),
         };
-        Ok((StatusCode::OK, ErasedJson::pretty((validator, reward, new_stake))))
+        Ok((StatusCode::OK, ErasedJson::new((validator, reward, new_stake))))
     }
 
     /// GET /{network}/validators/participation
@@ -1726,13 +1732,13 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
 
                 // Check if metadata is requested and return the participation scores with metadata if so.
                 if metadata.metadata.unwrap_or(false) {
-                    return Ok(ErasedJson::pretty(json!({
+                    return Ok(ErasedJson::new(json!({
                         "participation_scores": participation_scores,
                         "height": rest.ledger.latest_height(),
                     })));
                 }
 
-                Ok(ErasedJson::pretty(participation_scores))
+                Ok(ErasedJson::new(participation_scores))
             }
             None => Err(RestError::service_unavailable(anyhow!("Route isn't available for this node type"))),
         }

@@ -22,6 +22,9 @@ use log_writer::*;
 mod dynamic_format;
 use dynamic_format::*;
 
+mod log_fields;
+use log_fields::*;
+
 #[cfg(target_family = "unix")]
 mod fd_check;
 #[cfg(target_family = "unix")]
