@@ -606,6 +606,9 @@ impl<N: Network, C: ConsensusStorage<N>> NodeInterface<N> for Validator<N, C> {
         trace!("Shutting down consensus...");
         self.consensus.shut_down().await;
 
+        #[cfg(feature = "prune-authority-data")]
+        crate::stop_authority_compaction(&self.ledger).await;
+
         info!("Node has shut down.");
     }
 }

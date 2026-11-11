@@ -634,6 +634,9 @@ impl<N: Network, C: ConsensusStorage<N>> NodeInterface<N> for Client<N, C> {
         // Shut down the router.
         self.router.shut_down().await;
 
+        #[cfg(feature = "prune-authority-data")]
+        crate::stop_authority_compaction(&self.ledger).await;
+
         info!("Node has shut down.");
     }
 }

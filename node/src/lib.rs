@@ -116,6 +116,16 @@ fn is_stuck_sync_fatal(stuck_for: Option<Duration>, cdn_fallback: CdnFallback) -
     })
 }
 
+/// Stops the ledger's background authority compaction, off the async workers: it waits for the
+/// running slice.
+#[cfg(feature = "prune-authority-data")]
+pub(crate) async fn stop_authority_compaction<N: Network, C: ConsensusStorage<N>>(ledger: &Ledger<N, C>) {
+    let ledger = ledger.clone();
+    if let Err(error) = tokio::task::spawn_blocking(move || ledger.vm().block_store().stop_background_work()).await {
+        error!("Failed to stop the authority map compaction: {error}");
+    }
+}
+
 /// Shuts the node down, as failed, if no connected peer can serve the blocks it needs (see
 /// `BlockSync::sync_stuck_below_peer_floors` and [`is_stuck_sync_fatal`]), and returns whether it did.
 pub fn shut_down_if_stuck_sync<N: Network>(
