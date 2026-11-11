@@ -680,6 +680,9 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
         // Fetch the current block height and consensus version.
         let current_block_height = self.ledger.latest_block_height();
         let consensus_version = N::CONSENSUS_VERSION(current_block_height)?;
+        // Compute the batch proposal spend limit.
+        let proposal_spend_limit = BatchHeader::<N>::batch_spend_limit(current_block_height)
+            .saturating_mul(self.proposal_spent_limit_multiplier);
 
         // Initialize the map of transmissions.
         let mut transmissions: IndexMap<_, _> = Default::default();
@@ -690,6 +693,8 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
         // provided by one worker (FIFO) is no longer guaranteed with multiple workers.
         debug_assert_eq!(MAX_WORKERS, 1);
 
+        // Note: a drained transmission is held only in `transmissions` or the local variables below,
+        // so an early return (e.g. `?`) in this loop drops every transmission drained so far.
         'outer: for worker in self.workers().iter() {
             let mut num_worker_transmissions = 0usize;
 
@@ -756,12 +761,15 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
                         }
 
                         // Deserialize the transaction. If it is oversized or malformed, skip it.
-                        let Ok(transaction) = spawn_blocking!(deserialize_transaction_strict(transaction)) else {
-                            debug!(
-                                "Proposing - Skipping and discarding transaction '{}' - Unable to deserialize transaction",
-                                fmt_id(transaction_id)
-                            );
-                            continue;
+                        let transaction = match spawn_blocking!(deserialize_transaction_strict(transaction)) {
+                            Ok(transaction) => transaction,
+                            Err(e) => {
+                                debug!(
+                                    "Proposing - Skipping and discarding transaction '{}' - Unable to deserialize transaction - {e}",
+                                    fmt_id(transaction_id)
+                                );
+                                continue;
+                            }
                         };
 
                         // Compute the transaction spent cost (in microcredits).
@@ -797,9 +805,6 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
                         };
 
                         // Check if the next proposal cost exceeds the batch proposal spend limit.
-                        let batch_spend_limit = BatchHeader::<N>::batch_spend_limit(current_block_height);
-                        let proposal_spend_limit =
-                            batch_spend_limit.saturating_mul(self.proposal_spent_limit_multiplier);
                         if next_proposal_cost > proposal_spend_limit {
                             debug!(
                                 "Proposing - Skipping transaction '{}' - Batch spend limit surpassed ({next_proposal_cost} > {proposal_spend_limit})",
@@ -2563,10 +2568,10 @@ mod tests {
             (bad_transaction.id(), Data::Buffer(Bytes::from(bad_bytes))),
             sample_unconfirmed_transaction(&mut rng),
         ];
-        let [first_id, bad_id, last_id] = transactions.map(|(transaction_id, transaction)| {
+        let [first_id, _, last_id] = transactions.map(|(transaction_id, transaction)| {
             // Hashing serialized transaction data does not fail.
             let checksum = transaction.to_checksum::<CurrentNetwork>().unwrap();
-            let transmission_id = TransmissionID::from((&transaction_id, &checksum));
+            let transmission_id = (&transaction_id, &checksum).into();
             primary.workers()[0].process_transmission_from_peer(
                 peer_ip,
                 transmission_id,
@@ -2576,19 +2581,13 @@ mod tests {
         });
         assert_eq!(primary.workers()[0].num_transmissions(), 3);
 
-        // The valid transactions are kept, whether or not the proposal succeeds.
-        let result = primary.propose_batch().await;
-        assert!(primary.workers()[0].contains_transmission(first_id), "The first transaction was dropped");
-        assert!(primary.workers()[0].contains_transmission(last_id), "The last transaction was dropped");
-
-        // Only the malformed transaction is left out of the proposal.
-        assert!(matches!(result, Ok(true)), "{result:?}");
-        assert!(!primary.workers()[0].contains_transmission(bad_id));
+        // Only the malformed transaction is left out of the proposal, and it is not requeued.
+        assert!(primary.propose_batch().await.unwrap());
         assert_eq!(primary.workers()[0].num_transmissions(), 0);
-        let proposed_batch = primary.proposed_batch.read();
-        // The proposal was stored, as checked above.
-        let proposal = proposed_batch.as_proposal().unwrap();
-        assert_eq!(proposal.transmissions().keys().copied().collect::<Vec<_>>(), [first_id, last_id]);
+        assert_eq!(
+            primary.proposed_batch.read().as_proposal().unwrap().transmissions().keys().copied().collect::<Vec<_>>(),
+            [first_id, last_id]
+        );
     }
 
     #[test_log::test(tokio::test)]
