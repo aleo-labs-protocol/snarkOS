@@ -49,7 +49,7 @@ default-features = false
 [workspace.dependencies.snarkvm]
 #path = "../snarkVM"
 git = "https://github.com/aleo-labs-protocol/snarkVM.git"
-rev = "76c6292135083b9036abd68d52e0dbba138cbc98" # eran/authority-prune-rebuild
+rev = "eef789d8a61bc15af9a1860fc175daef475ba0a9" # eran/authority-prune-rebuild
 #version = "=4.12.0"
 default-features = false
 
