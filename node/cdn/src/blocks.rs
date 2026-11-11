@@ -20,8 +20,9 @@
 use snarkos_utilities::{SignalHandler, Stoppable};
 
 use snarkvm::{
-    prelude::{Deserialize, DeserializeOwned, Ledger, Network, Serialize, block::Block, store::ConsensusStorage},
-    utilities::{flatten_error, unchecked_deserialize},
+    console::account::ComputeKeyCache,
+    prelude::{Deserialize, Ledger, Network, Serialize, block::Block, store::ConsensusStorage},
+    utilities::flatten_error,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -394,8 +395,8 @@ async fn download_block_bundles<N: Network>(
 
                 loop {
                     // Fetch the blocks.
-                    match cdn_get(client_clone.clone(), &blocks_url, &ctx).await {
-                        Ok::<Vec<Block<N>>, _>(blocks) => {
+                    match cdn_get_blocks::<N>(client_clone.clone(), &blocks_url, &ctx).await {
+                        Ok(blocks) => {
                             // Keep the collection of pending blocks sorted by the height.
                             let mut pending_blocks = pending_blocks_clone.lock().await;
                             for block in blocks {
@@ -480,8 +481,8 @@ async fn cdn_height<const BLOCKS_PER_FILE: u32>(client: &Client, base_url: &http
     Ok(tip - (tip % BLOCKS_PER_FILE) + BLOCKS_PER_FILE)
 }
 
-/// Retrieves the objects from the CDN with the given URL.
-async fn cdn_get<T: 'static + DeserializeOwned + Send>(client: Client, url: &str, ctx: &str) -> Result<T> {
+/// Retrieves the blocks from the CDN with the given URL.
+async fn cdn_get_blocks<N: Network>(client: Client, url: &str, ctx: &str) -> Result<Vec<Block<N>>> {
     // Fetch the bytes from the given URL.
     let response = match client.get(url).send().await {
         Ok(response) => response,
@@ -493,9 +494,9 @@ async fn cdn_get<T: 'static + DeserializeOwned + Send>(client: Client, url: &str
         Err(error) => bail!("Failed to parse {ctx} - {error}"),
     };
 
-    // Parse the objects.
-    match tokio::task::spawn_blocking(move || (unchecked_deserialize::<T>(&bytes), bytes)).await {
-        Ok((Ok(objects), _)) => Ok(objects),
+    // Parse the blocks.
+    match tokio::task::spawn_blocking(move || (read_blocks::<N>(&bytes), bytes)).await {
+        Ok((Ok(blocks), _)) => Ok(blocks),
         Ok((Err(error), response_bytes)) => {
             let bytes_as_string = String::from_utf8_lossy(&response_bytes);
             bail!("Failed to deserialize {ctx} - {error} - {bytes_as_string}")
@@ -504,6 +505,18 @@ async fn cdn_get<T: 'static + DeserializeOwned + Send>(client: Client, url: &str
             bail!("Failed to join task for {ctx} - {error}")
         }
     }
+}
+
+/// Reads a CDN file of blocks, the bincode encoding of a `Vec<Block<N>>`, without checking them.
+///
+/// The blocks share one compute-key cache.
+fn read_blocks<N: Network>(bytes: &[u8]) -> Result<Vec<Block<N>>> {
+    // bincode encodes each block as its length-prefixed `to_bytes_le` bytes.
+    let mut cache = ComputeKeyCache::default();
+    bincode::deserialize::<Vec<&[u8]>>(bytes)?
+        .into_iter()
+        .map(|block_bytes| Ok(Block::read_le_with_cache(block_bytes, true, &mut cache)?))
+        .collect()
 }
 
 /// Converts a duration into a string that humans can read easily.
@@ -579,11 +592,23 @@ fn log_progress<const OBJECTS_PER_FILE: u32>(
 
 #[cfg(test)]
 mod tests {
-    use super::{BLOCKS_PER_FILE, CDN_BASE_URL, cdn_client, cdn_get, cdn_height, load_blocks, log_progress};
+    use super::{
+        BLOCKS_PER_FILE,
+        CDN_BASE_URL,
+        cdn_client,
+        cdn_get_blocks,
+        cdn_height,
+        load_blocks,
+        log_progress,
+        read_blocks,
+    };
 
     use snarkos_utilities::SimpleStoppable;
 
-    use snarkvm::prelude::{MainnetV0, block::Block};
+    use snarkvm::{
+        prelude::{FromBytes, MainnetV0, Network, block::Block},
+        utilities::unchecked_deserialize,
+    };
 
     use http::Uri;
     use parking_lot::RwLock;
@@ -617,22 +642,26 @@ mod tests {
         (url, handle)
     }
 
-    /// Returns a bincode payload that compresses well.
-    fn sample_payload() -> (Vec<u64>, Vec<u8>) {
-        let values: Vec<u64> = (0..10_000).map(|i| i % 7).collect();
-        let bytes = bincode::serialize(&values).unwrap();
-        (values, bytes)
+    fn sample_genesis() -> Block<CurrentNetwork> {
+        Block::from_bytes_le(CurrentNetwork::genesis_bytes()).unwrap()
+    }
+
+    /// Returns a CDN file that compresses well: the genesis block, repeated.
+    fn sample_payload() -> (Vec<Block<CurrentNetwork>>, Vec<u8>) {
+        let blocks = vec![sample_genesis(); 3];
+        let bytes = bincode::serialize(&blocks).unwrap();
+        (blocks, bytes)
     }
 
     #[tokio::test]
-    async fn test_cdn_get_decodes_zstd() {
+    async fn test_cdn_get_blocks_decodes_zstd() {
         let (expected, bytes) = sample_payload();
         let compressed = zstd::encode_all(bytes.as_slice(), 1).unwrap();
         assert!(compressed.len() < bytes.len());
         let (url, request) = serve_once("Content-Encoding: zstd\r\n", compressed).await;
 
-        let values: Vec<u64> = cdn_get(cdn_client().unwrap(), &url, "test blocks").await.unwrap();
-        assert_eq!(values, expected);
+        let blocks = cdn_get_blocks::<CurrentNetwork>(cdn_client().unwrap(), &url, "test blocks").await.unwrap();
+        assert_eq!(blocks, expected);
 
         let request = request.await.unwrap();
         let accept_encoding = request.lines().find_map(|line| line.strip_prefix("accept-encoding:"));
@@ -640,12 +669,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cdn_get_reads_identity() {
+    async fn test_cdn_get_blocks_reads_identity() {
         let (expected, bytes) = sample_payload();
         let (url, request) = serve_once("", bytes).await;
 
-        let values: Vec<u64> = cdn_get(cdn_client().unwrap(), &url, "test blocks").await.unwrap();
-        assert_eq!(values, expected);
+        let blocks = cdn_get_blocks::<CurrentNetwork>(cdn_client().unwrap(), &url, "test blocks").await.unwrap();
+        assert_eq!(blocks, expected);
         request.await.unwrap();
     }
 
@@ -672,6 +701,55 @@ mod tests {
                 assert_eq!(block.height(), start + i as u32);
             }
         });
+    }
+
+    #[test]
+    fn test_read_blocks_matches_unchecked_deserialize() {
+        let genesis = sample_genesis();
+        for num_blocks in [0, 1, 3] {
+            let bytes = bincode::serialize(&vec![genesis.clone(); num_blocks]).unwrap();
+            let expected: Vec<Block<CurrentNetwork>> = unchecked_deserialize(&bytes).unwrap();
+            assert_eq!(read_blocks::<CurrentNetwork>(&bytes).unwrap(), expected);
+            // Truncated files fail on both paths.
+            for len in [0, 7, 8, bytes.len() / 2, bytes.len() - 1].into_iter().filter(|&len| len < bytes.len()) {
+                let truncated = &bytes[..len];
+                assert!(unchecked_deserialize::<Vec<Block<CurrentNetwork>>>(truncated).is_err());
+                assert!(read_blocks::<CurrentNetwork>(truncated).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn test_read_blocks_matches_unchecked_deserialize_on_malformed_files() {
+        let bytes = bincode::serialize(&vec![sample_genesis(); 2]).unwrap();
+        let with_count = |count: u64| [&count.to_le_bytes()[..], &bytes[8..]].concat();
+        // The first block starts after the vector length and its own length.
+        let first_block_at = 16;
+        let with_flipped_byte = |at: usize| {
+            let mut file = bytes.clone();
+            file[at] ^= 1;
+            file
+        };
+
+        // Each file, and whether both paths accept it.
+        let files = [
+            ([&bytes[..], &[0u8; 3]].concat(), true),
+            (with_count(1), true),
+            (with_count(3), false),
+            ([&1u64.to_le_bytes()[..], &0u64.to_le_bytes()].concat(), false),
+            (with_flipped_byte(first_block_at), false),
+            // An unchecked read trusts the stored block hash.
+            (with_flipped_byte(first_block_at + 1), true),
+        ];
+        for (i, (file, accepted)) in files.into_iter().enumerate() {
+            let expected = unchecked_deserialize::<Vec<Block<CurrentNetwork>>>(&file);
+            let actual = read_blocks::<CurrentNetwork>(&file);
+            assert_eq!(expected.is_ok(), accepted, "file {i}");
+            assert_eq!(actual.is_ok(), accepted, "file {i}");
+            if let (Ok(expected), Ok(actual)) = (expected, actual) {
+                assert_eq!(expected, actual, "file {i}");
+            }
+        }
     }
 
     #[test]
