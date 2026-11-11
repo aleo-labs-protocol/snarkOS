@@ -68,8 +68,8 @@ pub struct Execute {
     /// The endpoint to query node state from and broadcast to (if set to broadcast).
     ///
     /// The given value is expected to be the base URL, e.g., "https://mynode.com", and will be extended automatically
-    /// to fit the network type and query.
-    /// For example, the base URL may extend to "http://mynode.com/testnet/transaction/unconfirmed/ID" to retrieve
+    /// to fit the API version, network type and query. A base URL that does not end in "/v1" or "/v2" gets "/v2".
+    /// For example, the base URL may extend to "https://mynode.com/v2/testnet/transaction/unconfirmed/ID" to retrieve
     /// an unconfirmed transaction on the test network.
     ///
     /// The given value may also be a JSON serialized `StaticQuery` struct.
@@ -83,7 +83,7 @@ pub struct Execute {
     record: Option<String>,
     /// Set the URL used to broadcast the transaction (if no value is given, the query endpoint is used).
     ///
-    /// The given value is expected the full URL of the endpoint, not just the base URL, e.g., "http://mynode.com/testnet/transaction/broadcast".
+    /// The given value is expected the full URL of the endpoint, not just the base URL, e.g., "https://mynode.com/v2/testnet/transaction/broadcast".
     #[clap(short, long, group = "mode", verbatim_doc_comment)]
     broadcast: Option<Option<Uri>>,
     /// Performs a dry-run of transaction generation.
