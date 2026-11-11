@@ -1679,30 +1679,33 @@ impl<N: Network> Primary<N> {
     }
 
     /// Checks if the proposed batch is expired, and clears the proposed batch if it has expired.
-    ///
-    /// The proposal is inspected and cleared under a single write lock, so that the proposal which
-    /// is discarded is exactly the one that was found to be expired.
     fn check_proposed_batch_for_expiration(&self) -> Result<()> {
-        // Read the current round before taking the lock below, so that no other lock is acquired
-        // while it is held. The round only ever increases, so reading it early is conservative: at
-        // worst a proposal that just expired is left for the next call to clear.
+        // Read the current round before taking the lock in `clear_proposed_batch_if`, so that no
+        // other lock is acquired while it is held. The round only ever increases, so reading it early
+        // is conservative: at worst a proposal that just expired is left for the next call to clear.
         let current_round = self.current_round();
 
-        // Take the proposed batch only if it has expired; taking it leaves the state cleared.
         // A batch being certified is not considered expired.
-        let expired = {
+        self.clear_proposed_batch_if(
+            |state| matches!(state, ProposedBatchState::Certifying(proposal) if proposal.round() < current_round),
+        )
+    }
+
+    /// Clears the proposed batch if `should_clear` holds for it, and returns the transmissions of a
+    /// cleared `Certifying` proposal to the workers.
+    ///
+    /// The state is inspected and cleared under a single write lock, so that the state which is
+    /// cleared is exactly the one that `should_clear` accepted.
+    fn clear_proposed_batch_if(&self, should_clear: impl FnOnce(&ProposedBatchState<N>) -> bool) -> Result<()> {
+        let cleared = {
             let mut proposed_batch = self.proposed_batch.write();
-            let is_expired = matches!(
-                &*proposed_batch,
-                ProposedBatchState::Certifying(proposal) if proposal.round() < current_round
-            );
-            is_expired.then(|| std::mem::take(&mut *proposed_batch))
+            should_clear(&proposed_batch).then(|| std::mem::take(&mut *proposed_batch))
         };
 
         // Reinsert the transmissions once the lock above has been released, since this acquires the
         // workers' locks in turn.
-        if let Some(ProposedBatchState::Certifying(proposal)) = expired {
-            debug!("Cleared expired proposal for round {}", proposal.round());
+        if let Some(ProposedBatchState::Certifying(proposal)) = cleared {
+            debug!("Cleared proposal for round {}", proposal.round());
             self.reinsert_transmissions_into_workers(proposal.into_transmissions())?;
         }
         Ok(())
@@ -1717,13 +1720,8 @@ impl<N: Network> Primary<N> {
             while fast_forward_round < next_round.saturating_sub(1) {
                 // Update to the next round in storage.
                 fast_forward_round = self.storage.increment_to_next_round(fast_forward_round)?;
-                // Clear the proposed batch, and return a pending proposal's transmissions to the workers.
-                // The lock is released before reinserting, since this acquires the workers' locks in turn.
-                let cleared = std::mem::take(&mut *self.proposed_batch.write());
-                if let ProposedBatchState::Certifying(proposal) = cleared {
-                    debug!("Cleared proposal for round {} while fast-forwarding", proposal.round());
-                    self.reinsert_transmissions_into_workers(proposal.into_transmissions())?;
-                }
+                // Clear the proposed batch.
+                self.clear_proposed_batch_if(|_| true)?;
             }
         }
 
