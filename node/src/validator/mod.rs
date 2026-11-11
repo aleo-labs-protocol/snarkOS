@@ -606,6 +606,13 @@ impl<N: Network, C: ConsensusStorage<N>> NodeInterface<N> for Validator<N, C> {
         trace!("Shutting down consensus...");
         self.consensus.shut_down().await;
 
+        // Stop the background authority compaction, so the next start resumes it.
+        #[cfg(feature = "prune-authority-data")]
+        {
+            trace!("Stopping the authority map compaction...");
+            self.ledger.vm().block_store().stop_background_work();
+        }
+
         info!("Node has shut down.");
     }
 }
