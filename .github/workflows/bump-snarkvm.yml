@@ -52,7 +52,10 @@ jobs:
           LATEST: ${{ steps.revs.outputs.latest }}
         run: |
           sed -i "/^\[workspace\.dependencies\.snarkvm\]/,/^\[/ s|^rev = .*|rev = \"$LATEST\" #$SNARKVM_BRANCH|" Cargo.toml
-          cargo update -p snarkvm
+          # `-w` relocks the snarkvm crates to the new rev and keeps every other
+          # locked edge. `-p snarkvm` also unlocks their dependencies, and cargo
+          # then moves shared edges, such as socket2, to another locked version.
+          cargo update -w
 
       # A push made with github.token starts no workflows, so CI would never run
       # on the pull request. Actions also cannot create pull requests in this
