@@ -17,6 +17,8 @@ use snarkos_node_network::{NodeType, PeerPoolHandling};
 use snarkos_node_router::Routing;
 use snarkos_utilities::SignalHandler;
 use snarkvm::prelude::{Address, Network, PrivateKey, ViewKey};
+#[cfg(feature = "prune-authority-data")]
+use snarkvm::prelude::{Ledger, store::ConsensusStorage};
 
 use std::time::Duration;
 use tokio::time::sleep;
@@ -81,4 +83,14 @@ pub trait NodeInterface<N: Network>: Routing<N> {
 
     /// Shuts down the node.
     async fn shut_down(&self);
+}
+
+/// Stops the ledger's background authority compaction, off the async workers: it waits for the
+/// running slice.
+#[cfg(feature = "prune-authority-data")]
+pub async fn stop_authority_compaction<N: Network, C: ConsensusStorage<N>>(ledger: &Ledger<N, C>) {
+    let ledger = ledger.clone();
+    if let Err(error) = tokio::task::spawn_blocking(move || ledger.vm().block_store().stop_background_work()).await {
+        error!("Failed to stop the authority map compaction: {error}");
+    }
 }

@@ -634,20 +634,8 @@ impl<N: Network, C: ConsensusStorage<N>> NodeInterface<N> for Client<N, C> {
         // Shut down the router.
         self.router.shut_down().await;
 
-        // Stop the background authority compaction; the next start redoes it.
         #[cfg(feature = "prune-authority-data")]
-        {
-            trace!("Stopping the authority map compaction...");
-            let ledger = self.ledger.clone();
-            let start = std::time::Instant::now();
-            // The stop waits for the running slice, so keep it off the async workers.
-            if let Err(error) =
-                tokio::task::spawn_blocking(move || ledger.vm().block_store().stop_background_work()).await
-            {
-                error!("Failed to stop the authority map compaction: {error}");
-            }
-            debug!("Stopped the authority map compaction in {:.1} s", start.elapsed().as_secs_f64());
-        }
+        crate::stop_authority_compaction(&self.ledger).await;
 
         info!("Node has shut down.");
     }
