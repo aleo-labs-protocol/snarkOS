@@ -45,12 +45,19 @@ pub struct MockLedgerService<N: Network> {
     /// The transmission IDs the ledger knows without being able to produce a transmission for them,
     /// as is the case for the ones it recorded as aborted.
     known_transmission_ids: HashSet<TransmissionID<N>>,
+    /// The transmission IDs for which the containment check returns an error, as a failed ledger read would.
+    unreadable_transmission_ids: HashSet<TransmissionID<N>>,
 }
 
 impl<N: Network> MockLedgerService<N> {
     /// Initializes a new mock ledger service.
     pub fn new(committee: Committee<N>) -> Self {
-        Self { committee, height_to_round_and_hash: Default::default(), known_transmission_ids: Default::default() }
+        Self {
+            committee,
+            height_to_round_and_hash: Default::default(),
+            known_transmission_ids: Default::default(),
+            unreadable_transmission_ids: Default::default(),
+        }
     }
 
     /// Initializes a new mock ledger service at the specified height.
@@ -63,6 +70,7 @@ impl<N: Network> MockLedgerService<N> {
             committee,
             height_to_round_and_hash: Mutex::new(height_to_hash),
             known_transmission_ids: Default::default(),
+            unreadable_transmission_ids: Default::default(),
         }
     }
 
@@ -74,7 +82,21 @@ impl<N: Network> MockLedgerService<N> {
         committee: Committee<N>,
         known_transmission_ids: HashSet<TransmissionID<N>>,
     ) -> Self {
-        Self { committee, height_to_round_and_hash: Default::default(), known_transmission_ids }
+        Self {
+            committee,
+            height_to_round_and_hash: Default::default(),
+            known_transmission_ids,
+            unreadable_transmission_ids: Default::default(),
+        }
+    }
+
+    /// Makes the containment check fail for the given transmission IDs.
+    pub fn with_unreadable_transmission_ids(
+        mut self,
+        unreadable_transmission_ids: impl IntoIterator<Item = TransmissionID<N>>,
+    ) -> Self {
+        self.unreadable_transmission_ids.extend(unreadable_transmission_ids);
+        self
     }
 }
 
@@ -197,8 +219,11 @@ impl<N: Network> LedgerService<N> for MockLedgerService<N> {
         Ok(false)
     }
 
-    /// Returns `false`, unless the mock was configured to know the transmission ID.
+    /// Returns `false`, unless the mock was configured to know the transmission ID or to fail on it.
     fn contains_transmission(&self, transmission_id: &TransmissionID<N>) -> Result<bool> {
+        if self.unreadable_transmission_ids.contains(transmission_id) {
+            bail!("[MockLedgerService] Unable to read transmission ID {}", fmt_id(transmission_id));
+        }
         let contains = self.known_transmission_ids.contains(transmission_id);
         trace!(
             "[MockLedgerService] Contains transmission ID {}.{} - {contains}",
