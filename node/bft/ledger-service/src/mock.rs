@@ -66,12 +66,7 @@ impl<N: Network> MockLedgerService<N> {
         for i in 0..=height {
             height_to_hash.insert(i, (i as u64 * 2, Field::<N>::from_u32(i).into()));
         }
-        Self {
-            committee,
-            height_to_round_and_hash: Mutex::new(height_to_hash),
-            known_transmission_ids: Default::default(),
-            unreadable_transmission_ids: Default::default(),
-        }
+        Self { height_to_round_and_hash: Mutex::new(height_to_hash), ..Self::new(committee) }
     }
 
     /// Initializes a new mock ledger service that knows the given transmission IDs.
@@ -82,12 +77,7 @@ impl<N: Network> MockLedgerService<N> {
         committee: Committee<N>,
         known_transmission_ids: HashSet<TransmissionID<N>>,
     ) -> Self {
-        Self {
-            committee,
-            height_to_round_and_hash: Default::default(),
-            known_transmission_ids,
-            unreadable_transmission_ids: Default::default(),
-        }
+        Self { known_transmission_ids, ..Self::new(committee) }
     }
 
     /// Makes the containment check fail for the given transmission IDs.
