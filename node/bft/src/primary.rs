@@ -725,8 +725,9 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
                             "Proposing - Stopping at transmission '{}' - Unable to check the ledger - {e}",
                             fmt_id(id)
                         );
-                        // Reinsert the transmission into the worker.
-                        worker.insert_front(id, transmission);
+                        // Requeue the transmission at the back of the worker and stop draining,
+                        // as continuing would cycle through the queue forever if every ledger read fails.
+                        worker.reinsert(id, transmission);
                         break 'outer;
                     }
                 }
@@ -2633,13 +2634,13 @@ mod tests {
         }
         assert_eq!(primary.workers()[0].num_transmissions(), 3);
 
-        // The proposal stops at the transmission the ledger cannot check, which stays at the front of the queue.
+        // The proposal stops at the transmission the ledger cannot check, which moves to the back of the queue.
         assert!(primary.propose_batch().await.unwrap());
         assert_eq!(
             primary.proposed_batch.read().as_proposal().unwrap().transmissions().keys().copied().collect::<Vec<_>>(),
             [first_id]
         );
-        assert_eq!(primary.workers()[0].transmissions().into_keys().collect::<Vec<_>>(), [unreadable_id, last_id]);
+        assert_eq!(primary.workers()[0].transmissions().into_keys().collect::<Vec<_>>(), [last_id, unreadable_id]);
     }
 
     #[test_log::test(tokio::test)]
