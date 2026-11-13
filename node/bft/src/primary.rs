@@ -714,9 +714,22 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
                 }
 
                 // Check if the ledger already contains the transmission.
-                if self.ledger.contains_transmission(&id).unwrap_or(true) {
-                    trace!("Proposing - Skipping transmission '{}' - Already in ledger", fmt_id(id));
-                    continue;
+                match self.ledger.contains_transmission(&id) {
+                    Ok(true) => {
+                        trace!("Proposing - Skipping transmission '{}' - Already in ledger", fmt_id(id));
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        warn!(
+                            "Proposing - Stopping at transmission '{}' - Unable to check the ledger - {e}",
+                            fmt_id(id)
+                        );
+                        // Requeue the transmission at the back of the worker and stop draining,
+                        // as continuing would cycle through the queue forever if every ledger read fails.
+                        worker.reinsert(id, transmission);
+                        break 'outer;
+                    }
                 }
 
                 // Check if storage already knows the transmission, either way.
@@ -2266,7 +2279,15 @@ mod tests {
         committee: Committee<CurrentNetwork>,
         height: u32,
     ) -> Primary<CurrentNetwork> {
-        let ledger = Arc::new(MockLedgerService::new_at_height(committee, height));
+        primary_with_ledger(account_index, accounts, MockLedgerService::new_at_height(committee, height))
+    }
+
+    fn primary_with_ledger(
+        account_index: usize,
+        accounts: &[(SocketAddr, Account<CurrentNetwork>)],
+        ledger: MockLedgerService<CurrentNetwork>,
+    ) -> Primary<CurrentNetwork> {
+        let ledger = Arc::new(ledger);
         let storage = Storage::new(ledger.clone(), Arc::new(BFTMemoryService::new()), 10).unwrap();
 
         // Initialize the primary.
@@ -2588,6 +2609,38 @@ mod tests {
             primary.proposed_batch.read().as_proposal().unwrap().transmissions().keys().copied().collect::<Vec<_>>(),
             [first_id, last_id]
         );
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_propose_batch_requeues_a_transmission_the_ledger_cannot_check() {
+        let mut rng = TestRng::default();
+        let (accounts, committee) = sample_committee(&mut rng);
+        let peer_ip = accounts[1].0;
+
+        // Sample three transactions, and make the ledger fail to check the second one.
+        let transmissions = [(); 3].map(|_| {
+            let (transaction_id, transaction) = sample_unconfirmed_transaction(&mut rng);
+            // Hashing serialized transaction data does not fail.
+            let checksum = transaction.to_checksum::<CurrentNetwork>().unwrap();
+            (TransmissionID::from((&transaction_id, &checksum)), Transmission::Transaction(transaction))
+        });
+        let [first_id, unreadable_id, last_id] = transmissions.each_ref().map(|(transmission_id, _)| *transmission_id);
+        let height = CurrentNetwork::CONSENSUS_HEIGHT(ConsensusVersion::V1).unwrap();
+        let ledger =
+            MockLedgerService::new_at_height(committee, height).with_unreadable_transmission_ids([unreadable_id]);
+        let primary = primary_with_ledger(0, &accounts, ledger);
+        for (transmission_id, transmission) in transmissions {
+            primary.workers()[0].process_transmission_from_peer(peer_ip, transmission_id, transmission);
+        }
+        assert_eq!(primary.workers()[0].num_transmissions(), 3);
+
+        // The proposal stops at the transmission the ledger cannot check, which moves to the back of the queue.
+        assert!(primary.propose_batch().await.unwrap());
+        assert_eq!(
+            primary.proposed_batch.read().as_proposal().unwrap().transmissions().keys().copied().collect::<Vec<_>>(),
+            [first_id]
+        );
+        assert_eq!(primary.workers()[0].transmissions().into_keys().collect::<Vec<_>>(), [last_id, unreadable_id]);
     }
 
     #[test_log::test(tokio::test)]
