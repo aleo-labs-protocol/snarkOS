@@ -6,7 +6,7 @@
 # 1. Download latest snarkOS release source from GitHub.
 # 2. Build it via `cargo install --locked --path . --features test_network`
 #    into a separate prefix (SNARKOS_RELEASE_DIR).
-# 3. Probe latest_consensus_version for latest release and PR binaries by spawning temporary devnets and waiting for consensus to stabilize.
+# 3. Query latest_consensus_version for latest release and PR binaries from the REST API of a single node of each.
 # 4. Compute CONSENSUS_VERSION_HEIGHTS for latest release and PR.
 # 5. Start the devnet with latest release binaries and pass CONSENSUS_VERSION_HEIGHTS to nodes.
 # 6. Restart nodes one-by-one with the PR binary.
@@ -148,8 +148,6 @@ function stop_node() {
   fi
 }
 
-# probe_stable_consensus_version is now in utils.sh
-
 # Build heights string: for L, we want exactly L entries: 0,5,10,...,5*(L-1)
 function build_consensus_heights() {
   local lcv="$1"
@@ -222,31 +220,23 @@ function ci_cargo_install_snarkos() {
     cargo install --locked --path . --features test_network "$@"
 }
 
-# Probe release + PR binaries to get stable consensus versions, then compute heights.
+# Query the latest consensus versions of the release + PR binaries, then compute heights.
 function derive_consensus_env_from_version() {
   local lcv_release=""
   local lcv_current=""
-  local probe_result=""
+  local schedule=""
 
-  # 1) Probe current binary first (so we know the target consensus version)
-  log "Probing stable consensus version from current binary..."
-  probe_result=$(probe_stable_consensus_version "$SNARKOS_CURRENT_BIN")
-  lcv_current=$(echo "$probe_result" | awk '{print $1}')
-  if ! is_integer "$lcv_current"; then
+  if ! schedule=$(query_default_consensus_version "$SNARKOS_CURRENT_BIN" current); then
     log "ERROR: Could not determine consensus version from current binary"
     exit 1
   fi
-  log "Current binary stable consensus version: $lcv_current"
+  read -r lcv_current _ <<< "$schedule"
 
-  # 2) Probe release binary
-  log "Probing stable consensus version from release binary..."
-  probe_result=$(probe_stable_consensus_version "$SNARKOS_RELEASE_BIN")
-  lcv_release=$(echo "$probe_result" | awk '{print $1}')
-  if ! is_integer "$lcv_release"; then
+  if ! schedule=$(query_default_consensus_version "$SNARKOS_RELEASE_BIN" release); then
     log "ERROR: Could not determine consensus version from release binary"
     exit 1
   fi
-  log "Release binary stable consensus version: $lcv_release"
+  read -r lcv_release _ <<< "$schedule"
 
   log "Computed latest_consensus_version (release) = $lcv_release"
   log "Computed latest_consensus_version (current) = $lcv_current"
@@ -329,7 +319,7 @@ log "EXPECTED_MAX_CONSENSUS_VERSION=${EXPECTED_MAX_CONSENSUS_VERSION:-<none>} WA
 # 1. Build release snarkos once (without heights override yet).
 download_and_build_latest_snarkos 0
 
-# 2–4. Probe versions, compute heights, rebuild release & PR with those heights.
+# 2–4. Query versions, compute heights.
 derive_consensus_env_from_version
 
 # From here on, we use:
