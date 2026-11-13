@@ -92,7 +92,7 @@ impl<N: Network> ProposalCache<N> {
     /// Store the proposal cache to the file system.
     pub fn store(&self, node_data_dir: &NodeDataDir) -> Result<()> {
         let path = node_data_dir.current_proposal_cache_path();
-        info!("Storing the proposal cache to {}...", path.display());
+        debug!("Storing the proposal cache to {}...", path.display());
 
         // Serialize the proposal cache.
         let bytes = self.to_bytes_le()?;
