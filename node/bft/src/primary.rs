@@ -65,7 +65,7 @@ use snarkvm::{
         narwhal::{BatchCertificate, BatchHeader, Data, Transmission, TransmissionID},
         puzzle::{Solution, SolutionID},
     },
-    prelude::{Signature, committee::Committee},
+    prelude::Signature,
     utilities::flatten_error,
 };
 
@@ -1296,11 +1296,11 @@ impl<N: Network> Primary<N> {
 
         info!("Quorum threshold reached - Preparing to certify our batch for round {}...", proposal.round());
 
-        // Retrieve the committee lookback for the round.
-        let committee_lookback = self.ledger.get_committee_lookback_for_round(proposal.round())?;
         // Store the certified batch and broadcast it to all validators.
-        // If there was an error storing the certificate, reinsert the transmissions back into the ready queue.
-        if let Err(e) = self.store_and_broadcast_certificate(&proposal, &committee_lookback).await {
+        if let Err(e) = self.store_and_broadcast_certificate(&proposal).await {
+            // Leave the `Certified` state if it is still set, as `propose_batch` does not run while it is.
+            let batch_id = proposal.batch_id();
+            self.take_proposed_batch_if(|state| matches!(state, ProposedBatchState::Certified(id) if *id == batch_id));
             // Reinsert the transmissions back into the ready queue for the next proposal.
             self.reinsert_transmissions_into_workers(proposal.into_transmissions())?;
             return Err(e);
@@ -1690,33 +1690,35 @@ impl<N: Network> Primary<N> {
     }
 
     /// Checks if the proposed batch is expired, and clears the proposed batch if it has expired.
-    ///
-    /// The proposal is inspected and cleared under a single write lock, so that the proposal which
-    /// is discarded is exactly the one that was found to be expired.
     fn check_proposed_batch_for_expiration(&self) -> Result<()> {
-        // Read the current round before taking the lock below, so that no other lock is acquired
-        // while it is held. The round only ever increases, so reading it early is conservative: at
-        // worst a proposal that just expired is left for the next call to clear.
+        // Read the current round before taking the lock in `take_proposed_batch_if`, so that no
+        // other lock is acquired while it is held. The round only ever increases, so reading it early
+        // is conservative: at worst a proposal that just expired is left for the next call to clear.
         let current_round = self.current_round();
 
-        // Take the proposed batch only if it has expired; taking it leaves the state cleared.
         // A batch being certified is not considered expired.
-        let expired = {
-            let mut proposed_batch = self.proposed_batch.write();
-            let is_expired = matches!(
-                &*proposed_batch,
-                ProposedBatchState::Certifying(proposal) if proposal.round() < current_round
-            );
-            is_expired.then(|| std::mem::take(&mut *proposed_batch))
-        };
+        let expired = self.take_proposed_batch_if(
+            |state| matches!(state, ProposedBatchState::Certifying(proposal) if proposal.round() < current_round),
+        );
 
-        // Reinsert the transmissions once the lock above has been released, since this acquires the
-        // workers' locks in turn.
+        // The lock is released at this point, which matters since reinserting acquires the workers' locks.
         if let Some(ProposedBatchState::Certifying(proposal)) = expired {
             debug!("Cleared expired proposal for round {}", proposal.round());
             self.reinsert_transmissions_into_workers(proposal.into_transmissions())?;
         }
         Ok(())
+    }
+
+    /// Takes the proposed batch if `should_take` holds for it, leaving the state cleared.
+    ///
+    /// The state is inspected and taken under a single write lock, so that the state which is
+    /// taken is exactly the one that `should_take` accepted.
+    fn take_proposed_batch_if(
+        &self,
+        should_take: impl FnOnce(&ProposedBatchState<N>) -> bool,
+    ) -> Option<ProposedBatchState<N>> {
+        let mut proposed_batch = self.proposed_batch.write();
+        should_take(&proposed_batch).then(|| std::mem::take(&mut *proposed_batch))
     }
 
     /// Increments to the next round.
@@ -1728,8 +1730,13 @@ impl<N: Network> Primary<N> {
             while fast_forward_round < next_round.saturating_sub(1) {
                 // Update to the next round in storage.
                 fast_forward_round = self.storage.increment_to_next_round(fast_forward_round)?;
-                // Clear the proposed batch.
-                *self.proposed_batch.write() = ProposedBatchState::None;
+            }
+            // Clear a proposal for a round that has now passed.
+            if let Err(err) = self
+                .check_proposed_batch_for_expiration()
+                .with_context(|| "Failed to clear the expired proposal while fast-forwarding")
+            {
+                warn!("{}", flatten_error(&err));
             }
         }
 
@@ -1831,9 +1838,12 @@ impl<N: Network> Primary<N> {
     }
 
     /// Stores the certified batch and broadcasts it to all validators, returning the certificate.
-    async fn store_and_broadcast_certificate(&self, proposal: &Proposal<N>, committee: &Committee<N>) -> Result<()> {
+    async fn store_and_broadcast_certificate(&self, proposal: &Proposal<N>) -> Result<()> {
+        // Retrieve the committee lookback for the round.
+        let committee_lookback = self.ledger.get_committee_lookback_for_round(proposal.round())?;
         // Create the batch certificate and transmissions.
-        let (certificate, transmissions) = tokio::task::block_in_place(|| proposal.to_certificate(committee))?;
+        let (certificate, transmissions) =
+            tokio::task::block_in_place(|| proposal.to_certificate(&committee_lookback))?;
 
         // Convert the transmissions into a HashMap.
         // Note: Do not change the `Proposal` to use a HashMap. The ordering there is necessary for safety.
@@ -1851,8 +1861,9 @@ impl<N: Network> Primary<N> {
         .await??;
         debug!("Stored a batch certificate for round {}", certificate.round());
         // The batch is now in storage, so late-arriving signatures can find it via contains_batch.
-        // Transition from Certified back to None.
-        *self.proposed_batch.write() = ProposedBatchState::None;
+        // Transition from Certified back to None, unless the state already holds a newer proposal.
+        let batch_id = proposal.batch_id();
+        self.take_proposed_batch_if(|state| matches!(state, ProposedBatchState::Certified(id) if *id == batch_id));
 
         // Broadcast the certified batch to all validators.
         self.gateway.broadcast(Event::BatchCertified(certificate.clone().into()));
@@ -2964,6 +2975,92 @@ mod tests {
         }
     }
 
+    /// Fast-forwarding several rounds clears a pending proposal and returns its transmissions to the workers.
+    #[test_log::test(tokio::test)]
+    async fn test_fast_forward_reinserts_proposed_batch() {
+        let mut rng = TestRng::default();
+        let (primary, accounts) = primary_without_handlers(&mut rng);
+
+        // Propose a batch for the current round.
+        let round = 3;
+        let previous_certificates = store_certificate_chain(&primary, &accounts, round, &mut rng);
+        let proposal = create_test_proposal(
+            &accounts[0].1,
+            primary.ledger.current_committee().unwrap(),
+            round,
+            previous_certificates,
+            now(),
+            1,
+            &mut rng,
+        );
+        let transmission_ids: Vec<_> = proposal.transmissions().keys().copied().collect();
+        assert!(!transmission_ids.is_empty());
+        *primary.proposed_batch.write() = ProposedBatchState::Certifying(Box::new(proposal));
+
+        // Fast-forward past the proposal's round.
+        let next_round = round + 3;
+        primary.try_increment_to_the_next_round(next_round).await.unwrap();
+        assert_eq!(primary.current_round(), next_round);
+
+        // The proposal is cleared and its transmissions are back in the ready queue.
+        assert!(primary.proposed_batch.read().is_none());
+        let ready = primary.workers()[0].transmission_ids();
+        for transmission_id in transmission_ids {
+            assert!(ready.contains(&transmission_id));
+        }
+    }
+
+    /// Fast-forwarding keeps a proposal for a round that has not been reached yet, such as one
+    /// restored from the proposal cache. Peers that signed it reject a different batch for that round.
+    #[test_log::test(tokio::test)]
+    async fn test_fast_forward_keeps_proposal_for_later_round() {
+        let mut rng = TestRng::default();
+        let (primary, accounts) = primary_without_handlers(&mut rng);
+
+        // Propose a batch for a round ahead of storage.
+        let round = 3;
+        let previous_certificates = store_certificate_chain(&primary, &accounts, round, &mut rng);
+        let proposal = create_test_proposal(
+            primary.gateway.account(),
+            primary.ledger.current_committee().unwrap(),
+            round + 3,
+            previous_certificates,
+            now(),
+            1,
+            &mut rng,
+        );
+        let batch_id = proposal.batch_id();
+        *primary.proposed_batch.write() = ProposedBatchState::Certifying(Box::new(proposal));
+
+        // Fast-forward to a round below the proposal's round.
+        let next_round = round + 2;
+        primary.try_increment_to_the_next_round(next_round).await.unwrap();
+        assert_eq!(primary.current_round(), next_round);
+
+        // The proposal is left in place.
+        assert_eq!(primary.proposed_batch.read().as_proposal().unwrap().batch_id(), batch_id);
+    }
+
+    /// Fast-forwarding leaves a batch that is being certified alone, so that the certification
+    /// task resets the state only for its own batch.
+    #[test_log::test(tokio::test)]
+    async fn test_fast_forward_keeps_certified_batch() {
+        let mut rng = TestRng::default();
+        let (primary, accounts) = primary_without_handlers(&mut rng);
+
+        let round = 3;
+        store_certificate_chain(&primary, &accounts, round, &mut rng);
+        let batch_id = Field::rand(&mut rng);
+        *primary.proposed_batch.write() = ProposedBatchState::Certified(batch_id);
+
+        // Fast-forward several rounds.
+        let next_round = round + 3;
+        primary.try_increment_to_the_next_round(next_round).await.unwrap();
+        assert_eq!(primary.current_round(), next_round);
+
+        assert_eq!(*primary.proposed_batch.read(), ProposedBatchState::Certified(batch_id));
+    }
+
     /// Each recheck of a pending proposal cancels the resends of the previous recheck, and the
     /// latest resends are cancelled once the round is over.
     #[test_log::test(tokio::test)]
@@ -3568,6 +3665,114 @@ mod tests {
 
         // Should be silently accepted (already certified path).
         assert!(primary.process_batch_signature_from_peer(*socket_addr, batch_signature).await.is_ok());
+    }
+
+    /// Storing a certified batch resets the state only if it still holds that batch, so a newer
+    /// proposal made while the certificate was being stored is kept.
+    #[test_log::test(tokio::test(flavor = "multi_thread"))]
+    async fn test_store_certificate_keeps_newer_proposal() {
+        let mut rng = TestRng::default();
+        let (primary, accounts) = primary_without_handlers(&mut rng);
+        map_account_addresses(&primary, &accounts);
+
+        // Collect a quorum of signatures for a batch.
+        let round = 1;
+        let timestamp = now() + MIN_BATCH_DELAY.as_secs() as i64;
+        let proposal = create_test_proposal(
+            primary.gateway.account(),
+            primary.ledger.current_committee().unwrap(),
+            round,
+            Default::default(),
+            timestamp,
+            1,
+            &mut rng,
+        );
+        let batch_id = proposal.batch_id();
+        let mut state = ProposedBatchState::Certifying(Box::new(proposal));
+        let mut certified = None;
+        for (peer_ip, peer_account) in
+            accounts.iter().filter(|(_, account)| account.address() != primary.gateway.account().address())
+        {
+            let signature = peer_account.sign(&[batch_id], &mut rng).unwrap();
+            let (result, new_state) = primary.add_signature_to_batch(state, *peer_ip, batch_id, signature);
+            state = new_state;
+            if let Some(proposal) = result.unwrap() {
+                certified = Some(proposal);
+                break;
+            }
+        }
+        let certified = certified.expect("quorum should be reached");
+        assert_eq!(state, ProposedBatchState::Certified(batch_id));
+
+        // A newer proposal replaces the state before the certificate is stored.
+        let newer_proposal = create_test_proposal(
+            primary.gateway.account(),
+            primary.ledger.current_committee().unwrap(),
+            round,
+            Default::default(),
+            timestamp,
+            1,
+            &mut rng,
+        );
+        let newer_batch_id = newer_proposal.batch_id();
+        assert_ne!(newer_batch_id, batch_id);
+        *primary.proposed_batch.write() = ProposedBatchState::Certifying(Box::new(newer_proposal));
+
+        // Store the certified batch.
+        primary.store_and_broadcast_certificate(&certified).await.unwrap();
+        assert!(primary.storage.contains_certificate_in_round_from(round, primary.gateway.account().address()));
+
+        // The newer proposal is kept.
+        assert_eq!(primary.proposed_batch.read().as_proposal().unwrap().batch_id(), newer_batch_id);
+    }
+
+    /// If storing a certified batch fails, its transmissions go back to the workers and the state is
+    /// reset, so the primary can propose again.
+    #[test_log::test(tokio::test(flavor = "multi_thread"))]
+    async fn test_batch_signature_from_peer_store_failure_resets_state() {
+        let mut rng = TestRng::default();
+        let (primary, accounts) = primary_without_handlers(&mut rng);
+        map_account_addresses(&primary, &accounts);
+
+        // Store a certificate from the primary for the round, so storing a second one fails.
+        let round = 1;
+        let (certificate, transmissions) = create_batch_certificate(
+            primary.gateway.account().address(),
+            &accounts,
+            round,
+            Default::default(),
+            &mut rng,
+        );
+        primary.storage.insert_certificate(certificate, transmissions, Default::default()).unwrap();
+
+        // Propose another batch for the same round.
+        let timestamp = now() + MIN_BATCH_DELAY.as_secs() as i64;
+        let proposal = create_test_proposal(
+            primary.gateway.account(),
+            primary.ledger.current_committee().unwrap(),
+            round,
+            Default::default(),
+            timestamp,
+            1,
+            &mut rng,
+        );
+        let transmission_ids: Vec<_> = proposal.transmissions().keys().copied().collect();
+        assert!(!transmission_ids.is_empty());
+        *primary.proposed_batch.write() = ProposedBatchState::Certifying(Box::new(proposal));
+
+        // The signature that reaches quorum fails to store the certificate.
+        let mut results = Vec::new();
+        for (socket_addr, signature) in peer_signatures_for_proposal(&primary, &accounts, &mut rng) {
+            results.push(primary.process_batch_signature_from_peer(socket_addr, signature).await);
+        }
+        assert!(results.iter().any(|result| result.is_err()));
+
+        // The state is reset and the transmissions are back in the ready queue.
+        assert!(primary.proposed_batch.read().is_none());
+        let ready = primary.workers()[0].transmission_ids();
+        for transmission_id in transmission_ids {
+            assert!(ready.contains(&transmission_id));
+        }
     }
 
     #[test_log::test(tokio::test)]
