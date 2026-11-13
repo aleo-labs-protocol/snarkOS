@@ -190,6 +190,9 @@ pub struct Primary<N: Network> {
 
     /// The node configuration directory.
     node_data_dir: NodeDataDir,
+    /// Serializes stores of the proposal cache, so that an older snapshot never overwrites a newer one,
+    /// and holds the latest round to record when there is no proposal.
+    proposal_cache_lock: Arc<tokio::sync::Mutex<u64>>,
 
     /// Manages proposal readiness state and drives the batch proposal loop.
     proposal_task: ProposalTask<N>,
@@ -243,6 +246,7 @@ impl<N: Network> Primary<N> {
             storage,
             ledger,
             node_data_dir,
+            proposal_cache_lock: Default::default(),
             workers: Default::default(),
             primary_callback: Default::default(),
             proposed_batch: Default::default(),
@@ -271,6 +275,7 @@ impl<N: Network> Primary<N> {
                         proposal_cache.into();
 
                     *self.latest_proposal_timestamp.write().await = Some((latest_certificate_round, now()));
+                    *self.proposal_cache_lock.lock().await = latest_certificate_round;
                     *self.proposed_batch.write() = match proposed_batch {
                         Some(p) => ProposedBatchState::Certifying(Box::new(p)),
                         None => ProposedBatchState::None,
@@ -290,6 +295,10 @@ impl<N: Network> Primary<N> {
                             ));
                             warn!("{}", &flatten_error(err));
                         }
+                    }
+                    // Store the cache once more, as loading the pending certificates may have cleared the proposal.
+                    if let Err(err) = self.store_proposal_cache().await {
+                        error!("{}", flatten_error(err));
                     }
                     Ok(())
                 }
@@ -870,6 +879,18 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
             }
         })?;
 
+        // Store the proposal in memory.
+        *self.proposed_batch.write() = ProposedBatchState::Certifying(Box::new(proposal));
+        // Persist the proposal cache before the proposal is published.
+        if let Err(err) = self.store_proposal_cache().await {
+            // Withdraw the unpublished proposal, and reinsert its transmissions.
+            if let ProposedBatchState::Certifying(proposal) = std::mem::take(&mut *self.proposed_batch.write()) {
+                if let Err(err) = self.reinsert_transmissions_into_workers(proposal.into_transmissions()) {
+                    error!("{}", flatten_error(err.context("Failed to reinsert transmissions")));
+                }
+            }
+            return Err(err);
+        }
         // Broadcast the batch to all validators for signing, until the round is over.
         // Note: `round` may be stale by now, as proposing awaits; peers still sign for the previous round,
         // so the broadcast is scoped to the current round instead.
@@ -877,8 +898,6 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
             Event::BatchPropose(batch_header.into()),
             self.storage.round_cancellation_token(self.current_round()),
         );
-        // Store the proposal in memory.
-        *self.proposed_batch.write() = ProposedBatchState::Certifying(Box::new(proposal));
         self.proposal_notify.notify_one();
         // Record the wall-clock time at which the batch was proposed.
         #[cfg(feature = "metrics")]
@@ -954,9 +973,9 @@ impl<N: Network> Primary<N> {
         }
 
         // Retrieve the cached round and batch ID for this validator.
-        if let Some((signed_round, signed_batch_id, signature)) =
-            self.signed_proposals.read().get(&batch_author).copied()
-        {
+        // Note: the read guard is dropped here, as the resend path below awaits.
+        let cached_signed_proposal = self.signed_proposals.read().get(&batch_author).copied();
+        if let Some((signed_round, signed_batch_id, signature)) = cached_signed_proposal {
             // If the signed round is ahead of the peer's batch round, do not sign the proposal.
             // Note: while this may be valid behavior, additional formal analysis and testing will need to be done before allowing it.
             if signed_round > batch_header.round() {
@@ -973,6 +992,9 @@ impl<N: Network> Primary<N> {
             // If the round and batch ID matches, then skip signing the batch a second time.
             // Instead, rebroadcast the cached signature to the peer.
             if signed_round == batch_header.round() && signed_batch_id == batch_header.batch_id() {
+                // Persist the proposal cache before resending, as the handler that cached this signature
+                // may not have persisted it yet.
+                self.store_proposal_cache().await.inspect_err(|err| error!("{}", flatten_error(err)))?;
                 let gateway = self.gateway.clone();
                 self.spawn(async move {
                     debug!("Resending a signature for a batch in round {batch_round} from '{peer_ip}'");
@@ -1084,6 +1106,8 @@ impl<N: Network> Primary<N> {
         if !self.cache_signed_proposal(batch_author, batch_round, batch_id, signature) {
             return Ok(());
         }
+        // Persist the proposal cache before sending the signature.
+        self.store_proposal_cache().await.inspect_err(|err| error!("{}", flatten_error(err)))?;
 
         // Broadcast the signature back to the validator.
         let self_ = self.clone();
@@ -2185,6 +2209,28 @@ impl<N: Network> Primary<N> {
         handles.push(tokio::spawn(future));
     }
 
+    /// Stores the current proposal cache to disk, leaving the in-memory state unchanged.
+    ///
+    /// The latest round is read and updated under `proposal_cache_lock`, so this never awaits
+    /// `latest_proposal_timestamp`, which `propose_batch` holds for writing.
+    async fn store_proposal_cache(&self) -> Result<()> {
+        // Hold the lock until the store completes, so that stores stay in order.
+        let mut latest_round = self.proposal_cache_lock.lock().await;
+        let proposal = match &*self.proposed_batch.read() {
+            ProposedBatchState::Certifying(p) => Some((**p).clone()),
+            _ => None,
+        };
+        if let Some(proposal) = &proposal {
+            *latest_round = proposal.round();
+        }
+        let signed_proposals = self.signed_proposals.read().clone();
+        let pending_certificates = self.storage.get_pending_certificates();
+        let proposal_cache = ProposalCache::new(*latest_round, proposal, signed_proposals, pending_certificates);
+        let node_data_dir = self.node_data_dir.clone();
+        spawn_blocking!(proposal_cache.store(&node_data_dir))
+            .map_err(|err| err.context("Failed to store the current proposal cache"))
+    }
+
     /// Shuts down the primary.
     pub async fn shut_down(&self) {
         info!("Shutting down the primary...");
@@ -2196,25 +2242,10 @@ impl<N: Network> Primary<N> {
         self.workers().iter().for_each(|worker| worker.shut_down());
         // Abort the tasks.
         self.handles.lock().drain(..).for_each(|handle| handle.abort());
-        // Save the current proposal cache to disk.
-        let proposal_cache = {
-            // Only persist a Certifying batch; a Certified batch will appear in pending_certificates.
-            // Note: it is guaranteed that there are no concurrent accesses to `proposed_batch` as all
-            // background tasks already terminated at this point.
-            let proposal = match std::mem::replace(&mut *self.proposed_batch.write(), ProposedBatchState::None) {
-                ProposedBatchState::Certifying(p) => Some(*p),
-                _ => None,
-            };
-            let signed_proposals = self.signed_proposals.read().clone();
-            let latest_round = proposal
-                .as_ref()
-                .map(Proposal::round)
-                .unwrap_or(self.latest_proposal_timestamp.read().await.map(|(round, _)| round).unwrap_or(0));
-            let pending_certificates = self.storage.get_pending_certificates();
-            ProposalCache::new(latest_round, proposal, signed_proposals, pending_certificates)
-        };
-        if let Err(err) = proposal_cache.store(&self.node_data_dir) {
-            error!("{}", flatten_error(err.context("Failed to store the current proposal cache")));
+        // Save the current proposal cache to disk, taking the snapshot under the proposal cache lock.
+        // Only a Certifying batch is persisted; a Certified batch will appear in pending_certificates.
+        if let Err(err) = self.store_proposal_cache().await {
+            error!("{}", flatten_error(err));
         }
         // Close the gateway.
         self.gateway.shut_down().await;
@@ -2260,6 +2291,15 @@ mod tests {
     }
 
     // Returns a primary and a list of accounts in the configured committee.
+    /// Returns a fresh, existing node data directory, so that proposal cache stores succeed.
+    fn test_node_data_dir() -> NodeDataDir {
+        static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("snarkos-primary-test-{}-{id}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        NodeDataDir::new(dir)
+    }
+
     fn primary_with_committee(
         account_index: usize,
         accounts: &[(SocketAddr, Account<CurrentNetwork>)],
@@ -2273,7 +2313,7 @@ mod tests {
         let account = accounts[account_index].1.clone();
         let block_sync = Arc::new(BlockSync::new(ledger.clone(), ConnectionMode::Gateway));
         let primary =
-            Primary::new(account, storage, ledger, block_sync, None, &[], false, NodeDataDir::new_test(None), None, 1)
+            Primary::new(account, storage, ledger, block_sync, None, &[], false, test_node_data_dir(), None, 1)
                 .unwrap();
 
         // Construct a worker instance.
@@ -2795,6 +2835,235 @@ mod tests {
         );
         // The primary signed the proposal.
         assert!(primary.signed_proposals.read().get(&peer_account.1.address()).is_some());
+    }
+
+    /// A signed proposal is persisted to the proposal cache without a shutdown.
+    #[test_log::test(tokio::test)]
+    async fn test_batch_propose_from_peer_stores_proposal_cache() {
+        let mut rng = TestRng::default();
+        let (mut primary, accounts) = primary_without_handlers(&mut rng);
+        let dir = std::env::temp_dir().join(format!("snarkos-primary-cache-store-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        primary.node_data_dir = NodeDataDir::new(dir.clone());
+
+        // Create a valid proposal with an author that isn't the primary.
+        let peer_account = &accounts[1];
+        let peer_ip = peer_account.0;
+        let timestamp = now() + MIN_BATCH_DELAY.as_secs() as i64;
+        let proposal = create_test_proposal(
+            &peer_account.1,
+            primary.ledger.current_committee().unwrap(),
+            1,
+            Default::default(),
+            timestamp,
+            1,
+            &mut rng,
+        );
+        for (transmission_id, transmission) in proposal.transmissions() {
+            primary.workers()[0].process_transmission_from_peer(peer_ip, *transmission_id, transmission.clone())
+        }
+        primary.gateway.resolver().write().insert_peer(peer_ip, peer_ip, Some(peer_account.1.address()));
+        assert!(
+            primary.process_batch_propose_from_peer(peer_ip, (*proposal.batch_header()).clone().into()).await.is_ok()
+        );
+
+        // The signed proposal is on disk, without `shut_down` being called.
+        let (_, _, signed_proposals, _) =
+            ProposalCache::<CurrentNetwork>::load(primary.gateway.account().address(), &primary.node_data_dir)
+                .unwrap()
+                .into();
+        assert!(signed_proposals.get(&peer_account.1.address()).is_some());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A successful startup load keeps the proposal cache file, so a crash before any new store still finds
+    /// the signed proposals.
+    #[test_log::test(tokio::test)]
+    async fn test_load_proposal_cache_keeps_file() {
+        let mut rng = TestRng::default();
+        let (mut primary, accounts) = primary_without_handlers(&mut rng);
+        let dir = std::env::temp_dir().join(format!("snarkos-primary-cache-load-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        primary.node_data_dir = NodeDataDir::new(dir.clone());
+
+        let peer_address = accounts[1].1.address();
+        let batch_id = Field::rand(&mut rng);
+        let signature = primary.gateway.account().sign(&[batch_id], &mut rng).unwrap();
+        let signed_proposals = SignedProposals([(peer_address, (1, batch_id, signature))].into_iter().collect());
+        ProposalCache::<CurrentNetwork>::new(1, None, signed_proposals, Default::default())
+            .store(&primary.node_data_dir)
+            .unwrap();
+        primary.load_proposal_cache().await.unwrap();
+
+        // Crash here, before any new store: the next load still finds the signed proposal.
+        let (_, _, signed_proposals, _) =
+            ProposalCache::<CurrentNetwork>::load(primary.gateway.account().address(), &primary.node_data_dir)
+                .unwrap()
+                .into();
+        assert_eq!(signed_proposals.get(&peer_address).map(|(_, id, _)| *id), Some(batch_id));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Signing does not wait on `latest_proposal_timestamp`, which `propose_batch` holds for writing.
+    #[test_log::test(tokio::test)]
+    async fn test_batch_propose_from_peer_does_not_await_proposal_timestamp() {
+        let mut rng = TestRng::default();
+        let (primary, accounts) = primary_without_handlers(&mut rng);
+
+        // Create a valid proposal with an author that isn't the primary.
+        let peer_account = &accounts[1];
+        let peer_ip = peer_account.0;
+        let timestamp = now() + MIN_BATCH_DELAY.as_secs() as i64;
+        let proposal = create_test_proposal(
+            &peer_account.1,
+            primary.ledger.current_committee().unwrap(),
+            1,
+            Default::default(),
+            timestamp,
+            1,
+            &mut rng,
+        );
+        for (transmission_id, transmission) in proposal.transmissions() {
+            primary.workers()[0].process_transmission_from_peer(peer_ip, *transmission_id, transmission.clone())
+        }
+        primary.gateway.resolver().write().insert_peer(peer_ip, peer_ip, Some(peer_account.1.address()));
+
+        // Hold the timestamp lock, as `propose_batch` does, while the proposal is signed.
+        let _timestamp_guard = primary.latest_proposal_timestamp.write().await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            primary.process_batch_propose_from_peer(peer_ip, (*proposal.batch_header()).clone().into()),
+        )
+        .await;
+        assert!(result.expect("signing waited on the proposal timestamp lock").is_ok());
+        assert!(primary.signed_proposals.read().get(&peer_account.1.address()).is_some());
+    }
+
+    /// A signature recorded after `shut_down` begins is still in the cache that `shut_down` writes.
+    #[test_log::test(tokio::test)]
+    async fn test_shut_down_keeps_signature_recorded_during_shut_down() {
+        let mut rng = TestRng::default();
+        let (mut primary, accounts) = primary_without_handlers(&mut rng);
+        let dir = std::env::temp_dir().join(format!("snarkos-primary-cache-shut-down-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        primary.node_data_dir = NodeDataDir::new(dir.clone());
+
+        // Hold the proposal cache lock, as an in-flight signing store does, and start shutting down.
+        let cache_guard = primary.proposal_cache_lock.lock().await;
+        let primary_ = primary.clone();
+        let shut_down = tokio::spawn(async move { primary_.shut_down().await });
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // The signing task records its signature, then releases the lock.
+        let peer_address = accounts[1].1.address();
+        let batch_id = Field::rand(&mut rng);
+        let signature = primary.gateway.account().sign(&[batch_id], &mut rng).unwrap();
+        assert!(primary.cache_signed_proposal(peer_address, 1, batch_id, signature));
+        drop(cache_guard);
+        shut_down.await.unwrap();
+
+        let (_, _, signed_proposals, _) =
+            ProposalCache::<CurrentNetwork>::load(primary.gateway.account().address(), &primary.node_data_dir)
+                .unwrap()
+                .into();
+        assert_eq!(signed_proposals.get(&peer_address).map(|(_, id, _)| *id), Some(batch_id));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A cached signature that was never persisted is persisted before it is resent, so a crash after the
+    /// resend cannot leave a published signature without a durable record.
+    #[test_log::test(tokio::test)]
+    async fn test_batch_propose_from_peer_persists_before_resend() {
+        let mut rng = TestRng::default();
+        let (mut primary, accounts) = primary_without_handlers(&mut rng);
+        let dir = std::env::temp_dir().join(format!("snarkos-primary-cache-resend-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        primary.node_data_dir = NodeDataDir::new(dir.clone());
+
+        // Create a valid proposal with an author that isn't the primary.
+        let peer_account = &accounts[1];
+        let peer_ip = peer_account.0;
+        let timestamp = now() + MIN_BATCH_DELAY.as_secs() as i64;
+        let proposal = create_test_proposal(
+            &peer_account.1,
+            primary.ledger.current_committee().unwrap(),
+            1,
+            Default::default(),
+            timestamp,
+            1,
+            &mut rng,
+        );
+        for (transmission_id, transmission) in proposal.transmissions() {
+            primary.workers()[0].process_transmission_from_peer(peer_ip, *transmission_id, transmission.clone())
+        }
+        primary.gateway.resolver().write().insert_peer(peer_ip, peer_ip, Some(peer_account.1.address()));
+
+        // Cache a signature in memory only, as a concurrent handler does before it persists.
+        let batch_id = proposal.batch_id();
+        let signature = primary.gateway.account().sign(&[batch_id], &mut rng).unwrap();
+        assert!(primary.cache_signed_proposal(peer_account.1.address(), 1, batch_id, signature));
+        assert!(!primary.node_data_dir.current_proposal_cache_path().exists());
+
+        // The duplicate proposal takes the resend path, which persists the signature before resending it.
+        assert!(
+            primary.process_batch_propose_from_peer(peer_ip, (*proposal.batch_header()).clone().into()).await.is_ok()
+        );
+        let (_, _, signed_proposals, _) =
+            ProposalCache::<CurrentNetwork>::load(primary.gateway.account().address(), &primary.node_data_dir)
+                .unwrap()
+                .into();
+        assert_eq!(signed_proposals.get(&peer_account.1.address()).map(|(_, id, _)| *id), Some(batch_id));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A failure to persist the proposal cache stops the signature from being sent, and is logged as an error.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn test_batch_propose_from_peer_store_failure_does_not_sign() {
+        let mut rng = TestRng::default();
+        let (mut primary, accounts) = primary_without_handlers(&mut rng);
+        // A data directory that does not exist makes every store fail.
+        let dir = std::env::temp_dir().join(format!("snarkos-primary-cache-missing-{}", std::process::id()));
+        assert!(!dir.exists());
+        primary.node_data_dir = NodeDataDir::new(dir.clone());
+
+        // Create a valid proposal with an author that isn't the primary.
+        let peer_account = &accounts[1];
+        let peer_ip = peer_account.0;
+        let timestamp = now() + MIN_BATCH_DELAY.as_secs() as i64;
+        let proposal = create_test_proposal(
+            &peer_account.1,
+            primary.ledger.current_committee().unwrap(),
+            1,
+            Default::default(),
+            timestamp,
+            1,
+            &mut rng,
+        );
+        for (transmission_id, transmission) in proposal.transmissions() {
+            primary.workers()[0].process_transmission_from_peer(peer_ip, *transmission_id, transmission.clone())
+        }
+        primary.gateway.resolver().write().insert_peer(peer_ip, peer_ip, Some(peer_account.1.address()));
+
+        // The store fails, so the handler returns the error and spawns no task to send a signature.
+        let handles_before = primary.handles.lock().len();
+        assert!(
+            primary.process_batch_propose_from_peer(peer_ip, (*proposal.batch_header()).clone().into()).await.is_err()
+        );
+        assert_eq!(primary.handles.lock().len(), handles_before);
+        logs_assert(|lines: &[&str]| {
+            match lines
+                .iter()
+                .any(|line| line.contains(" ERROR ") && line.contains("Failed to store the current proposal cache"))
+            {
+                true => Ok(()),
+                false => Err("no error-level log for the failed store".to_string()),
+            }
+        });
     }
 
     /// A transmission that storage knows only as aborted still has to be fetched from the peer:

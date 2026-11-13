@@ -23,7 +23,7 @@ use snarkvm::{
 };
 
 use indexmap::IndexSet;
-use std::fs;
+use std::{fs, path::Path};
 
 /// A helper type for the cache of proposal and signed proposals.
 #[derive(Debug, PartialEq, Eq)]
@@ -92,13 +92,22 @@ impl<N: Network> ProposalCache<N> {
     /// Store the proposal cache to the file system.
     pub fn store(&self, node_data_dir: &NodeDataDir) -> Result<()> {
         let path = node_data_dir.current_proposal_cache_path();
-        info!("Storing the proposal cache to {}...", path.display());
+        debug!("Storing the proposal cache to {}...", path.display());
 
         // Serialize the proposal cache.
         let bytes = self.to_bytes_le()?;
-        // Store the proposal cache to the file system.
-        fs::write(&path, bytes)
-            .map_err(|err| anyhow!("Couldn't write the proposal cache to {} - {err}", path.display()))?;
+        // Store the proposal cache to a temporary file, sync it, and rename it over the cache path,
+        // so that a crash mid-write never leaves a torn cache file.
+        let tmp_path = path.with_extension("tmp");
+        let write_tmp = || -> std::io::Result<()> {
+            let mut file = fs::File::create(&tmp_path)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            fs::rename(&tmp_path, &path)?;
+            // Sync the parent directory, so that the rename itself survives a crash.
+            sync_parent_dir(&path)
+        };
+        write_tmp().map_err(|err| anyhow!("Couldn't write the proposal cache to {} - {err}", path.display()))?;
 
         Ok(())
     }
@@ -107,6 +116,22 @@ impl<N: Network> ProposalCache<N> {
     pub fn into(self) -> (u64, Option<Proposal<N>>, SignedProposals<N>, IndexSet<BatchCertificate<N>>) {
         (self.latest_round, self.proposal, self.signed_proposals, self.pending_certificates)
     }
+}
+
+/// Syncs the directory containing `path`, making a rename into it durable.
+fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    tests::DIR_SYNCS.with(|count| count.set(count.get() + 1));
+    // Directories cannot be opened for syncing on Windows, where the rename is already durable.
+    #[cfg(unix)]
+    {
+        let parent = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 impl<N: Network> ToBytes for ProposalCache<N> {
@@ -181,6 +206,11 @@ mod tests {
 
     const ITERATIONS: usize = 100;
 
+    thread_local! {
+        /// The number of parent directory syncs on this thread.
+        pub(super) static DIR_SYNCS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
     pub(crate) fn sample_proposal_cache(
         signer: &PrivateKey<CurrentNetwork>,
         rng: &mut TestRng,
@@ -204,5 +234,47 @@ mod tests {
             let expected_bytes = expected.to_bytes_le().unwrap();
             assert_eq!(expected, ProposalCache::read_le(&expected_bytes[..]).unwrap());
         }
+    }
+
+    #[test]
+    fn test_store_is_complete_and_loads() {
+        let rng = &mut TestRng::default();
+        let signer = PrivateKey::<CurrentNetwork>::new(rng).unwrap();
+        let dir = std::env::temp_dir().join(format!("snarkos-proposal-cache-store-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let node_data_dir = NodeDataDir::new(dir.clone());
+        let path = node_data_dir.current_proposal_cache_path();
+
+        // After a store, the cache path holds the complete serialized cache and no temporary file remains.
+        let expected = sample_proposal_cache(&signer, rng);
+        expected.store(&node_data_dir).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), expected.to_bytes_le().unwrap());
+        assert!(!path.with_extension("tmp").exists());
+
+        // A load after a store returns the same latest round, proposal, and signed proposals.
+        let expected = ProposalCache::new(7, None, sample_signed_proposals(&signer, rng), Default::default());
+        expected.store(&node_data_dir).unwrap();
+        let address = Address::try_from(&signer).unwrap();
+        assert_eq!(ProposalCache::load(address, &node_data_dir).unwrap(), expected);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_store_syncs_parent_dir_after_replace() {
+        let rng = &mut TestRng::default();
+        let signer = PrivateKey::<CurrentNetwork>::new(rng).unwrap();
+        let dir = std::env::temp_dir().join(format!("snarkos-proposal-cache-dir-sync-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let node_data_dir = NodeDataDir::new(dir.clone());
+
+        // Replace an existing cache file, and check that the parent directory is synced once per store.
+        let cache = sample_proposal_cache(&signer, rng);
+        cache.store(&node_data_dir).unwrap();
+        let before = DIR_SYNCS.with(|count| count.get());
+        cache.store(&node_data_dir).unwrap();
+        assert_eq!(DIR_SYNCS.with(|count| count.get()), before + 1);
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
