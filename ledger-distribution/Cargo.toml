@@ -21,10 +21,6 @@ publish = false
 name = "ledger-distribution"
 path = "src/main.rs"
 
-[dependencies.aleo-std]
-workspace = true
-features = [ "storage" ]
-
 [dependencies.anyhow]
 workspace = true
 

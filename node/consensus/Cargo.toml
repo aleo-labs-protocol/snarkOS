@@ -36,9 +36,6 @@ serial = [
 ]
 test_network = [ ]
 
-[dependencies.aleo-std]
-workspace = true
-
 [dependencies.anyhow]
 workspace = true
 

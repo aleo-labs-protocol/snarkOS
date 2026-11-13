@@ -32,7 +32,6 @@ use snarkos_node_network::ConnectionMode;
 use snarkos_node_sync::BlockSync;
 use snarkos_utilities::{NodeDataDir, SimpleStoppable};
 
-use aleo_std::StorageMode;
 use snarkvm::{
     console::{account::PrivateKey, types::Address},
     ledger::{
@@ -42,7 +41,7 @@ use snarkvm::{
         committee::{Committee, MIN_VALIDATOR_STAKE},
         narwhal::{BatchHeader, Data},
         puzzle::{Solution, SolutionID},
-        store::{ConsensusStore, helpers::memory::ConsensusMemory},
+        store::{ConsensusStore, StorageMode, helpers::memory::ConsensusMemory},
     },
     prelude::{Field, Network, Uniform, VM},
     utilities::TestRng,
