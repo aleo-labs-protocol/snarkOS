@@ -113,6 +113,18 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
                 let frequency = self.router().cache.insert_inbound_block_request(peer_ip);
                 // Check if the number of block requests is within the limit.
                 if frequency > Self::MAXIMUM_BLOCK_REQUESTS_PER_INTERVAL {
+                    // Temporarily IP-ban the peer, rather than only disconnecting it.
+                    //
+                    // A bare disconnect lets the peer reconnect immediately. A peer that cannot
+                    // apply the blocks it is requesting - for example, one running a release that
+                    // predates the current consensus version - re-requests them as fast as its sync
+                    // loop wakes, so disconnecting alone converts a request flood into a
+                    // connect/flood/disconnect churn loop, and every cycle costs this node a full
+                    // handshake on top of the block reads.
+                    //
+                    // The ban expires after `Heartbeat::IP_BAN_TIME_IN_SECS`, so a peer that merely
+                    // synced too eagerly is set back by one ban interval and no more.
+                    self.router().ip_ban_peer(peer_ip, Some("excessive block requests"));
                     bail!("Peer '{peer_ip}' is not following the protocol (excessive block requests)")
                 }
                 // Ensure the block request is well-formed.
