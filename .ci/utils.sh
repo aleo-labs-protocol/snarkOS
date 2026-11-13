@@ -489,7 +489,7 @@ function wait_for_peers() {
   start=$(now)
   
   while (( $(elapsed_since "$start") < max_wait )); do
-    result=$(curl -s "http://$localhost:$port/v2/$network_name/peers/count")
+    result=$(curl -s "http://$localhost:$port/v2/$network_name/connections/p2p/count")
 
     if (is_integer "$result"); then
       if (( result < min_peers )); then

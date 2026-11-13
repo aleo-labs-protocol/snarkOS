@@ -1,6 +1,6 @@
 [package]
 name = "snarkos"
-version = "4.12.0"
+version = "4.13.0"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "A decentralized operating system"
 homepage = "https://aleo.org"
@@ -49,7 +49,7 @@ default-features = false
 [workspace.dependencies.snarkvm]
 #path = "../snarkVM"
 git = "https://github.com/aleo-labs-protocol/snarkVM.git"
-rev = "bcf2847b895e05789406e34bec3d6bf938b8cceb" #staging
+rev = "dc6863ed328de51478a4f59b256a725c97dec076" #staging
 #version = "=4.12.0"
 default-features = false
 
@@ -194,84 +194,84 @@ version = "0.2"
 
 [workspace.dependencies.snarkos-account]
 path = "account"
-version = "=4.12.0"
+version = "=4.13.0"
 
 [workspace.dependencies.snarkos-cli]
 path = "cli"
-version = "=4.12.0"
+version = "=4.13.0"
 
 [workspace.dependencies.snarkos-display]
 path = "display"
-version = "=4.12.0"
+version = "=4.13.0"
 
 [workspace.dependencies.snarkos-node]
 path = "node"
-version = "=4.12.0"
+version = "=4.13.0"
 
 [workspace.dependencies.snarkos-node-bft]
 path = "node/bft"
-version = "=4.12.0"
+version = "=4.13.0"
 
 [workspace.dependencies.snarkos-node-bft-events]
 path = "node/bft/events"
-version = "=4.12.0"
+version = "=4.13.0"
 
 [workspace.dependencies.snarkos-node-bft-storage-service]
 path = "node/bft/storage-service"
-version = "=4.12.0"
+version = "=4.13.0"
 
 [workspace.dependencies.snarkos-node-bft-ledger-service]
 path = "node/bft/ledger-service"
-version = "=4.12.0"
+version = "=4.13.0"
 default-features = false
 
 [workspace.dependencies.snarkos-node-consensus]
 path = "node/consensus"
-version = "=4.12.0"
+version = "=4.13.0"
 
 [workspace.dependencies.snarkos-node-cdn]
 path = "node/cdn"
-version = "=4.12.0"
+version = "=4.13.0"
 
 [workspace.dependencies.snarkos-node-metrics]
 path = "node/metrics"
-version = "=4.12.0"
+version = "=4.13.0"
 
 [workspace.dependencies.snarkos-node-network]
 path = "node/network"
-version = "=4.12.0"
+version = "=4.13.0"
 
 [workspace.dependencies.snarkos-node-router]
 path = "node/router"
-version = "=4.12.0"
+version = "=4.13.0"
 
 [workspace.dependencies.snarkos-node-router-messages]
 path = "node/router/messages"
-version = "=4.12.0"
+version = "=4.13.0"
 
 [workspace.dependencies.snarkos-node-rest]
 path = "node/rest"
-version = "=4.12.0"
+version = "=4.13.0"
 
 [workspace.dependencies.snarkos-node-sync]
 path = "node/sync"
-version = "=4.12.0"
+version = "=4.13.0"
 
 [workspace.dependencies.snarkos-node-sync-communication-service]
 path = "node/sync/communication-service"
-version = "=4.12.0"
+version = "=4.13.0"
 
 [workspace.dependencies.snarkos-node-sync-locators]
 path = "node/sync/locators"
-version = "=4.12.0"
+version = "=4.13.0"
 
 [workspace.dependencies.snarkos-node-tcp]
 path = "node/tcp"
-version = "=4.12.0"
+version = "=4.13.0"
 
 [workspace.dependencies.snarkos-utilities]
 path = "utilities"
-version = "=4.12.0"
+version = "=4.13.0"
 
 [[bin]]
 name = "snarkos"
