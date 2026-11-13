@@ -29,6 +29,7 @@ marked "release" only on the third. The other jobs run on every event.
 
 | Job | Runner | Trigger | Timeout (min) | What it runs |
 |---|---|---|---|---|
+| `changes` | hosted | all | | finds whether a pull request changes only documentation |
 | `start-cpu-runners` | hosted | all | | starts fleet boxes |
 | `check-shared-refs` | hosted | all | | checks that each `aleo-labs-protocol/gh-actions` ref is a release tag |
 | `fmt` | hosted | all | | `cargo fmt --check` on `FMT_TOOLCHAIN` |
@@ -54,7 +55,7 @@ marked "release" only on the third. The other jobs run on every event.
 | `devnet (chaotic-restart-all)` | `cpu` | release | 45 | `test_restart_all.sh`, with delays |
 | `machete` | hosted | all | | `cargo machete` |
 | `windows` | hosted (Windows) | merge | | `cargo check --examples --benches --tests` in `account`, `cli`, `display`, `node` |
-| `ci-ok` | hosted | all | | fails unless every job a pull request runs succeeded |
+| `ci-ok` | hosted | all | | fails unless every job a pull request runs succeeded; on a documentation-only pull request, accepts skipped jobs |
 
 A job with no timeout gets the GitHub default of six hours. Only hosted jobs
 have none, and a hosted job holds no fleet box.
@@ -63,6 +64,22 @@ Protected branches require `ci-ok` alone. GitHub counts a skipped job as
 passed for a required check, and a fleet job is skipped when
 `start-cpu-runners` fails or the pull request comes from a fork; `ci-ok`
 fails in both cases.
+
+## Documentation-only pull requests
+
+A pull request that changes only documentation runs `changes`,
+`check-shared-refs`, `fmt`, `deny`, `shellcheck`, `merge-fixup`, `machete`,
+`release-graph` and `ci-ok`. `lint`, every `test` entry, `build-snarkos` and
+the devnets are skipped, and no fleet box starts. `ci-ok` passes with those
+jobs skipped.
+
+Documentation is any `*.md` file. A renamed file counts under both of its
+paths. `changes` reads the file list from the GitHub API; if that fails, the
+pull request runs everything. A push or a manual dispatch always runs
+everything, so `staging` still gets a full run after the merge.
+
+Before a crate includes a Markdown file with `include_str!`, or a test reads
+one, exclude that file in `changes`.
 
 ## Test groups
 

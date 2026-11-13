@@ -24,7 +24,38 @@ env:
 # the fleet, whose target dirs, sccache and home directories persist between
 # jobs.
 jobs:
+  # Whether a pull request changes only documentation. Then nothing is built
+  # or tested, and no fleet box starts. Every other event runs everything, and
+  # so does a pull request whose files cannot be listed.
+  #
+  # Documentation is any `*.md` file. Exclude a Markdown file here before a
+  # crate includes it or a test reads it.
+  changes:
+    runs-on: ubuntu-latest
+    permissions: { pull-requests: read }
+    outputs:
+      docs-only: ${{ steps.files.outputs.docs-only }}
+    steps:
+      - id: files
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          # A renamed file counts under both of its paths.
+          IS_DOCS: >-
+            .[] | [.filename, .previous_filename // empty] | all(endswith(".md"))
+        run: |
+          # One line for each file. The API lists at most 3000, so the count
+          # is checked against the pull request's own.
+          docs=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq "$IS_DOCS") || docs=
+          echo "$docs" | sort | uniq -c
+          if [ "$(grep -c . <<< "$docs")" = "$CHANGED_FILES" ] && ! grep -qvx true <<< "$docs"; then
+            echo "docs-only=true" >> "$GITHUB_OUTPUT"
+          fi
+
   start-cpu-runners:
+    needs: changes
     # gh-actions is ours; check-shared-refs requires a @vN tag here, not a SHA.
     uses: aleo-labs-protocol/gh-actions/.github/workflows/start-runner.yml@v2
     permissions: { id-token: write, contents: read, actions: read }
@@ -38,8 +69,9 @@ jobs:
       jobs-per-box: 2
       runner-app-id: ${{ vars.RUNNER_APP_ID }}
     if: >-
-      github.event.pull_request == null ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      needs.changes.outputs.docs-only != 'true' &&
+      (github.event.pull_request == null ||
+       github.event.pull_request.head.repo.full_name == github.repository)
 
   check-shared-refs:
     runs-on: ubuntu-latest
@@ -129,9 +161,11 @@ jobs:
   #
   # Cheap entries run on free hosted runners and do not wait for the fleet.
   test-hosted:
+    needs: changes
     permissions: { contents: read, actions: write }
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    if: needs.changes.outputs.docs-only != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -439,14 +473,18 @@ jobs:
         working-directory: ${{ matrix.dir }}
 
   # The one job to require on protected branches. A skipped job counts as passed
-  # for a required check, so each job a pull request runs must succeed here.
+  # for a required check, so each job a pull request runs must succeed here. A
+  # documentation-only pull request skips its build and test jobs.
   ci-ok:
     if: always()
-    needs: [check-shared-refs, fmt, deny, shellcheck, merge-fixup, machete, release-graph, lint, test-hosted, test, build-snarkos, devnet]
+    needs: [changes, check-shared-refs, fmt, deny, shellcheck, merge-fixup, machete, release-graph, lint, test-hosted, test, build-snarkos, devnet]
     runs-on: ubuntu-latest
     steps:
       - env:
           RESULTS: ${{ join(needs.*.result, ' ') }}
+          DOCS_ONLY: ${{ needs.changes.outputs.docs-only }}
         run: |
           echo "$RESULTS"
-          for r in $RESULTS; do [ "$r" = success ] || exit 1; done
+          for r in $RESULTS; do
+            [ "$r" = success ] || { [ "$DOCS_ONLY" = true ] && [ "$r" = skipped ]; } || exit 1
+          done
