@@ -54,9 +54,6 @@ serial = [
   "snarkos-node-bft-ledger-service/serial"
 ]
 
-[dependencies.aleo-std]
-workspace = true
-
 [dependencies.anyhow]
 workspace = true
 

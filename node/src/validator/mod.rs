@@ -45,10 +45,9 @@ use snarkvm::prelude::{
     Network,
     block::{Block, Header},
     puzzle::Solution,
-    store::ConsensusStorage,
+    store::{ConsensusStorage, StorageMode},
 };
 
-use aleo_std::StorageMode;
 use anyhow::{Context, Result};
 use cfg_if::cfg_if;
 use core::future::Future;

@@ -23,9 +23,6 @@ memory = [ "parking_lot", "tracing" ]
 persistent = [ "parking_lot", "tracing" ]
 test = [ "memory" ]
 
-[dependencies.aleo-std]
-workspace = true
-
 [dependencies.anyhow]
 workspace = true
 

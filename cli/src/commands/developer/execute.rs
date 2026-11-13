@@ -18,7 +18,10 @@ use crate::{commands::StoreFormat, helpers::args::parse_private_key};
 
 use snarkvm::{
     console::network::Network,
-    ledger::{query::QueryTrait, store::helpers::memory::BlockMemory},
+    ledger::{
+        query::QueryTrait,
+        store::{StorageMode, helpers::memory::BlockMemory},
+    },
     prelude::{
         Address,
         Identifier,
@@ -32,7 +35,6 @@ use snarkvm::{
     },
 };
 
-use aleo_std::StorageMode;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, builder::NonEmptyStringValueParser};
 use colored::Colorize;

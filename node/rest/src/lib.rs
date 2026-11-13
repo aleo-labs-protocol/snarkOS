@@ -791,13 +791,12 @@ mod route_tests {
         ledger::{
             block::{Header, Transactions},
             committee::test_helpers::sample_committee,
-            store::helpers::memory::ConsensusMemory,
+            store::{StorageMode, helpers::memory::ConsensusMemory},
         },
         prelude::MainnetV0,
         utilities::TestRng,
     };
 
-    use aleo_std::StorageMode;
     use axum::body::to_bytes;
     use tower::ServiceExt; // for `oneshot`
 

@@ -16,12 +16,11 @@
 use snarkvm::{
     ledger::{
         block::Block,
-        store::{BlockStorage, helpers::rocksdb::BlockDB},
+        store::{BlockStorage, StorageMode, helpers::rocksdb::BlockDB},
     },
     prelude::*,
 };
 
-use aleo_std::StorageMode;
 use std::path::PathBuf;
 
 /// A read-only view of a node's ledger.

@@ -22,6 +22,7 @@ use snarkvm::{
         network::{CanaryV0, MainnetV0, Network, TestnetV0},
         program::ProgramOwner,
     },
+    ledger::store::StorageMode,
     prelude::{
         ProgramID,
         VM,
@@ -32,7 +33,6 @@ use snarkvm::{
     },
 };
 
-use aleo_std::StorageMode;
 use anyhow::Result;
 use clap::{Parser, builder::NonEmptyStringValueParser};
 use colored::Colorize;

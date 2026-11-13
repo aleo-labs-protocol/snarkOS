@@ -49,7 +49,7 @@ default-features = false
 [workspace.dependencies.snarkvm]
 #path = "../snarkVM"
 git = "https://github.com/aleo-labs-protocol/snarkVM.git"
-rev = "dc6863ed328de51478a4f59b256a725c97dec076" #staging
+rev = "04e9e47fe626bcc6b20a75f7e997de1242b4c616" #refactor/storage-mode-in-tree
 #version = "=4.12.0"
 default-features = false
 

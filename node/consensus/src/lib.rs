@@ -54,12 +54,12 @@ use snarkvm::{
         block::Transaction,
         narwhal::{BatchHeader, Data, Subdag, Transmission, TransmissionID},
         puzzle::{Solution, SolutionID},
+        store::StorageMode,
     },
     prelude::*,
     utilities::flatten_error,
 };
 
-use aleo_std::StorageMode;
 use anyhow::{Context, Result, bail};
 use cfg_if::cfg_if;
 use indexmap::IndexMap;
