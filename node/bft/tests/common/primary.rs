@@ -43,13 +43,12 @@ use snarkvm::{
         block::Block,
         committee::{Committee, MIN_VALIDATOR_STAKE},
         narwhal::BatchHeader,
-        store::{ConsensusStore, helpers::memory::ConsensusMemory},
+        store::{ConsensusStore, StorageMode, helpers::memory::ConsensusMemory},
     },
     prelude::{CryptoRng, FromBytes, Rng, TestRng, ToBits, ToBytes, VM},
     utilities::to_bytes_le,
 };
 
-use aleo_std::StorageMode;
 use indexmap::IndexMap;
 use itertools::Itertools;
 #[cfg(feature = "locktick")]

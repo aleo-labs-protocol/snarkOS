@@ -37,9 +37,6 @@ serial = [
   "snarkos-node-consensus/serial"
 ] 
 
-[dependencies.aleo-std]
-workspace = true
-
 [dependencies.anyhow]
 workspace = true
 

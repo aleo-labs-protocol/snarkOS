@@ -17,9 +17,11 @@ use crate::helpers::args::parse_node_data_dir;
 
 use snarkos_utilities::NodeDataDir;
 
-use snarkvm::console::network::{CanaryV0, MainnetV0, Network, TestnetV0};
+use snarkvm::{
+    console::network::{CanaryV0, MainnetV0, Network, TestnetV0},
+    ledger::store::{StorageMode, aleo_ledger_dir},
+};
 
-use aleo_std::StorageMode;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use colored::Colorize;
@@ -100,7 +102,7 @@ impl Clean {
     /// Removes the specified ledger from storage.
     pub(crate) fn remove_ledger(network: u16, mode: &StorageMode) -> Result<String> {
         // Construct the path to the ledger in storage.
-        let path = aleo_std::aleo_ledger_dir(network, mode);
+        let path = aleo_ledger_dir(network, mode);
 
         // Prepare the path string.
         let path_string = format!("(in \"{}\")", path.display()).dimmed();
@@ -125,7 +127,7 @@ impl Clean {
                 None => StorageMode::Production,
             },
         };
-        let path = aleo_std::aleo_ledger_dir(self.network, &storage_mode);
+        let path = aleo_ledger_dir(self.network, &storage_mode);
         let path_string = format!("(in \"{}\")", path.display()).dimmed();
         if !path.exists() {
             return Ok(format!("✅ No snarkOS ledger was found {path_string}"));

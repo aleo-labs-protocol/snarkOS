@@ -35,10 +35,13 @@ use snarkvm::prelude::{
     PrivateKey,
     ViewKey,
     block::Block,
-    store::helpers::{memory::ConsensusMemory, rocksdb::ConsensusDB},
+    store::{
+        StorageMode,
+        aleo_ledger_dir,
+        helpers::{memory::ConsensusMemory, rocksdb::ConsensusDB},
+    },
 };
 
-use aleo_std::{StorageMode, aleo_ledger_dir};
 use anyhow::{Result, bail};
 
 #[cfg(feature = "locktick")]

@@ -191,5 +191,6 @@ workspace = true
 
 [package.metadata.cargo-machete]
 ignored = [
+  "aleo-std", # Only the timer feature uses it
   "serde_json", # Need to set preserve_order feature
 ]

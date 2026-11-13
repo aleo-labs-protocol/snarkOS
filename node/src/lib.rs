@@ -50,7 +50,7 @@ pub use node::*;
 mod traits;
 pub use traits::*;
 
-use aleo_std::StorageMode;
+use snarkvm::ledger::store::StorageMode;
 
 /// A helper to log instructions to recover.
 pub fn log_clean_error(storage_mode: &StorageMode) {

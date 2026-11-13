@@ -26,12 +26,12 @@
 //! network-free signal for which handlers are worth wrapping, not throughput at production
 //! scale.
 
-use aleo_std::StorageMode;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use snarkvm::{
     console::collections::U64,
     ledger::store::{
         ConsensusStore,
+        StorageMode,
         helpers::{memory::ConsensusMemory, rocksdb::ConsensusDB},
     },
     prelude::*,

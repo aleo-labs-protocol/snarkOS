@@ -45,12 +45,11 @@ use snarkvm::{
         Ledger,
         block::{Block, Header},
         puzzle::{Puzzle, Solution, SolutionID},
-        store::ConsensusStorage,
+        store::{ConsensusStorage, StorageMode},
     },
     prelude::{VM, block::Transaction},
 };
 
-use aleo_std::StorageMode;
 use anyhow::{Context, Result};
 use core::future::Future;
 #[cfg(feature = "locktick")]
