@@ -24,6 +24,7 @@ test = [ ]
 # valid messages rather than by mutation from nothing.
 fuzz-helpers = [
   "dep:proptest",
+  "dep:snarkos-utilities",
   "dep:test-strategy",
   "snarkos-node-bft-events/fuzz-helpers",
   "snarkos-node-sync-locators/test",
@@ -59,9 +60,18 @@ workspace = true
 [dev-dependencies.indexmap]
 workspace = true
 
+[dependencies.snarkos-utilities]
+workspace = true
+features = [ "test-helpers" ]
+optional = true
+
 [dev-dependencies.snarkos-node-sync-locators]
 workspace = true
 features = [ "test" ]
+
+[dev-dependencies.snarkos-utilities]
+workspace = true
+features = [ "test-helpers" ]
 
 [dev-dependencies.snarkvm]
 workspace = true
