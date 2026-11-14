@@ -5388,7 +5388,6 @@ dependencies = [
  "crossterm",
  "indexmap 2.14.2",
  "locktick",
- "nix 0.31.3",
  "num_cpus",
  "parking_lot",
  "rand 0.10.3",

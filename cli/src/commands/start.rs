@@ -70,10 +70,11 @@ use tokio::{
 use tracing::{debug, info, warn};
 use ureq::http;
 
-/// The recommended minimum number of 'open files' limit for a validator.
-/// Validators should be able to handle at least 1000 concurrent connections, each requiring 2 sockets.
+/// The minimum open-files limit for a node that opens the ledger.
+/// RocksDB keeps up to 8,192 ledger files open (snarkVM's `MAX_OPEN_FILES`), a validator needs about 2,048 more
+/// for its connections, and the rest is headroom.
 #[cfg(target_family = "unix")]
-const RECOMMENDED_MIN_NOFILES_LIMIT: u64 = 2048;
+const MIN_NOFILES_LIMIT: u64 = 16384;
 
 /// Default (and maximum) concurrent REST deploy verifications.
 const DEFAULT_NUM_VERIFYING_DEPLOYS: usize =
@@ -940,10 +941,16 @@ impl Start {
             }
         }
 
-        // If the node is a validator, check if the open files limit is lower than recommended.
+        // Raise the open files limit of a node that opens the ledger.
+        // A validator does not start below the minimum, and a client only warns.
         #[cfg(target_family = "unix")]
-        if node_type.is_validator() {
-            crate::helpers::check_open_files_limit(RECOMMENDED_MIN_NOFILES_LIMIT);
+        if (node_type.is_validator() || node_type.is_client())
+            && let Err(err) = crate::helpers::raise_open_files_limit(MIN_NOFILES_LIMIT)
+        {
+            if node_type.is_validator() {
+                return Err(err);
+            }
+            warn!("{err}");
         }
         // Check if the machine meets the minimum requirements for a validator.
         crate::helpers::check_validator_machine(node_type);

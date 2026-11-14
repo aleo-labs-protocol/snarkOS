@@ -43,29 +43,24 @@ pub use updater::*;
 use snarkos_node::network::NodeType;
 
 use anyhow::Result;
+#[cfg(target_family = "unix")]
+use anyhow::ensure;
 use colored::*;
-#[cfg(target_family = "unix")]
-use nix::sys::resource::{Resource, getrlimit};
 
-/// Check if process's open files limit is above minimum and warn if not.
+/// Raises the soft open-files limit of this process to `minimum`, if it is lower and the hard limit allows it.
+///
+/// Returns an error if the limit stays below `minimum`.
 #[cfg(target_family = "unix")]
-pub fn check_open_files_limit(minimum: u64) {
-    // Acquire current limits.
-    match getrlimit(Resource::RLIMIT_NOFILE) {
-        Ok((soft_limit, _)) => {
-            // Check if requirements are met.
-            if soft_limit < minimum {
-                panic!(
-                    "The open files limit ({soft_limit}) for this process is too low. \
-                    Please raise it to at least {minimum} \
-                    See the `ulimit` command and `/etc/security/limits.conf` for more details.",
-                );
-            }
-        }
+pub fn raise_open_files_limit(minimum: u64) -> Result<()> {
+    let limits = rlimit::Resource::NOFILE
+        .get()
+        .and_then(|(soft_limit, _)| Ok((soft_limit, rlimit::increase_nofile_limit(minimum)?)));
+    let (soft_limit, limit) = match limits {
+        Ok(limits) => limits,
         Err(err) => {
             // Warn about unknown limit.
             let warning = [
-                format!("⚠️  Unable to check the open files limit for this process due to {err}."),
+                format!("⚠️  Unable to check or raise the open files limit for this process due to {err}."),
                 format!("  • To ensure correct behavior of the node, please ensure it is at least {minimum}."),
                 "  • See the `ulimit` command and `/etc/security/limits.conf` for more details.".to_owned(),
             ]
@@ -73,8 +68,19 @@ pub fn check_open_files_limit(minimum: u64) {
             .yellow()
             .bold();
             eprintln!("{warning}\n");
+            return Ok(());
         }
     };
+    if limit > soft_limit {
+        tracing::info!("Raised the open files limit from {soft_limit} to {limit}");
+    }
+    ensure!(
+        limit >= minimum,
+        "The open files limit ({limit}) for this process is below {minimum}, and its hard limit does not allow raising it. \
+        Raise the hard limit to at least {minimum}. \
+        See the `ulimit -Hn` command, `/etc/security/limits.conf`, or `LimitNOFILE` for a systemd service."
+    );
+    Ok(())
 }
 
 /// Returns the RAM memory in GiB.
@@ -112,6 +118,34 @@ pub(crate) fn check_validator_machine(node_type: NodeType) {
                 let message = format!("⚠️  The amount of RAM ({ram} GiB) on this machine is insufficient for a validator (minimum {min_ram} GiB)\n");
                 println!("{}", message.yellow().bold());
             }
+        }
+    }
+}
+
+#[cfg(all(test, target_family = "unix"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_raise_open_files_limit() {
+        // Reading the limits of this process does not fail on a unix target.
+        let (soft_limit, hard_limit) = rlimit::Resource::NOFILE.get().unwrap();
+
+        // A minimum at or below the soft limit leaves the soft limit as it is.
+        raise_open_files_limit(soft_limit).unwrap();
+        assert_eq!(rlimit::Resource::NOFILE.get().unwrap().0, soft_limit);
+
+        // A minimum above the soft limit, and within the hard limit, raises the soft limit to it.
+        if soft_limit != rlimit::INFINITY {
+            // Lowering a finite soft limit of this process does not fail.
+            rlimit::Resource::NOFILE.set(soft_limit - 1, hard_limit).unwrap();
+            raise_open_files_limit(soft_limit).unwrap();
+            assert_eq!(rlimit::Resource::NOFILE.get().unwrap().0, soft_limit);
+        }
+
+        // A minimum above the hard limit cannot be reached.
+        if hard_limit != rlimit::INFINITY {
+            assert!(raise_open_files_limit(hard_limit + 1).is_err());
         }
     }
 }

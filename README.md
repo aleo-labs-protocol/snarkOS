@@ -134,7 +134,8 @@ Please ensure ports `4130/tcp` and `3030/tcp` are open on your router and OS fir
 | 9000/tcp | TCP      | Allow      | Internal VPC or VPN          | Metrics export, should only be open within an internal VPC or VPN |
 | 9090/tcp | TCP      | Allow      | Internal VPC or VPN          | Prometheus metrics, should only be open within an internal VPC or VPN |
 
-**Note:** Ensure that your open file limit is set to 16,384 or above.
+**Note:** Ensure that your hard open file limit is set to 16,384 or above.
+At startup, snarkOS raises its soft limit to 16,384 if the hard limit allows it.
 For the recommended setting run:
 ```
 # Increase the open file limit for the current user (replace <username> with your username)
