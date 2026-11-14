@@ -47,9 +47,8 @@ on the same machine or volume while the node keeps writing. It reads the blocks 
 written at the start of every pass. It refuses a ledger written by a newer snarkVM storage version,
 so it must be built from the same or a newer snarkOS release than the node.
 
-A secondary instance keeps every table file of the ledger open: more than 32,000 on mainnet today,
-and the count grows with the ledger. At startup, the binary raises its soft open-files limit to the
-hard limit. So the hard limit must be well above the number of `*.sst` files in `LEDGER_PATH`, for
+A secondary instance keeps every `*.sst` file in `LEDGER_PATH` open. At startup, the binary raises
+its soft open-files limit to the hard limit, so set the hard limit well above that count, for
 example `LimitNOFILE=1048576` in a systemd service.
 
 Uploads set no per-object ACL. The bucket itself must grant public read access, for example
