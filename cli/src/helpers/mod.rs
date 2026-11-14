@@ -43,8 +43,6 @@ pub use updater::*;
 use snarkos_node::network::NodeType;
 
 use anyhow::Result;
-#[cfg(target_family = "unix")]
-use anyhow::ensure;
 use colored::*;
 
 /// Raises the soft open-files limit of this process to `minimum`, if it is lower and the hard limit allows it.
@@ -74,7 +72,7 @@ pub fn raise_open_files_limit(minimum: u64) -> Result<()> {
     if limit > soft_limit {
         tracing::info!("Raised the open files limit from {soft_limit} to {limit}");
     }
-    ensure!(
+    anyhow::ensure!(
         limit >= minimum,
         "The open files limit ({limit}) for this process is below {minimum}, and its hard limit does not allow raising it. \
         Raise the hard limit to at least {minimum}. \

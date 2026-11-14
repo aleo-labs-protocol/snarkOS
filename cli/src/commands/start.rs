@@ -942,7 +942,6 @@ impl Start {
         }
 
         // Raise the open files limit of a node that opens the ledger.
-        // A validator does not start below the minimum, and a client only warns.
         #[cfg(target_family = "unix")]
         if (node_type.is_validator() || node_type.is_client())
             && let Err(err) = crate::helpers::raise_open_files_limit(MIN_NOFILES_LIMIT)
