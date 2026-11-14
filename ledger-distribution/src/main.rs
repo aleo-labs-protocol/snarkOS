@@ -21,7 +21,7 @@ extern crate tracing;
 use snarkos_ledger_distribution::{BlocksBucket, Bucket, LedgerReader, initialize_rest_server, sync_with_ledger};
 use snarkvm::{ledger::block::Block, prelude::*};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use dotenvy::dotenv;
 use std::{
     env,
@@ -39,15 +39,18 @@ use std::{
 fn open_ledger<N: Network>() -> Result<LedgerReader<N>> {
     let ledger_path = env::var("LEDGER_PATH").expect("LEDGER_PATH must be set");
     let secondary_path = env::var("LEDGER_SECONDARY_PATH").expect("LEDGER_SECONDARY_PATH must be set");
-    #[cfg(unix)]
+    #[cfg(target_family = "unix")]
     raise_open_files_limit();
     info!("Reading the ledger at '{ledger_path}'");
-    LedgerReader::open(ledger_path, secondary_path)
+    LedgerReader::open(ledger_path, secondary_path).with_context(|| {
+        "Failed to open the ledger. A read-only instance keeps every table file open, so the open files limit \
+        must be above the number of `*.sst` files in LEDGER_PATH, e.g. with `LimitNOFILE` in a systemd service."
+    })
 }
 
 /// Raises the soft open-files limit of this process as far as the hard limit allows, since a read-only
 /// instance keeps every table file of the ledger open.
-#[cfg(unix)]
+#[cfg(target_family = "unix")]
 fn raise_open_files_limit() {
     match rlimit::increase_nofile_limit(u64::MAX) {
         Ok(limit) => info!("The open files limit is {limit}"),
@@ -170,7 +173,7 @@ fn handle_ctrl_c(shutdown_started: Arc<AtomicBool>) {
     });
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, target_family = "unix"))]
 mod tests {
     use super::*;
 
@@ -185,9 +188,13 @@ mod tests {
         // Lowering a finite soft limit of this process does not fail.
         rlimit::Resource::NOFILE.set(soft_limit - 1, hard_limit).unwrap();
         raise_open_files_limit();
-        assert!(rlimit::Resource::NOFILE.get().unwrap().0 >= soft_limit);
+        let raised_limit = rlimit::Resource::NOFILE.get().unwrap().0;
+        assert!(raised_limit >= soft_limit);
+        // On Linux, the soft limit reaches the hard limit. Elsewhere, a per-process cap may stop it lower.
+        #[cfg(target_os = "linux")]
+        assert_eq!(raised_limit, hard_limit);
 
-        // Restore the limits of this process.
+        // Setting the original limits again does not fail.
         rlimit::Resource::NOFILE.set(soft_limit, hard_limit).unwrap();
     }
 }
