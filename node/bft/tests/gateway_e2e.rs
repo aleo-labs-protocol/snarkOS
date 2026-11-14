@@ -18,7 +18,7 @@ mod common;
 
 use crate::common::{
     CurrentNetwork,
-    primary::new_test_committee,
+    primary::shared_test_committee,
     test_peer::TestPeer,
     utils::{sample_gateway, sample_ledger, sample_storage},
 };
@@ -39,7 +39,7 @@ async fn new_test_gateway(
     num_nodes: u16,
     rng: &mut TestRng,
 ) -> (Vec<Account<CurrentNetwork>>, Gateway<CurrentNetwork>) {
-    let (accounts, committee) = new_test_committee(num_nodes, rng);
+    let (accounts, committee) = shared_test_committee(num_nodes, rng);
     let accounts_ = accounts.clone();
     let mut rng_ = TestRng::fixed(rng.random());
     let ledger = task::spawn_blocking(move || sample_ledger(&accounts_, &committee, &mut rng_)).await.unwrap();

@@ -21,7 +21,7 @@ mod common;
 use crate::common::{
     CurrentNetwork,
     TranslucentLedgerService,
-    primary::new_test_committee,
+    primary::shared_test_committee,
     utils::{sample_gateway, sample_ledger, sample_storage},
 };
 use snarkos_account::Account;
@@ -78,7 +78,7 @@ async fn new_test_gateways(
     n: usize,
     rng: &mut TestRng,
 ) -> (Vec<Account<CurrentNetwork>>, Vec<Gateway<CurrentNetwork>>) {
-    let (accounts, committee) = new_test_committee(COMMITTEE_SIZE, rng);
+    let (accounts, committee) = shared_test_committee(COMMITTEE_SIZE, rng);
     let accounts_ = accounts.clone();
     let mut rng_ = TestRng::fixed(rng.random());
     let ledger = task::spawn_blocking(move || sample_ledger(&accounts_, &committee, &mut rng_)).await.unwrap();
@@ -674,7 +674,7 @@ async fn an_initiator_with_a_truncated_genesis_hash_is_rejected() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_initiator_rejects_a_responder_with_a_different_genesis() {
     let mut rng = TestRng::default();
-    let (accounts, committee) = new_test_committee(COMMITTEE_SIZE, &mut rng);
+    let (accounts, committee) = shared_test_committee(COMMITTEE_SIZE, &mut rng);
 
     // Two chains with the same committee. The test genesis cache is keyed by the generator key, which
     // `sample_ledger` takes from the first account, so the second chain starts from another member.
