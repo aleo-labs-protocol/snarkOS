@@ -45,6 +45,9 @@ pub use primary::*;
 mod sync;
 pub use sync::*;
 
+#[cfg(test)]
+mod test_helpers;
+
 mod worker;
 pub use worker::*;
 
