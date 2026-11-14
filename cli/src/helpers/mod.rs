@@ -48,6 +48,7 @@ use colored::*;
 /// Raises the soft open-files limit of this process to `minimum`, if it is lower and the hard limit allows it.
 ///
 /// Returns an error if the limit stays below `minimum`.
+/// If the limit cannot be read or raised, prints a warning and returns `Ok`.
 #[cfg(target_family = "unix")]
 pub fn raise_open_files_limit(minimum: u64) -> Result<()> {
     let limits = rlimit::Resource::NOFILE
@@ -56,7 +57,7 @@ pub fn raise_open_files_limit(minimum: u64) -> Result<()> {
     let (soft_limit, limit) = match limits {
         Ok(limits) => limits,
         Err(err) => {
-            // Warn about unknown limit.
+            // Warn that the limit cannot be read or raised.
             let warning = [
                 format!("⚠️  Unable to check or raise the open files limit for this process due to {err}."),
                 format!("  • To ensure correct behavior of the node, please ensure it is at least {minimum}."),
@@ -74,8 +75,8 @@ pub fn raise_open_files_limit(minimum: u64) -> Result<()> {
     }
     anyhow::ensure!(
         limit >= minimum,
-        "The open files limit ({limit}) for this process is below {minimum}, and its hard limit does not allow raising it. \
-        Raise the hard limit to at least {minimum}. \
+        "The open files limit ({limit}) for this process is below {minimum}, and the hard limit, \
+        or `kern.maxfilesperproc` on macOS and FreeBSD, does not allow raising it. Raise it to at least {minimum}. \
         See the `ulimit -Hn` command, `/etc/security/limits.conf`, or `LimitNOFILE` for a systemd service."
     );
     Ok(())
@@ -145,5 +146,8 @@ mod tests {
         if hard_limit != rlimit::INFINITY {
             assert!(raise_open_files_limit(hard_limit + 1).is_err());
         }
+
+        // Restore the limits of this process.
+        rlimit::Resource::NOFILE.set(soft_limit, hard_limit).unwrap();
     }
 }
