@@ -280,12 +280,76 @@ impl<N: Network> PriorityQueue<N> {
 mod tests {
     use super::*;
 
+    use snarkos_utilities::test_fixture::cached_fixture;
     use snarkvm::{
-        ledger::test_helpers::{sample_deployment_transaction, sample_execution_transaction_with_fee},
+        ledger::{
+            block::{Fee, Transition},
+            test_helpers,
+        },
         prelude::{MainnetV0, TestRng},
     };
 
+    use std::sync::OnceLock;
+
     type CurrentNetwork = MainnetV0;
+
+    /// Returns a sample execution transaction and a sample deployment transaction, both with a
+    /// public fee. Every call returns the same two transactions, whatever `rng` is.
+    ///
+    /// The samples are one fixture: snarkVM proves both fees against its sample genesis block, which
+    /// a process has to build first, at the cost of two more proofs.
+    fn samples(rng: &mut TestRng) -> &'static (Transaction<CurrentNetwork>, Transaction<CurrentNetwork>) {
+        static SAMPLES: OnceLock<(Transaction<CurrentNetwork>, Transaction<CurrentNetwork>)> = OnceLock::new();
+        SAMPLES.get_or_init(|| {
+            cached_fixture(
+                "transactions-queue-samples",
+                &[],
+                |(execution, deployment): &(Transaction<CurrentNetwork>, Transaction<CurrentNetwork>)| {
+                    let mut bytes = execution.to_bytes_le().unwrap();
+                    deployment.write_le(&mut bytes).unwrap();
+                    bytes
+                },
+                |mut bytes| Some((Transaction::read_le(&mut bytes).ok()?, Transaction::read_le(&mut bytes).ok()?)),
+                || {
+                    (
+                        test_helpers::sample_execution_transaction_with_fee(false, rng, 0),
+                        test_helpers::sample_deployment_transaction(2, 0, false, false, rng),
+                    )
+                },
+            )
+        })
+    }
+
+    /// Samples an execution transaction with an ID of its own.
+    ///
+    /// Only the commitment of the fee transition is sampled; the rest is the same for every call. The
+    /// fee proof is not made for that commitment and does not verify, which the queue never checks.
+    fn sample_execution_transaction(rng: &mut TestRng) -> Transaction<CurrentNetwork> {
+        let Transaction::Execute(_, _, execution, Some(fee)) = &samples(rng).0 else {
+            unreachable!("the sample is an execution with a fee")
+        };
+
+        let transition = fee.transition();
+        let transition = Transition::new(
+            *transition.program_id(),
+            *transition.function_name(),
+            transition.inputs().to_vec(),
+            transition.outputs().to_vec(),
+            *transition.tpk(),
+            Field::rand(rng),
+            *transition.scm(),
+        )
+        .unwrap();
+        let fee = Fee::from_unchecked(transition, fee.global_state_root(), fee.proof().cloned());
+
+        Transaction::from_execution(execution.as_ref().clone(), Some(fee)).unwrap()
+    }
+
+    /// Returns the sample deployment transaction, as snarkVM built it. Every call returns the same
+    /// transaction, whatever `rng` is.
+    fn sample_deployment_transaction(rng: &mut TestRng) -> Transaction<CurrentNetwork> {
+        samples(rng).1.clone()
+    }
 
     #[test]
     fn insert_and_pop_low_priority_transactions() {
@@ -294,7 +358,7 @@ mod tests {
         /* Executions */
 
         // Test low-priority execution transaction.
-        let execution_transaction = sample_execution_transaction_with_fee(false, &mut rng, 0);
+        let execution_transaction = sample_execution_transaction(&mut rng);
         let execution_id = execution_transaction.id();
         let zero_fee = U64::new(0);
 
@@ -316,7 +380,7 @@ mod tests {
         /* Deployments */
 
         // Test low-priority deployment transaction.
-        let deployment_transaction = sample_deployment_transaction(2, 0, false, false, &mut rng);
+        let deployment_transaction = sample_deployment_transaction(&mut rng);
         let deployment_id = deployment_transaction.id();
 
         assert!(!transactions_queue.contains(&deployment_id));
@@ -341,7 +405,7 @@ mod tests {
         /* Executions */
 
         // Test high-priority execution transaction.
-        let execution_transaction = sample_execution_transaction_with_fee(false, &mut rng, 0);
+        let execution_transaction = sample_execution_transaction(&mut rng);
         let execution_id = execution_transaction.id();
         let high_fee = U64::new(100);
 
@@ -363,7 +427,7 @@ mod tests {
         /* Deployments */
 
         // Test high-priority deployment transaction.
-        let deployment_transaction = sample_deployment_transaction(2, 0, false, false, &mut rng);
+        let deployment_transaction = sample_deployment_transaction(&mut rng);
         let deployment_id = deployment_transaction.id();
 
         assert!(!transactions_queue.contains(&deployment_id));
@@ -387,7 +451,7 @@ mod tests {
 
         let executions: Vec<_> = (0..10)
             .map(|_| {
-                let execution_transaction = sample_execution_transaction_with_fee(false, &mut rng, 0);
+                let execution_transaction = sample_execution_transaction(&mut rng);
                 (execution_transaction.id(), execution_transaction)
             })
             .collect();
@@ -441,7 +505,7 @@ mod tests {
 
         let executions: Vec<_> = (0..5)
             .map(|_| {
-                let execution_transaction = sample_execution_transaction_with_fee(false, &mut rng, 0);
+                let execution_transaction = sample_execution_transaction(&mut rng);
                 (execution_transaction.id(), execution_transaction)
             })
             .collect();
@@ -469,7 +533,7 @@ mod tests {
 
         let executions: Vec<_> = (0..2)
             .map(|_| {
-                let execution_transaction = sample_execution_transaction_with_fee(false, &mut rng, 0);
+                let execution_transaction = sample_execution_transaction(&mut rng);
                 (execution_transaction.id(), execution_transaction)
             })
             .collect();
@@ -492,7 +556,7 @@ mod tests {
 
         let executions: Vec<_> = (0..5)
             .map(|_| {
-                let execution_transaction = sample_execution_transaction_with_fee(false, &mut rng, 0);
+                let execution_transaction = sample_execution_transaction(&mut rng);
                 (execution_transaction.id(), execution_transaction)
             })
             .collect();
@@ -527,7 +591,7 @@ mod tests {
 
         let executions: Vec<_> = (0..4)
             .map(|_| {
-                let execution_transaction = sample_execution_transaction_with_fee(false, &mut rng, 0);
+                let execution_transaction = sample_execution_transaction(&mut rng);
                 (execution_transaction.id(), execution_transaction)
             })
             .collect();
