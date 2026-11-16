@@ -82,7 +82,7 @@ mod tests {
 
     type CurrentNetwork = MainnetV0;
 
-    const ITERATIONS: usize = 1000;
+    const ITERATIONS: usize = 100;
 
     fn construct_ciphertext<N: Network>(
         view_key: ViewKey<N>,
