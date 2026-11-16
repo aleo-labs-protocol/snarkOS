@@ -13,88 +13,162 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{BlocksBucket, LedgerReader, NUM_BLOCKS_PER_CHUNK};
+use crate::{BlocksBucket, LatestState, LedgerReader, NUM_BLOCKS_PER_CHUNK};
 use snarkvm::{ledger::block::Block, prelude::*};
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    ops::ControlFlow,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
-/// Detect and recover from a blockchain rollback.
-async fn detect_and_recover_from_rollback<N: Network>(
+/// Returns `true` if the ledger, whose latest block is at `latest_ledger_height`, is past the
+/// chunk starting at `start_height`, which is when that chunk is uploaded.
+fn ledger_has_chunk(start_height: u32, latest_ledger_height: u32) -> bool {
+    start_height + NUM_BLOCKS_PER_CHUNK <= latest_ledger_height
+}
+
+/// Uploads a chunk of blocks, and checks that it reads back the same.
+async fn upload_chunk<N: Network>(blocks_bucket: &BlocksBucket<N>, blocks: &[Block<N>]) -> Result<()> {
+    blocks_bucket.insert_blocks(blocks).await?;
+    debug!("Checking that the bucket and ledger blocks match...");
+    ensure!(
+        blocks_bucket.get_blocks(blocks[0].height()).await? == blocks,
+        "The blocks from the bucket do not match the blocks from the ledger"
+    );
+    Ok(())
+}
+
+/// Writes `latest.json` for a bucket whose chunks end with `end_block`, or removes it if the
+/// bucket has no chunks.
+async fn write_latest_state<N: Network>(blocks_bucket: &BlocksBucket<N>, end_block: Option<&Block<N>>) -> Result<()> {
+    match end_block {
+        Some(block) => blocks_bucket.update_latest_state(block).await,
+        None => blocks_bucket.remove_latest_state().await,
+    }
+}
+
+/// Repairs what an interrupted pass or a rollback of the ledger leaves in the bucket.
+///
+/// It looks down from the bucket's highest chunk file for the highest chunk that can be read and
+/// matches the ledger. The chunks above that one are stale or broken, and the upload loop replaces
+/// them in place, once `latest.json` no longer points at them. A chunk below it that is missing,
+/// or missing either of its files, is written from the ledger. No chunk is removed.
+///
+/// A bucket that goes past the ledger is left as it is until the ledger catches up. If no chunk
+/// above the first one matches, a complete first chunk that starts with another block than
+/// `genesis`, or cannot be read, is an error, and the bucket is left as it is. With `dry_run`, the
+/// first repair needed is reported instead of made.
+///
+/// Returns the last block of the chunks that match the ledger, or `None` if none does, or `Break`
+/// if the pass stops here.
+async fn reconcile_bucket<N: Network>(
     blocks_bucket: &BlocksBucket<N>,
     ledger: &LedgerReader<N>,
-    latest_bucket_height: u32,
+    genesis: &Block<N>,
+    latest_ledger_height: u32,
+    shutdown_started: &AtomicBool,
     dry_run: bool,
-) -> Result<u32> {
-    if latest_bucket_height == 0 {
-        return Ok(0);
+) -> Result<ControlFlow<(), Option<Block<N>>>> {
+    let chunks = blocks_bucket.chunks().await?;
+    let Some(top_start) = chunks.last_key_value().map(|(start_height, _)| *start_height) else {
+        return Ok(ControlFlow::Continue(None));
+    };
+    let top_end = top_start + NUM_BLOCKS_PER_CHUNK;
+    if !ledger_has_chunk(top_start, latest_ledger_height) {
+        warn!(
+            "The bucket goes up to height {top_end}, past the ledger at height {latest_ledger_height}; waiting for the ledger"
+        );
+        return Ok(ControlFlow::Break(()));
     }
 
     info!("Checking for blockchain rollback...");
 
-    let mut current_height = latest_bucket_height;
-    let mut chunks_to_remove = Vec::new();
-
-    loop {
-        let chunk_start = current_height.saturating_sub(NUM_BLOCKS_PER_CHUNK);
-
-        let blocks = blocks_bucket.get_blocks(chunk_start).await?;
-        let bucket_block = blocks.last().unwrap().clone();
-        let bucket_block_height = bucket_block.height();
-        let ledger_block = ledger.get_block(bucket_block_height).await?;
-
-        if bucket_block.hash() == ledger_block.hash() {
-            info!("Found fork point at height {}", bucket_block_height);
-            break;
+    // The last block of the highest chunk that matches the ledger.
+    let mut end_block = None;
+    let mut end_height = top_end;
+    while end_height > 0 {
+        let start_height = end_height - NUM_BLOCKS_PER_CHUNK;
+        let files = chunks.get(&start_height).copied().unwrap_or_default();
+        if files.is_complete() {
+            let Some(blocks) = blocks_bucket.get_blocks_if_valid(start_height).await? else {
+                ensure!(start_height > 0, "The first chunk cannot be read, and no chunk above it matches the ledger");
+                end_height = start_height;
+                continue;
+            };
+            if start_height == 0 {
+                ensure!(blocks[0].hash() == genesis.hash(), "The bucket's first block is not the genesis block");
+            }
+            let bucket_block = blocks.into_iter().last().unwrap();
+            let ledger_block = ledger.get_block(bucket_block.height()).await?;
+            if bucket_block.hash() == ledger_block.hash() {
+                info!("Found fork point at height {}", bucket_block.height());
+                end_block = Some(bucket_block);
+                break;
+            }
+            warn!("Hash mismatch at height {}.", bucket_block.height());
+        } else {
+            warn!("The chunk at height {start_height} is incomplete ({files:?})");
         }
-
-        warn!("Hash mismatch at height {}.", bucket_block_height);
-        chunks_to_remove.push(chunk_start);
-        if chunk_start == 0 {
-            break;
-        }
-        current_height = chunk_start;
+        end_height = start_height;
     }
 
-    if chunks_to_remove.is_empty() {
-        return Ok(latest_bucket_height);
+    if end_height < top_end {
+        if dry_run {
+            warn!("DRY-RUN: latest bucket height would change from {top_end} to {end_height}");
+            return Ok(ControlFlow::Break(()));
+        }
+        // Lowered first, so that `latest.json` never points at a chunk being replaced.
+        write_latest_state(blocks_bucket, end_block.as_ref()).await?;
+        info!("New latest bucket height: {end_height}");
     }
 
-    let new_latest_height = if chunks_to_remove.contains(&0) { 0 } else { *chunks_to_remove.last().unwrap() };
+    for start_height in (0..end_height).step_by(NUM_BLOCKS_PER_CHUNK as usize) {
+        let files = chunks.get(&start_height).copied().unwrap_or_default();
+        if files.is_complete() {
+            continue;
+        }
+        warn!("The chunk at height {start_height} is incomplete ({files:?})");
+        if dry_run {
+            warn!("DRY-RUN: would upload it again");
+            return Ok(ControlFlow::Break(()));
+        }
+        if shutdown_started.load(Ordering::Relaxed) {
+            info!("Shutting down the fast sync server.");
+            return Ok(ControlFlow::Break(()));
+        }
+        let blocks = ledger.get_blocks(start_height, start_height + NUM_BLOCKS_PER_CHUNK).await?;
+        upload_chunk(blocks_bucket, &blocks).await?;
+    }
 
+    Ok(ControlFlow::Continue(end_block))
+}
+
+/// Makes `latest.json` describe a bucket whose chunks end with `end_block`, or removes it if the
+/// bucket has no chunks.
+async fn reconcile_latest_state<N: Network>(
+    blocks_bucket: &BlocksBucket<N>,
+    end_block: Option<&Block<N>>,
+    dry_run: bool,
+) -> Result<()> {
+    let expected = end_block.map(LatestState::from_block);
+    if blocks_bucket.latest_state_is(expected.as_ref()).await? {
+        return Ok(());
+    }
+
+    warn!("latest.json should be {expected:?}");
     if dry_run {
-        warn!("DRY-RUN: would remove {} stale chunk(s):", chunks_to_remove.len());
-        for chunk_start in chunks_to_remove.iter().rev() {
-            let chunk_end = chunk_start + NUM_BLOCKS_PER_CHUNK;
-            warn!("  - v0/{}.{}.blocks", chunk_start, chunk_end);
-        }
-        warn!("DRY-RUN: latest bucket height would change from {} to {}", latest_bucket_height, new_latest_height);
-        return Ok(latest_bucket_height);
+        warn!("DRY-RUN: would correct it");
+        return Ok(());
     }
-
-    info!("Removing {} stale chunk(s)...", chunks_to_remove.len());
-    for chunk_start in chunks_to_remove.iter().rev() {
-        blocks_bucket.remove_blocks_chunk(*chunk_start).await?;
-    }
-
-    if new_latest_height > 0 {
-        info!("New latest bucket height: {}", new_latest_height);
-    }
-
-    if new_latest_height > 0 {
-        let blocks = blocks_bucket.get_blocks(new_latest_height.saturating_sub(NUM_BLOCKS_PER_CHUNK)).await?;
-        let latest_block = blocks[blocks.len() - 1].clone();
-        blocks_bucket.update_latest_state(&latest_block).await?;
-    }
-
-    Ok(new_latest_height)
+    write_latest_state(blocks_bucket, end_block).await
 }
 
 /// Sync the bucket blocks with the ledger.
 ///
-/// `genesis` is the block the bucket must start with when it is empty.
+/// `genesis` is the block the ledger and the bucket must start with.
 pub async fn sync_with_ledger<N: Network>(
     blocks_bucket: &BlocksBucket<N>,
     ledger: &LedgerReader<N>,
@@ -105,37 +179,25 @@ pub async fn sync_with_ledger<N: Network>(
     // Read the blocks the node has written since the last pass.
     ledger.catch_up().await?;
 
+    ensure!(ledger.get_block(0).await?.hash() == genesis.hash(), "The ledger's first block is not the genesis block");
+
     info!("Fetching latest ledger height...");
     // Get the latest height of the ledger.
     let latest_ledger_height = ledger.latest_height().await?;
 
-    info!("Fetching latest bucket height...\n");
-    // Get the latest height of the stored blocks.
-    let latest_bucket_height = blocks_bucket.latest_height().await?;
-
-    info!("Latest bucket height {}, latest ledger height {}\n", latest_bucket_height, latest_ledger_height);
-
-    // Detect and recover from any blockchain rollback
-    let latest_bucket_height =
-        detect_and_recover_from_rollback::<N>(blocks_bucket, ledger, latest_bucket_height, dry_run).await?;
-
-    info!("Latest bucket height after rollback check: {}\n", latest_bucket_height);
+    info!("Checking the bucket against the ledger...\n");
+    let ControlFlow::Continue(end_block) =
+        reconcile_bucket(blocks_bucket, ledger, genesis, latest_ledger_height, &shutdown_started, dry_run).await?
+    else {
+        return Ok(());
+    };
 
     // Update the blocks bucket with the latest blocks from the ledger.
-    let mut start_height = latest_bucket_height;
-    ensure!(
-        start_height.is_multiple_of(NUM_BLOCKS_PER_CHUNK),
-        "The latest block height must be a multiple of {NUM_BLOCKS_PER_CHUNK}"
-    );
+    let mut start_height = end_block.as_ref().map_or(0, |block| block.height() + 1);
+    info!("Latest bucket height {}, latest ledger height {}\n", start_height, latest_ledger_height);
 
-    // Fetch the latest chunk of blocks from the bucket.
-    let mut latest_block_in_bucket = match start_height {
-        0 => genesis.clone(),
-        height => {
-            let blocks = blocks_bucket.get_blocks(height.saturating_sub(NUM_BLOCKS_PER_CHUNK)).await?;
-            blocks[blocks.len() - 1].clone()
-        }
-    };
+    // The last block in the bucket, or the genesis block the first chunk must start with.
+    let mut latest_block_in_bucket = end_block.unwrap_or_else(|| genesis.clone());
 
     info!("Uploading blocks to bucket...\n");
     // Upload the blocks chunks to the S3 bucket.
@@ -144,7 +206,7 @@ pub async fn sync_with_ledger<N: Network>(
         // Fetch the end height of the block range.
         let end_height = start_height + NUM_BLOCKS_PER_CHUNK;
 
-        if end_height > latest_ledger_height {
+        if !ledger_has_chunk(start_height, latest_ledger_height) {
             info!(
                 "Block bucket is up to date with the ledger. (To the closest block chunk of {})",
                 NUM_BLOCKS_PER_CHUNK
@@ -177,13 +239,7 @@ pub async fn sync_with_ledger<N: Network>(
         // Set the last block of this chunk (for comparison with the next chunk).
         latest_block_in_bucket = blocks[blocks.len() - 1].clone();
 
-        // Insert the blocks into the bucket.
-        blocks_bucket.insert_blocks(&blocks).await?;
-
-        // Check that the inserted blocks are correct.
-        let blocks_from_bucket = blocks_bucket.get_blocks(start_height).await?;
-        debug!("Checking that the bucket and ledger blocks match...");
-        ensure!(blocks == blocks_from_bucket, "The blocks from the bucket do not match the blocks from the ledger");
+        upload_chunk(blocks_bucket, &blocks).await?;
 
         // Update the latest state.
         blocks_bucket.update_latest_state(&latest_block_in_bucket).await?;
@@ -212,5 +268,5 @@ pub async fn sync_with_ledger<N: Network>(
         }
     }
 
-    Ok(())
+    reconcile_latest_state(blocks_bucket, (start_height > 0).then_some(&latest_block_in_bucket), dry_run).await
 }
