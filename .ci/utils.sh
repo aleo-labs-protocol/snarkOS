@@ -696,123 +696,59 @@ function wait_for_stable_consensus_version() {
 }
 
 ########################################
-# Consensus version probing helpers
+# Consensus version schedule helpers
 ########################################
 
-# Arrays to track temporary probe nodes (separate from main test nodes)
-declare -a PROBE_PIDS
-
-# Stop all probe nodes
-function stop_probe_nodes() {
-  log "Stopping ${#PROBE_PIDS[@]} probe node(s)..."
-  for pid in "${PROBE_PIDS[@]}"; do
-    if kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" 2>/dev/null || true
-    fi
-  done
-  for pid in "${PROBE_PIDS[@]}"; do
-    wait "$pid" 2>/dev/null || true
-  done
-  PROBE_PIDS=()
-}
-
-# Start a temporary devnet with the given binary, wait for consensus to stabilize,
-# and return the stable consensus version and block height.
-# Output format: "consensus_version block_height"
+# Print the consensus version that a devnet of the given binary settles on, and the block height
+# at which that version activates, as "consensus_version activation_height".
+#
+# Both are read from the default consensus version schedule of the binary, which the REST API
+# of a single node serves before the node has any peers.
+#
+# Arguments:
+#   - bin: the snarkos binary to query
+#   - label: names the log file of the node
 #
 # Required variables (must be set before calling):
-#   - total_validators: number of validators to start
 #   - network_id: network ID (0=mainnet, 1=testnet, 2=canary)
 #   - network_name: network name string
 #   - log_dir: directory for log files
-function probe_stable_consensus_version() {
-  local bin="$1"
-  local probe_log_prefix
-  probe_log_prefix="$log_dir/probe-$(basename "$bin")"
+function query_default_consensus_version() {
+  local bin=$1
+  local label=$2
+  local max_wait=120
 
-  log "Probing stable consensus version using $bin..."
+  "$bin" clean --dev=0 "--network=$network_id" >/dev/null 2>&1 || true
 
-  # Clean up any existing data first
-  for node_index in $(seq 0 $((total_validators-1))); do
-    "$bin" clean "--dev=$node_index" "--network=$network_id" >/dev/null 2>&1 || true
-  done
+  # A node that is built for a test network serves the schedule in CONSENSUS_VERSION_HEIGHTS
+  # in place of its default one.
+  env -u CONSENSUS_VERSION_HEIGHTS "$bin" start --nodisplay "--network=$network_id" --verbosity=1 \
+    --dev=0 --client "--logfile=$log_dir/consensus-version-$label.log" >/dev/null 2>&1 &
+  local pid=$!
 
-  # Start all validator nodes with the probe binary
-  PROBE_PIDS=()
-  for node_index in $(seq 0 $((total_validators-1))); do
-    local probe_log="${probe_log_prefix}-validator-${node_index}.log"
-    
-    # Build trusted validators list
-    local trusted_validators=""
-    for ((peer_index = 0; peer_index < total_validators; peer_index++)); do
-      if [ "$peer_index" -ne "$node_index" ]; then
-        if [ -n "$trusted_validators" ]; then
-          trusted_validators+=","
-        fi
-        trusted_validators+="127.0.0.1:$((5000+peer_index))"
-      fi
-    done
-
-    # Hide node output from stdout
-    "$bin" start --nodisplay "--network=$network_id" "--verbosity=1" \
-      "--dev=$node_index" "--dev-num-validators=$total_validators" \
-      --validator "--logfile=$probe_log" "--validators=$trusted_validators" >/dev/null 2>&1 &
-    PROBE_PIDS[node_index]=$!
+  # Versions that are not scheduled have a height of `u32::MAX`, and are never reached.
+  local filter='[.consensus_heights[] | select(. != 4294967295)] | "\(length) \(last)"'
+  local result=""
+  local start
+  start=$(now)
+  while (( $(elapsed_since "$start") < max_wait )) && kill -0 "$pid" 2>/dev/null; do
+    if result=$(curl -s --max-time 5 "http://$localhost:3030/v2/$network_name/version" | jq -er "$filter" 2>/dev/null); then
+      break
+    fi
+    result=""
     sleep 1
   done
 
-  # Wait for nodes to become ready
-  log "Waiting for probe nodes to become ready..."
-  local max_wait=120
-  local start
-  start=$(now)
-  
-  while (( $(elapsed_since "$start") < max_wait )); do
-    local all_ready=true
-    for node_index in $(seq 0 $((total_validators-1))); do
-      local port=$((3030 + node_index))
-      if ! curl -s "http://$localhost:$port/v2/$network_name/block/height/latest" >/dev/null 2>&1; then
-        all_ready=false
-        break
-      fi
-    done
-    if $all_ready; then
-      log "All probe nodes ready after $(elapsed_since "$start")s"
-      break
-    fi
-    sleep 2
-  done
+  kill -9 "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  "$bin" clean --dev=0 "--network=$network_id" >/dev/null 2>&1 || true
 
-  if (( $(elapsed_since "$start") >= max_wait )); then
-    log "ERROR: Probe nodes did not become ready within ${max_wait}s"
-    stop_probe_nodes
+  if [[ ! "$result" =~ ^[0-9]+\ [0-9]+$ ]]; then
+    log "ERROR: $bin did not serve its consensus version schedule (see $log_dir/consensus-version-$label.log)"
     return 1
   fi
 
-  # Wait for consensus version to stabilize
-  log "Waiting for consensus version to stabilize..."
-  if ! wait_for_stable_consensus_version 0 "$network_name"; then
-    log "ERROR: Consensus version did not stabilize"
-    stop_probe_nodes
-    return 1
-  fi
-
-  # Get the stable consensus version and current height
-  local stable_consensus_version
-  local stable_height
-  stable_consensus_version=$(get_consensus_version 0 "$network_name")
-  stable_height=$(get_block_height 0 "$network_name")
-
-  log "Probe complete: consensus_version=$stable_consensus_version, height=$stable_height"
-
-  # Stop and clean up probe nodes
-  stop_probe_nodes
-
-  for node_index in $(seq 0 $((total_validators-1))); do
-    "$bin" clean "--dev=$node_index" "--network=$network_id" >/dev/null 2>&1 || true
-  done
-
-  echo "$stable_consensus_version $stable_height"
+  echo "$result"
 }
 
 ########################################

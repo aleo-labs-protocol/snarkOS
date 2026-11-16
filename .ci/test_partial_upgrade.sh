@@ -4,8 +4,8 @@
 # Partial network upgrade test:
 #
 # 1. Download latest snarkOS release source from GitHub and build it.
-# 2. Probe stable consensus versions from both binaries by spawning temporary
-#    devnets and waiting for consensus to stabilize.
+# 2. Query the latest consensus version of both binaries, and the height at which
+#    that of the current binary activates, from the REST API of a single node of each.
 # 3. Sanity check: If the consensus version is unchanged between the release
 #    and current binaries, return early with "success".
 # 4. Start the devnet with latest release binaries.
@@ -86,7 +86,6 @@ declare -a PIDS
 # Handler that stops all nodes on shutdown.
 # shellcheck disable=SC2329
 exit_handler() {
-  stop_probe_nodes || true
   stop_nodes || true
 }
 
@@ -198,19 +197,15 @@ log "WAIT_BETWEEN_UPGRADES=${WAIT_BETWEEN_UPGRADES}"
 # 1. Build release snarkos once.
 download_and_build_latest_snarkos 0
 
-# 2. Probe stable consensus versions from both binaries.
-# We spawn temporary devnets and wait for consensus to stabilize to determine
-# the latest consensus version and its activation height.
+# 2. Query the latest consensus version of both binaries, and the height at which
+# that of the current binary activates.
 
-log "Probing stable consensus version from current binary..."
-current_probe_result=$(probe_stable_consensus_version "$SNARKOS_CURRENT_BIN")
-current_consensus_version=$(echo "$current_probe_result" | awk '{print $1}')
-new_consensus_height=$(echo "$current_probe_result" | awk '{print $2}')
+current_schedule=$(query_default_consensus_version "$SNARKOS_CURRENT_BIN" current)
+read -r current_consensus_version new_consensus_height <<< "$current_schedule"
 log "Current binary: consensus_version=$current_consensus_version, activation_height=$new_consensus_height"
 
-log "Probing stable consensus version from release binary..."
-release_probe_result=$(probe_stable_consensus_version "$SNARKOS_RELEASE_BIN")
-release_consensus_version=$(echo "$release_probe_result" | awk '{print $1}')
+release_schedule=$(query_default_consensus_version "$SNARKOS_RELEASE_BIN" release)
+read -r release_consensus_version _ <<< "$release_schedule"
 log "Release binary: consensus_version=$release_consensus_version"
 
 # 3. Sanity check: Verify that the consensus version actually changes.
