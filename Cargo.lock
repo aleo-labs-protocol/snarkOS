@@ -80,7 +80,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7c26e03c99bac238b3454ec6c654bc066a0e4e7eae00608ec76c2279bc8f2cf"
 dependencies = [
  "aleo-std-profiler",
- "aleo-std-storage",
  "aleo-std-time",
  "aleo-std-timed",
  "aleo-std-timer",
@@ -92,16 +91,6 @@ name = "aleo-std-profiler"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "64476704cd7d71c43623839197bea87e477cfa03006853328fd5c9e07d8f48cc"
-
-[[package]]
-name = "aleo-std-storage"
-version = "1.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67efc024835a2e9c648b300c2fac67856d3f99897e4cb02a710cdf2842ed72e9"
-dependencies = [
- "dirs",
- "tempfile",
-]
 
 [[package]]
 name = "aleo-std-time"
@@ -5401,7 +5390,6 @@ dependencies = [
 name = "snarkos-cli"
 version = "4.13.0"
 dependencies = [
- "aleo-std",
  "anstyle",
  "anyhow",
  "base64 0.23.1",
@@ -5458,7 +5446,6 @@ dependencies = [
 name = "snarkos-ledger-distribution"
 version = "4.13.0"
 dependencies = [
- "aleo-std",
  "anyhow",
  "async-trait",
  "axum",
@@ -5531,7 +5518,6 @@ dependencies = [
 name = "snarkos-node-bft"
 version = "4.13.0"
 dependencies = [
- "aleo-std",
  "anyhow",
  "async-recursion",
  "async-trait",
@@ -5626,7 +5612,6 @@ dependencies = [
 name = "snarkos-node-bft-storage-service"
 version = "4.13.0"
 dependencies = [
- "aleo-std",
  "anyhow",
  "bytes",
  "indexmap 2.14.2",
@@ -5663,7 +5648,6 @@ dependencies = [
 name = "snarkos-node-consensus"
 version = "4.13.0"
 dependencies = [
- "aleo-std",
  "anyhow",
  "cfg-if",
  "indexmap 2.14.2",
@@ -5727,7 +5711,6 @@ dependencies = [
 name = "snarkos-node-rest"
 version = "4.13.0"
 dependencies = [
- "aleo-std",
  "anyhow",
  "axum",
  "axum-extra",

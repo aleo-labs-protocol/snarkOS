@@ -17,6 +17,7 @@ use super::{DEFAULT_ENDPOINT, Developer, ParsedQuery};
 use crate::{commands::StoreFormat, helpers::args::parse_private_key};
 use snarkvm::{
     console::network::Network,
+    ledger::store::StorageMode,
     prelude::{
         Address,
         Locator,
@@ -26,7 +27,6 @@ use snarkvm::{
     },
 };
 
-use aleo_std::StorageMode;
 use anyhow::Result;
 use clap::{Parser, builder::NonEmptyStringValueParser};
 use std::str::FromStr;

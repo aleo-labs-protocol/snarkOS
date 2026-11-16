@@ -19,9 +19,11 @@ use snarkos_account::Account;
 use snarkos_node::{Client, Prover, Validator, rest::RestVerificationLimits};
 use snarkos_utilities::{NodeDataDir, SignalHandler};
 
-use snarkvm::prelude::{MainnetV0 as CurrentNetwork, store::helpers::memory::ConsensusMemory};
+use snarkvm::prelude::{
+    MainnetV0 as CurrentNetwork,
+    store::{StorageMode, helpers::memory::ConsensusMemory},
+};
 
-use aleo_std::StorageMode;
 use std::str::FromStr;
 
 pub async fn client() -> Client<CurrentNetwork, ConsensusMemory<CurrentNetwork>> {

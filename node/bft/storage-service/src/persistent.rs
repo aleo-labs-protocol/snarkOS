@@ -18,19 +18,21 @@ use snarkvm::{
     ledger::{
         committee::Committee,
         narwhal::{BatchHeader, Transmission, TransmissionID},
-        store::helpers::{
-            Map,
-            MapRead,
-            rocksdb::{
-                DataMap,
-                internal::{self, BFTMap, Database, MapID},
+        store::{
+            StorageMode,
+            helpers::{
+                Map,
+                MapRead,
+                rocksdb::{
+                    DataMap,
+                    internal::{self, BFTMap, Database, MapID},
+                },
             },
         },
     },
     prelude::{Field, Network, Result},
 };
 
-use aleo_std::StorageMode;
 use anyhow::anyhow;
 use indexmap::{IndexSet, indexset};
 #[cfg(feature = "locktick")]

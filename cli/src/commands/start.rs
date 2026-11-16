@@ -38,14 +38,13 @@ use snarkvm::{
     ledger::{
         block::Block,
         committee::{Committee, MIN_DELEGATOR_STAKE, MIN_VALIDATOR_STAKE},
-        store::{ConsensusStore, helpers::memory::ConsensusMemory},
+        store::{ConsensusStore, StorageMode, aleo_dir, aleo_ledger_dir, helpers::memory::ConsensusMemory},
     },
     prelude::{FromBytes, Itertools, ToBits, ToBytes},
     synthesizer::VM,
     utilities::to_bytes_le,
 };
 
-use aleo_std::{StorageMode, aleo_dir, aleo_ledger_dir};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use base64::prelude::{BASE64_STANDARD, Engine};
 use clap::{Parser, builder::RangedU64ValueParser};

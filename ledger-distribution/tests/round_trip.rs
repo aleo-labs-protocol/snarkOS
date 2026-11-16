@@ -26,6 +26,7 @@ use snarkvm::{
         store::{
             BlockStorage,
             ConsensusStore,
+            StorageMode,
             helpers::{
                 memory::ConsensusMemory,
                 rocksdb::{BlockDB, ConsensusDB},
@@ -37,7 +38,6 @@ use snarkvm::{
     utilities::TestRng,
 };
 
-use aleo_std::StorageMode;
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::conn::auto::Builder as ConnBuilder,
