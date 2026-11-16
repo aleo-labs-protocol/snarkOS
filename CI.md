@@ -64,6 +64,10 @@ passed for a required check, and a fleet job is skipped when
 `start-cpu-runners` fails or the pull request comes from a fork; `ci-ok`
 fails in both cases.
 
+A pull request that changes only Markdown files starts no run, so it gets no
+`ci-ok` check. A push runs everything. Where a branch rule requires `ci-ok`,
+such a pull request cannot merge until a workflow reports that check for it.
+
 ## Test groups
 
 Each line of a `test` entry is one cargo build. `cargo test -p a -p b` unifies

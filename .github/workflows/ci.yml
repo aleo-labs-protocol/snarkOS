@@ -2,6 +2,9 @@ name: CI
 
 on:
   pull_request:
+    # A pull request that changes only Markdown starts no run.
+    paths-ignore:
+      - '**.md'
   push:
     branches: [staging, canary, testnet, mainnet]
   workflow_dispatch:
