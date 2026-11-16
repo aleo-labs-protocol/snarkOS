@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::helpers::dev::get_development_key;
+use crate::{commands::ApiVersion, helpers::dev::get_development_key};
 
 use snarkos_utilities::NodeDataDir;
 
@@ -23,8 +23,9 @@ use snarkvm::{
 };
 
 use aleo_std::aleo_dir;
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
 use clap::builder::RangedU64ValueParser;
+use snarkos_node_rest::{API_VERSION_V1, API_VERSION_V2};
 use std::{path::PathBuf, str::FromStr};
 use ureq::http::{Uri, uri};
 
@@ -32,8 +33,15 @@ pub(crate) fn network_id_parser() -> RangedU64ValueParser<u16> {
     RangedU64ValueParser::<u16>::new().range((MainnetV0::ID as u64)..=(CanaryV0::ID as u64))
 }
 
-/// Make sure a proper scheme (http or https) is set for the endpoint.
+/// Make sure a proper scheme (http or https) is set for the endpoint, and that it names an API
+/// version.
+///
+/// An endpoint whose path does not end in `v1` or `v2` gets `/v2` appended: the unversioned
+/// routes of a snarkOS node serve the deprecated v1 API.
+///
+/// An endpoint with a query string is rejected, since request routes are appended to its path.
 pub(crate) fn prepare_endpoint(endpoint: Uri) -> Result<Uri> {
+    ensure!(endpoint.query().is_none(), "The endpoint URL must not have a query string");
     let mut parts = endpoint.into_parts();
 
     if parts.scheme.is_none() {
@@ -41,12 +49,24 @@ pub(crate) fn prepare_endpoint(endpoint: Uri) -> Result<Uri> {
         parts.scheme = Some(uri::Scheme::HTTP);
     }
 
-    if parts.path_and_query.is_none() {
-        parts.path_and_query = Some(uri::PathAndQuery::from_static("/"));
+    let path = parts.path_and_query.as_ref().map(|pq| pq.path()).unwrap_or("/").trim_end_matches('/').to_owned();
+    if api_version_of(&path).is_none() {
+        parts.path_and_query = Some(
+            format!("{path}/{API_VERSION_V2}/").parse().with_context(|| "Invalid endpoint URL with an API version")?,
+        );
     }
 
     // Given that the input URI is valid and the scheme we assign is valid, this should never fail.
     Uri::from_parts(parts).with_context(|| "Invalid endpoint URL")
+}
+
+/// Returns the API version named by the last segment of a URL path, if any.
+pub(crate) fn api_version_of(path: &str) -> Option<ApiVersion> {
+    match path.trim_end_matches('/').rsplit('/').next() {
+        Some(API_VERSION_V1) => Some(ApiVersion::V1),
+        Some(API_VERSION_V2) => Some(ApiVersion::V2),
+        _ => None,
+    }
 }
 
 /// Fetch the private key, either from the commandline or from a file.
@@ -103,8 +123,24 @@ mod tests {
 
     #[test]
     fn test_prepare_endpoint() {
-        let before = Uri::try_from("localhost:3030").unwrap();
-        let after = prepare_endpoint(before).unwrap();
-        assert_eq!(after.to_string(), "http://localhost:3030/");
+        // No version: v2 is requested explicitly, since the unversioned routes serve the
+        // deprecated v1 API.
+        for (before, after) in [
+            ("localhost:3030", "http://localhost:3030/v2/"),
+            ("http://localhost:3030/", "http://localhost:3030/v2/"),
+            ("https://example.com/a/prefix", "https://example.com/a/prefix/v2/"),
+            // An explicit version is kept as given.
+            ("http://localhost:3030/v1", "http://localhost:3030/v1"),
+            // A path that merely ends in the same characters is not a version.
+            ("https://example.com/dev2", "https://example.com/dev2/v2/"),
+            ("https://api.explorer.provable.com/v2", "https://api.explorer.provable.com/v2"),
+        ] {
+            let prepared = prepare_endpoint(Uri::try_from(before).unwrap()).unwrap();
+            assert_eq!(prepared.to_string(), after, "unexpected endpoint for {before}");
+        }
+
+        for endpoint in ["http://localhost:3030/?foo=bar", "http://localhost:3030/v2?foo=bar"] {
+            assert!(prepare_endpoint(Uri::try_from(endpoint).unwrap()).is_err(), "accepted {endpoint}");
+        }
     }
 }

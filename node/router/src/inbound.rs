@@ -251,6 +251,8 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
 
                 // Do not process unconfirmed solutions if the node is too far behind.
                 if !self.is_within_sync_leniency() {
+                    #[cfg(feature = "metrics")]
+                    metrics::increment_counter_1(metrics::router::UNCONFIRMED_SOLUTIONS_INBOUND, "outcome", "syncing");
                     trace!("Skipped processing unconfirmed solution '{}' (node is syncing)", message.solution_id);
                     return Ok(true);
                 }
@@ -259,6 +261,8 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
                 let seen_before = self.router().cache.insert_inbound_solution(peer_ip, message.solution_id).is_some();
                 // Determine whether to propagate the solution.
                 if seen_before {
+                    #[cfg(feature = "metrics")]
+                    metrics::increment_counter_1(metrics::router::UNCONFIRMED_SOLUTIONS_INBOUND, "outcome", "seen");
                     trace!("Skipping 'UnconfirmedSolution' from '{peer_ip}'");
                     return Ok(true);
                 }
@@ -273,6 +277,8 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
                 if message.solution_id != solution.id() {
                     bail!("Peer '{peer_ip}' is not following the 'UnconfirmedSolution' protocol")
                 }
+                #[cfg(feature = "metrics")]
+                metrics::increment_counter_1(metrics::router::UNCONFIRMED_SOLUTIONS_INBOUND, "outcome", "dispatched");
                 // Handle the unconfirmed solution.
                 match self.unconfirmed_solution(peer_ip, serialized, solution).await {
                     true => Ok(true),
@@ -282,6 +288,12 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
             Message::UnconfirmedTransaction(message) => {
                 // Do not process unconfirmed solutions if the node is too far behind.
                 if !self.is_within_sync_leniency() {
+                    #[cfg(feature = "metrics")]
+                    metrics::increment_counter_1(
+                        metrics::router::UNCONFIRMED_TRANSACTIONS_INBOUND,
+                        "outcome",
+                        "syncing",
+                    );
                     trace!("Skipped processing unconfirmed transaction '{}' (node is syncing)", message.transaction_id);
                     return Ok(true);
                 }
@@ -290,6 +302,8 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
                     self.router().cache.insert_inbound_transaction(peer_ip, message.transaction_id).is_some();
                 // Determine whether to propagate the transaction.
                 if seen_before {
+                    #[cfg(feature = "metrics")]
+                    metrics::increment_counter_1(metrics::router::UNCONFIRMED_TRANSACTIONS_INBOUND, "outcome", "seen");
                     trace!("Skipping 'UnconfirmedTransaction' from '{peer_ip}'");
                     return Ok(true);
                 }
@@ -304,6 +318,12 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
                 if message.transaction_id != transaction.id() {
                     bail!("Peer '{peer_ip}' is not following the 'UnconfirmedTransaction' protocol")
                 }
+                #[cfg(feature = "metrics")]
+                metrics::increment_counter_1(
+                    metrics::router::UNCONFIRMED_TRANSACTIONS_INBOUND,
+                    "outcome",
+                    "dispatched",
+                );
                 // Handle the unconfirmed transaction.
                 match self.unconfirmed_transaction(peer_ip, serialized, transaction).await {
                     true => Ok(true),

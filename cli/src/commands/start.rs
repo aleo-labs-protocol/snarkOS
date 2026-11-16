@@ -1005,7 +1005,7 @@ impl Start {
             NodeType::Validator => Node::new_validator(node_ip, self.bft, rest_ip, self.rest_rps, rest_verification_limits, history_api_url.clone(), self.history_json, account, &trusted_peers, &trusted_validators, genesis, cdn, storage_mode, node_data_dir, self.trusted_peers_only, self.auto_db_checkpoints.clone(), dev_txs, self.dev, dev_hotswap_config, self.proposal_spent_limit_multiplier, signal_handler.clone()).await,
             NodeType::Prover => Node::new_prover(node_ip, account, &trusted_peers, genesis, node_data_dir, self.trusted_peers_only, self.dev, signal_handler.clone()).await,
             NodeType::Client => Node::new_client(node_ip, rest_ip, self.rest_rps, rest_verification_limits, history_api_url.clone(), self.history_json, account, &trusted_peers, genesis, cdn, storage_mode, node_data_dir, self.trusted_peers_only, self.auto_db_checkpoints.clone(), self.dev, signal_handler.clone()).await,
-            NodeType::BootstrapClient => Node::new_bootstrap_client(node_ip, account, *genesis.header(), self.dev).await,
+            NodeType::BootstrapClient => Node::new_bootstrap_client(node_ip, account, *genesis.header(), genesis.hash(), self.dev).await,
         }?;
 
         if !self.nodisplay {
@@ -1013,6 +1013,11 @@ impl Start {
         }
 
         node.wait_for_signals(&signal_handler).await;
+
+        // Exit with an error, so that the node is not mistaken for one that was stopped on purpose.
+        if let Some(error) = signal_handler.error() {
+            bail!(error);
+        }
         Ok(())
     }
 

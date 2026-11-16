@@ -40,7 +40,7 @@ max_speed=0.0
 function sample_sync_speeds() {
   for ((client_index = 1; client_index <= num_clients; client_index++)); do
     port=$((3030 + client_index))
-    resp=$(curl -s "http://127.0.0.1:$port/$network_name/sync/status" || true)
+    resp=$(curl -s "http://127.0.0.1:$port/v2/$network_name/sync/status" || true)
 
     # Skip if response missing
     if [[ -z "$resp" ]]; then

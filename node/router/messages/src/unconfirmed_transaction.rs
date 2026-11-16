@@ -73,8 +73,9 @@ impl<N: Network> FromBytes for UnconfirmedTransaction<N> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz-helpers"))]
 pub mod prop_tests {
+    #![cfg_attr(not(test), allow(unused_imports))]
     use crate::{Transaction, UnconfirmedTransaction};
     use snarkvm::{
         ledger::{narwhal::Data, test_helpers::sample_fee_public_transaction},

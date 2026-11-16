@@ -5,7 +5,7 @@ set -eu
 # The directory in which you want backups to be stored.
 BASE_DIR="${HOME}/snarkOS/aleo_ledger_checkpoints/mainnet/"
 # The node REST endpoint to trigger backup creation from.
-ENDPOINT="http://localhost:3030/mainnet/db_backup"
+ENDPOINT="http://localhost:3030/v2/mainnet/db_backup"
 # The JWT to authenticate to the endpoint. You can either:
 # 1. Run a node with --nojwt, in which case this value will be safely ignored.
 # 2. Run a node with --jwt-secret and --jwt-timestamp, in which case the jwt will be stored in jwt_secret_{address}.txt

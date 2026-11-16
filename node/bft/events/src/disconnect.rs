@@ -45,6 +45,8 @@ pub enum DisconnectReason {
     InvalidChallengeRequest = 9,
     /// The peer is not an authorized validator.
     UnauthorizedValidator = 10,
+    /// The peer is on a network with a different genesis block.
+    GenesisMismatch = 11,
     /// The disconnect reason is not known. This is used for when the peers sends a disconnect reason that is not known to us.
     UnknownReason = u8::MAX,
 }
@@ -65,6 +67,7 @@ impl std::fmt::Display for DisconnectReason {
             Self::AlreadyConnectedToAleoAddress => write!(f, "already connected to the given Aleo address"),
             Self::InvalidChallengeRequest => write!(f, "invalid challenge request"),
             Self::UnauthorizedValidator => write!(f, "unauthorized validator"),
+            Self::GenesisMismatch => write!(f, "genesis mismatch"),
             Self::UnknownReason => write!(f, "unknown"),
         }
     }
@@ -129,6 +132,7 @@ impl FromBytes for Disconnect {
             8 => DisconnectReason::AlreadyConnectedToAleoAddress,
             9 => DisconnectReason::InvalidChallengeRequest,
             10 => DisconnectReason::UnauthorizedValidator,
+            11 => DisconnectReason::GenesisMismatch,
             val => {
                 warn!("received unknown disconnect reason (id={val})");
                 DisconnectReason::UnknownReason
@@ -162,6 +166,7 @@ mod tests {
             DisconnectReason::AlreadyConnectedToAleoAddress,
             DisconnectReason::InvalidChallengeRequest,
             DisconnectReason::UnauthorizedValidator,
+            DisconnectReason::GenesisMismatch,
         ];
 
         for reason in all_reasons.iter() {

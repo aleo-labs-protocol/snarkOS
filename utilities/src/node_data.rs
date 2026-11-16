@@ -28,6 +28,9 @@ pub const LEGACY_ROUTER_PEER_CACHE_FILE: &str = "cached_router_peers";
 /// The filename of the proposal cache.
 pub const CURRENT_PROPOSAL_CACHE_FILE: &str = "current-proposal-cache";
 
+/// The filename of the consensus upgrade that validators require of this node.
+pub const REQUIRED_CONSENSUS_UPGRADE_FILE: &str = "required-consensus-upgrade";
+
 /// The filename used to persist the hotswapped dev committee's starting round.
 #[cfg(feature = "test_network")]
 pub const DEV_COMMITTEE_STATE_FILE: &str = "dev-committee-state";
@@ -94,6 +97,11 @@ impl NodeDataDir {
     /// The location to store the current proposal cache.
     pub fn current_proposal_cache_path(&self) -> PathBuf {
         self.path.join(CURRENT_PROPOSAL_CACHE_FILE)
+    }
+
+    /// The location to record the consensus upgrade that validators require of this node.
+    pub fn required_consensus_upgrade_path(&self) -> PathBuf {
+        self.path.join(REQUIRED_CONSENSUS_UPGRADE_FILE)
     }
 
     /// The location used to persist the hotswapped dev committee's starting round.
