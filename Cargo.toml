@@ -385,9 +385,6 @@ workspace = true
 [build-dependencies.toml]
 version = "1"
 
-[build-dependencies.walkdir]
-version = "2"
-
 [profile.release]
 lto = "thin"
 # uncomment the 2 lines below when building with the locktick feature or use the `release-locktick` profile
