@@ -1117,13 +1117,12 @@ mod tests {
         },
         ledger::{
             narwhal::{BatchCertificate, BatchHeader, Subdag},
-            store::{ConsensusStore, helpers::memory::ConsensusMemory},
+            store::{ConsensusStore, StorageMode, helpers::memory::ConsensusMemory},
         },
         prelude::{Ledger, VM},
         utilities::TestRng,
     };
 
-    use aleo_std::StorageMode;
     use indexmap::IndexSet;
     use rand::RngExt;
     use std::{collections::BTreeMap, sync::OnceLock};

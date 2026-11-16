@@ -19,10 +19,10 @@ use snarkos_utilities::NodeDataDir;
 
 use snarkvm::{
     console::network::{CanaryV0, MainnetV0},
+    ledger::store::aleo_dir,
     prelude::{Network, PrivateKey},
 };
 
-use aleo_std::aleo_dir;
 use anyhow::{Context, Result, anyhow, ensure};
 use clap::builder::RangedU64ValueParser;
 use snarkos_node_rest::{API_VERSION_V1, API_VERSION_V2};

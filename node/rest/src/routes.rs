@@ -18,7 +18,7 @@ use snarkos_node_network::PeerPoolHandling;
 use snarkos_node_router::messages::UnconfirmedSolution;
 use snarkos_node_sync::BftSyncMode;
 use snarkvm::{
-    ledger::puzzle::Solution,
+    ledger::{puzzle::Solution, store::aleo_ledger_dir},
     prelude::{
         Address,
         ConsensusVersion,
@@ -39,7 +39,6 @@ use snarkvm::{
 
 use axum::{Json, extract::rejection::JsonRejection};
 
-use aleo_std::aleo_ledger_dir;
 use anyhow::{Context, anyhow};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
