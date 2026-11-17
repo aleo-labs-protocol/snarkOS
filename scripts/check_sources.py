@@ -25,6 +25,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LICENSE_HEADER = (REPO_ROOT / ".resources" / "license_header").read_bytes()
 
+# Matches the `Mutex` and `RwLock` type names, but not names that contain them,
+# such as `TMutex` or `MutexGuard`.
+LOCK_TYPE = re.compile(r"\b(?:Mutex|RwLock)\b")
+
 
 def rust_files(root):
     """Yields the tracked `.rs` files under `root` that exist in the working tree."""
@@ -74,16 +78,8 @@ def lock_import_imbalance(text):
                 crate = "lock"
 
         if crate is not None:
-            locks = line.count("Mutex") + line.count("RwLock")
-            # `Mutex as TMutex` names `Mutex` twice for one lock.
-            if "TMutex" in line:
-                locks -= 1
-            if crate == "lock":
-                # Lock guards have no `locktick` counterpart.
-                locks -= sum(guard in line for guard in ("MutexGuard", "RwLockReadGuard", "RwLockWriteGuard"))
-                imbalance += locks
-            else:
-                imbalance -= locks
+            locks = len(LOCK_TYPE.findall(line))
+            imbalance += locks if crate == "lock" else -locks
 
         if line.endswith(";"):
             crate = None
