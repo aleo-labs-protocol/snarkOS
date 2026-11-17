@@ -19,7 +19,6 @@ import os
 import re
 import subprocess
 import sys
-from itertools import dropwhile, takewhile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -51,26 +50,20 @@ def check_license_year():
     return None
 
 
-def is_import_line(line):
-    """Returns whether `line` can belong to the import block at the top of a file."""
-    return line.startswith(("use", "#[cfg", "//")) or line == "};" or line[:1] in " \t\n\r\f"
-
-
 def lock_import_imbalance(text):
     """Returns the number of `parking_lot` and `tokio` lock imports minus the number of `locktick` lock imports.
 
-    Only the first import block of `text` is scanned. The scan is line-based: an import
-    statement starts at a `use` line and ends at the first line that ends with `;`.
+    The scan is line-based. An import statement starts at a line that begins with `use`
+    and ends at the first line that ends with `;`. Indented `use` statements, such as
+    those in a `mod tests` block, are not scanned.
     """
     # This matches Rust's `str::lines`, which splits on `\n` and strips one trailing `\r`.
     lines = (line.removesuffix("\r") for line in text.split("\n"))
-    lines = (line for line in lines if line)
-    import_block = takewhile(is_import_line, dropwhile(lambda line: not line.startswith("use"), lines))
 
     imbalance = 0
     # The crate of the import statement being scanned, or `None` outside a relevant statement.
     crate = None
-    for line in import_block:
+    for line in lines:
         if crate is None:
             if line.startswith("use locktick::"):
                 crate = "locktick"
