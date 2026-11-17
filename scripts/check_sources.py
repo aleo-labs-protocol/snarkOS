@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Checks the Rust sources of the repository.
 
-- Every `.rs` file starts with the license header in `.resources/license_header`.
-  The copyright range in that header ends in the current year.
+- Every `.rs` file outside the root-level dot directories starts with the license
+  header in `.resources/license_header`. On Linux, the copyright range in that
+  header must end in the current year.
 - In every `.rs` file, each `Mutex` or `RwLock` imported from `parking_lot` or
   `tokio` has a matching import from `locktick`. The `locktick` feature relies
   on this to swap in its instrumented lock types.
@@ -27,10 +28,9 @@ DIRS_TO_SKIP = {"examples", "js", "target"}
 
 
 def rust_files(root):
-    """Yields the `.rs` files under `root`, skipping `DIRS_TO_SKIP` and root-level dot directories."""
+    """Yields the `.rs` files under `root`, skipping `DIRS_TO_SKIP`."""
     for dirpath, dirnames, filenames in os.walk(root):
-        at_root = Path(dirpath) == root
-        dirnames[:] = sorted(d for d in dirnames if d not in DIRS_TO_SKIP and not (at_root and d.startswith(".")))
+        dirnames[:] = sorted(d for d in dirnames if d not in DIRS_TO_SKIP)
         for name in sorted(filenames):
             if name.endswith(".rs"):
                 yield Path(dirpath) / name
@@ -48,11 +48,6 @@ def check_license_year():
     return None
 
 
-def has_license_header(path):
-    with open(path, "rb") as file:
-        return file.read(len(LICENSE_HEADER)) == LICENSE_HEADER
-
-
 def is_import_line(line):
     """Returns whether `line` can belong to the import block at the top of a file."""
     return line.startswith(("use", "#[cfg", "//")) or line == "};" or line[:1] in " \t\n\r\f"
@@ -64,6 +59,7 @@ def lock_import_imbalance(text):
     Only the first import block of `text` is scanned. The scan is line-based: an import
     statement starts at a `use` line and ends at the first line that ends with `;`.
     """
+    # This matches Rust's `str::lines`, which splits on `\n` and strips one trailing `\r`.
     lines = (line.removesuffix("\r") for line in text.split("\n"))
     lines = (line for line in lines if line)
     import_block = takewhile(is_import_line, dropwhile(lambda line: not line.startswith("use"), lines))
@@ -101,15 +97,18 @@ def main():
 
     errors = []
 
-    year_error = check_license_year()
-    if year_error is not None:
-        errors.append(year_error)
+    if sys.platform.startswith("linux"):
+        year_error = check_license_year()
+        if year_error is not None:
+            errors.append(year_error)
 
     for path in rust_files(root):
         name = path.relative_to(root)
-        if not has_license_header(path):
+        contents = path.read_bytes()
+        in_root_dot_dir = len(name.parts) > 1 and name.parts[0].startswith(".")
+        if not in_root_dot_dir and not contents.startswith(LICENSE_HEADER):
             errors.append(f"{name}: the license header is missing or does not match .resources/license_header")
-        imbalance = lock_import_imbalance(path.read_text(encoding="utf-8"))
+        imbalance = lock_import_imbalance(contents.decode("utf-8"))
         if imbalance > 0:
             errors.append(f"{name}: {imbalance} lock import(s) from parking_lot or tokio have no locktick counterpart")
         elif imbalance < 0:
