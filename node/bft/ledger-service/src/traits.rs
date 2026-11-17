@@ -38,6 +38,15 @@ pub enum BeginLedgerUpdateError {
     NotSupportedForProver,
 }
 
+/// The ledger holds no committee for the given round.
+///
+/// A ledger that has not yet advanced to `round` returns this error for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("No committee found for round {round} in the ledger")]
+pub struct CommitteeNotFound {
+    pub round: u64,
+}
+
 /// Allows performing updates to the ledger and prevents concurrent updates while the object is alive.
 #[cfg(feature = "ledger-write")]
 pub trait LedgerUpdateService<N: Network> {

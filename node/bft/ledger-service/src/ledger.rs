@@ -15,6 +15,7 @@
 
 use crate::{
     BeginLedgerUpdateError,
+    CommitteeNotFound,
     LedgerService,
     LedgerUpdateService,
     deserialize_solution_strict,
@@ -337,7 +338,7 @@ impl<N: Network, C: ConsensusStorage<N>> LedgerService<N> for CoreLedgerService<
     fn get_committee_for_round(&self, round: u64) -> Result<Committee<N>> {
         match self.ledger.get_committee_for_round(round)? {
             Some(committee) => Ok(committee),
-            None => bail!("No committee found for round {round} in the ledger"),
+            None => Err(CommitteeNotFound { round }.into()),
         }
     }
 
