@@ -104,11 +104,20 @@ def main():
 
     for path in rust_files(root):
         name = path.relative_to(root)
-        contents = path.read_bytes()
+        try:
+            contents = path.read_bytes()
+        except OSError as error:
+            errors.append(f"{name}: cannot be read: {error}")
+            continue
         in_root_dot_dir = len(name.parts) > 1 and name.parts[0].startswith(".")
         if not in_root_dot_dir and not contents.startswith(LICENSE_HEADER):
             errors.append(f"{name}: the license header is missing or does not match .resources/license_header")
-        imbalance = lock_import_imbalance(contents.decode("utf-8"))
+        try:
+            text = contents.decode("utf-8")
+        except UnicodeDecodeError as error:
+            errors.append(f"{name}: is not valid UTF-8: {error}")
+            continue
+        imbalance = lock_import_imbalance(text)
         if imbalance > 0:
             errors.append(f"{name}: {imbalance} lock import(s) from parking_lot or tokio have no locktick counterpart")
         elif imbalance < 0:
