@@ -5589,6 +5589,7 @@ dependencies = [
  "parking_lot",
  "rand 0.10.3",
  "rayon",
+ "snarkos-node-bft-ledger-service",
  "snarkos-node-metrics",
  "snarkos-utilities",
  "snarkvm",

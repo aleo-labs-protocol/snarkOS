@@ -168,6 +168,29 @@ impl<N: Network, C: ConsensusStorage<N>> CoreLedgerService<N, C> {
         }
         Ok(Some(dev_committee.clone()))
     }
+
+    /// Returns the committee for the given round, or `None` if the ledger has no committee for it.
+    ///
+    /// A round above the starting round of `Ledger::latest_committee` yields `None` without reading storage.
+    /// The committee store indexes rounds only up to the starting round of the last committee it stored,
+    /// and `Ledger::latest_committee` is a copy of that committee, taken after each block is stored.
+    ///
+    /// Hazard: between a block being written to storage and `Ledger::advance_to_next_block` refreshing
+    /// that copy, this returns `None` for the rounds the block added, as it would have just before the write.
+    /// A caller that requires those rounds as soon as `Ledger::latest_round` reports the new block
+    /// must use `Ledger::get_committee_for_round` instead.
+    fn try_get_committee_for_round(&self, round: u64) -> Result<Option<Committee<N>>> {
+        // The dev committee applies to rounds the ledger has not reached.
+        #[cfg(feature = "test_network")]
+        if self.ledger.dev_committee().is_some() {
+            return self.ledger.get_committee_for_round(round);
+        }
+
+        if self.ledger.latest_committee().is_ok_and(|committee| round > committee.starting_round()) {
+            return Ok(None);
+        }
+        self.ledger.get_committee_for_round(round)
+    }
 }
 
 /// Resolves the dev committee's starting round prior to loading the ledger.
@@ -335,7 +358,7 @@ impl<N: Network, C: ConsensusStorage<N>> LedgerService<N> for CoreLedgerService<
 
     /// Returns the committee for the given round.
     fn get_committee_for_round(&self, round: u64) -> Result<Committee<N>> {
-        match self.ledger.get_committee_for_round(round)? {
+        match self.try_get_committee_for_round(round)? {
             Some(committee) => Ok(committee),
             None => bail!("No committee found for round {round} in the ledger"),
         }
@@ -562,5 +585,97 @@ impl<N: Network, C: ConsensusStorage<N>> LedgerService<N> for CoreLedgerService<
 
     fn is_stopped(&self) -> bool {
         self.stoppable.is_stopped()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use snarkos_utilities::SimpleStoppable;
+    use snarkvm::{
+        console::{account::PrivateKey, network::MainnetV0},
+        ledger::store::{ConsensusStore, StorageMode, helpers::memory::ConsensusMemory},
+        prelude::{TestRng, VM},
+    };
+
+    type CurrentNetwork = MainnetV0;
+    type CurrentLedger = Ledger<CurrentNetwork, ConsensusMemory<CurrentNetwork>>;
+
+    /// Returns a ledger holding the genesis block and `num_blocks` empty beacon blocks.
+    fn sample_ledger(num_blocks: u32, rng: &mut TestRng) -> CurrentLedger {
+        let private_key = PrivateKey::<CurrentNetwork>::new(rng).unwrap();
+        let store = ConsensusStore::<_, ConsensusMemory<_>>::open(StorageMode::new_test(None)).unwrap();
+        let genesis = VM::from(store).unwrap().genesis_beacon(&private_key, rng).unwrap();
+        let ledger = CurrentLedger::load(genesis, StorageMode::new_test(None)).unwrap();
+        for _ in 0..num_blocks {
+            let block = ledger.prepare_advance_to_next_beacon_block(&private_key, vec![], vec![], vec![], rng).unwrap();
+            ledger.advance_to_next_block(&block).unwrap();
+        }
+        ledger
+    }
+
+    #[test]
+    fn test_get_committee_for_round_up_to_latest_committee() {
+        let rng = &mut TestRng::default();
+        let ledger = sample_ledger(2, rng);
+        let service = CoreLedgerService::new(ledger.clone(), SimpleStoppable::new());
+
+        let latest_round = ledger.latest_round();
+        assert!(latest_round > 0);
+        assert_eq!(ledger.latest_committee().unwrap().starting_round(), latest_round);
+
+        for round in 0..=latest_round {
+            let expected = ledger.get_committee_for_round(round).unwrap().unwrap();
+            assert_eq!(service.get_committee_for_round(round).unwrap(), expected);
+        }
+        assert_eq!(service.get_committee_for_round(latest_round).unwrap(), ledger.latest_committee().unwrap());
+
+        let above = latest_round + 1;
+        assert!(ledger.get_committee_for_round(above).unwrap().is_none());
+        let error = service.get_committee_for_round(above).unwrap_err();
+        assert_eq!(error.to_string(), format!("No committee found for round {above} in the ledger"));
+    }
+
+    #[test]
+    fn test_get_committee_lookback_for_round() {
+        let rng = &mut TestRng::default();
+        let ledger = sample_ledger(1, rng);
+        let service = CoreLedgerService::new(ledger.clone(), SimpleStoppable::new());
+
+        let lookback_range = Committee::<CurrentNetwork>::COMMITTEE_LOOKBACK_RANGE;
+        // Lookback rounds are odd, so the latest round must be odd to be one.
+        let latest_round = ledger.latest_round();
+        assert_eq!(latest_round % 2, 1);
+
+        // The highest round whose lookback round is the latest round.
+        let at_bound = latest_round + lookback_range + 2;
+        assert_eq!(service.get_committee_lookback_for_round(at_bound).unwrap(), ledger.latest_committee().unwrap());
+
+        let error = service.get_committee_lookback_for_round(at_bound + 1).unwrap_err();
+        assert_eq!(error.to_string(), format!("No committee found for round {} in the ledger", latest_round + 2));
+    }
+
+    #[test]
+    fn test_get_committee_for_round_above_latest_committee_skips_storage() {
+        let rng = &mut TestRng::default();
+        let ledger = sample_ledger(1, rng);
+        let service = CoreLedgerService::new(ledger.clone(), SimpleStoppable::new());
+
+        // Store a committee that `Ledger::latest_committee` does not reflect.
+        let latest_committee = ledger.latest_committee().unwrap();
+        let stored_round = latest_committee.starting_round() + 2;
+        let stored_committee = Committee::new(stored_round, latest_committee.members().clone()).unwrap();
+        let committee_store = ledger.vm().finalize_store().committee_store();
+        committee_store.insert(ledger.latest_height() + 1, stored_committee.clone()).unwrap();
+
+        // The stored committee is reachable through storage, so a lookup that read storage would return it.
+        assert_eq!(committee_store.get_committee_for_round(stored_round).unwrap(), Some(stored_committee.clone()));
+        assert_eq!(ledger.get_committee_for_round(stored_round).unwrap(), Some(stored_committee));
+
+        for round in [stored_round - 1, stored_round] {
+            let error = service.get_committee_for_round(round).unwrap_err();
+            assert_eq!(error.to_string(), format!("No committee found for round {round} in the ledger"));
+        }
     }
 }

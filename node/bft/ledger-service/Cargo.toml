@@ -90,3 +90,7 @@ features = [ "log" ]
 [dev-dependencies.snarkvm]
 workspace = true
 features = [ "test-helpers" ]
+
+[dev-dependencies.snarkos-node-bft-ledger-service]
+path = "."
+features = [ "ledger", "ledger-write" ]
