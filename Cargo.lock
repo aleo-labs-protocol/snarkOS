@@ -2997,9 +2997,9 @@ dependencies = [
 
 [[package]]
 name = "libz-sys"
-version = "1.1.31"
+version = "1.1.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff20308ecabd635a2dc1dd5834a86c462cca20efba1d5d3ddab1f8aea3455cb2"
+checksum = "fee3f59f4321dab0c78d828942e7aa09d0bd8ad6e78a501977e6bf3d02938045"
 dependencies = [
  "cc",
  "libc",
@@ -5345,7 +5345,7 @@ dependencies = [
 
 [[package]]
 name = "snarkos"
-version = "4.13.0"
+version = "4.13.1"
 dependencies = [
  "built",
  "clap",
@@ -5369,7 +5369,7 @@ dependencies = [
 
 [[package]]
 name = "snarkos-account"
-version = "4.13.0"
+version = "4.13.1"
 dependencies = [
  "colored 3.1.1",
  "snarkvm",
@@ -5377,7 +5377,7 @@ dependencies = [
 
 [[package]]
 name = "snarkos-cli"
-version = "4.13.0"
+version = "4.13.1"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -5420,7 +5420,7 @@ dependencies = [
 
 [[package]]
 name = "snarkos-display"
-version = "4.13.0"
+version = "4.13.1"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -5433,7 +5433,7 @@ dependencies = [
 
 [[package]]
 name = "snarkos-ledger-distribution"
-version = "4.13.0"
+version = "4.13.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5461,7 +5461,7 @@ dependencies = [
 
 [[package]]
 name = "snarkos-node"
-version = "4.13.0"
+version = "4.13.1"
 dependencies = [
  "aleo-std",
  "anyhow",
@@ -5505,7 +5505,7 @@ dependencies = [
 
 [[package]]
 name = "snarkos-node-bft"
-version = "4.13.0"
+version = "4.13.1"
 dependencies = [
  "anyhow",
  "async-recursion",
@@ -5557,7 +5557,7 @@ dependencies = [
 
 [[package]]
 name = "snarkos-node-bft-events"
-version = "4.13.0"
+version = "4.13.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5580,7 +5580,7 @@ dependencies = [
 
 [[package]]
 name = "snarkos-node-bft-ledger-service"
-version = "4.13.0"
+version = "4.13.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5599,7 +5599,7 @@ dependencies = [
 
 [[package]]
 name = "snarkos-node-bft-storage-service"
-version = "4.13.0"
+version = "4.13.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5613,7 +5613,7 @@ dependencies = [
 
 [[package]]
 name = "snarkos-node-cdn"
-version = "4.13.0"
+version = "4.13.1"
 dependencies = [
  "anyhow",
  "bincode",
@@ -5635,7 +5635,7 @@ dependencies = [
 
 [[package]]
 name = "snarkos-node-consensus"
-version = "4.13.0"
+version = "4.13.1"
 dependencies = [
  "anyhow",
  "cfg-if",
@@ -5660,7 +5660,7 @@ dependencies = [
 
 [[package]]
 name = "snarkos-node-metrics"
-version = "4.13.0"
+version = "4.13.1"
 dependencies = [
  "built",
  "locktick",
@@ -5676,7 +5676,7 @@ dependencies = [
 
 [[package]]
 name = "snarkos-node-network"
-version = "4.13.0"
+version = "4.13.1"
 dependencies = [
  "anyhow",
  "built",
@@ -5698,7 +5698,7 @@ dependencies = [
 
 [[package]]
 name = "snarkos-node-rest"
-version = "4.13.0"
+version = "4.13.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -5737,7 +5737,7 @@ dependencies = [
 
 [[package]]
 name = "snarkos-node-router"
-version = "4.13.0"
+version = "4.13.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5772,7 +5772,7 @@ dependencies = [
 
 [[package]]
 name = "snarkos-node-router-messages"
-version = "4.13.0"
+version = "4.13.1"
 dependencies = [
  "bytes",
  "indexmap 2.14.2",
@@ -5789,7 +5789,7 @@ dependencies = [
 
 [[package]]
 name = "snarkos-node-sync"
-version = "4.13.0"
+version = "4.13.1"
 dependencies = [
  "anyhow",
  "futures",
@@ -5815,7 +5815,7 @@ dependencies = [
 
 [[package]]
 name = "snarkos-node-sync-communication-service"
-version = "4.13.0"
+version = "4.13.1"
 dependencies = [
  "async-trait",
  "tokio",
@@ -5823,7 +5823,7 @@ dependencies = [
 
 [[package]]
 name = "snarkos-node-sync-locators"
-version = "4.13.0"
+version = "4.13.1"
 dependencies = [
  "anyhow",
  "indexmap 2.14.2",
@@ -5834,7 +5834,7 @@ dependencies = [
 
 [[package]]
 name = "snarkos-node-tcp"
-version = "4.13.0"
+version = "4.13.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5852,7 +5852,7 @@ dependencies = [
 
 [[package]]
 name = "snarkos-utilities"
-version = "4.13.0"
+version = "4.13.1"
 dependencies = [
  "anyhow",
  "locktick",
