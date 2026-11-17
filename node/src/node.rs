@@ -241,9 +241,12 @@ impl<N: Network> Node<N> {
         listener_addr: SocketAddr,
         account: Account<N>,
         genesis_header: Header<N>,
+        genesis_hash: N::BlockHash,
         dev: Option<u16>,
     ) -> Result<Self> {
-        Ok(Self::BootstrapClient(BootstrapClient::new(listener_addr, account, genesis_header, dev).await?))
+        Ok(Self::BootstrapClient(
+            BootstrapClient::new(listener_addr, account, genesis_header, genesis_hash, dev).await?,
+        ))
     }
 
     /// Returns the node type.

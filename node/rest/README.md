@@ -5,3 +5,8 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](./LICENSE.md)
 
 The `snarkos-node-rest` crate provides a REST API for the `snarkos` node.
+
+REST responses support gzip compression when the client sends `Accept-Encoding: gzip`.
+Responses smaller than 32 bytes are not compressed.
+
+The v1 API and the unversioned routes are deprecated. See [Migrating from the v1 REST API to v2](./MIGRATING_TO_V2.md).

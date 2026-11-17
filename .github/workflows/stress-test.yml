@@ -1,0 +1,212 @@
+# Copy to aleo-labs-protocol/snarkOS as .github/workflows/stress-test.yml.
+#
+# Runs snarkOS stress tests on the Gauntlet host. "Run workflow", load-test.yml, or a release
+# whose CI passed: approval in the stress-test environment, then start the Gauntlet host, which
+# stops itself when idle, and queue the run through its gate. The host reports the run as the
+# "stress-test" check on the commit, through its App, so this job ends once the run is queued.
+# gauntlet-report.yml adds the report when it finishes.
+#
+# It needs an IAM role that only this file on staging can assume, an Instance
+# Connect Endpoint, and these settings. Actions logs are public, so anything
+# naming the cloud account is a secret, held in the stress-test environment so
+# that only this job on staging can read it:
+#   environment secret  GAUNTLET_ROLE_ARN           the role
+#   environment secret  GAUNTLET_HOST_INSTANCE_ID   the Gauntlet host
+#   variable            GAUNTLET_HOST_KEY           the Gauntlet host's ssh host key line
+#   variable            GAUNTLET_RELEASE_TESTS / GAUNTLET_RELEASE_VALIDATORS   what a release runs
+name: "Gauntlet: Stress test"
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "snarkOS commit (full SHA). Empty: the commit this is run from."
+        required: false
+        default: ""
+      tests:
+        description: "Tests, sets (prerelease, network) or all, comma separated"
+        default: prerelease
+      validators:
+        description: "Network size, in validators"
+        type: choice
+        options: ["5", "10", "16"]
+        default: "5"
+      network:
+        description: "snarkOS network"
+        type: choice
+        options: [testnet, mainnet]
+        default: testnet
+      params:
+        description: "Test parameter overrides, e.g. rate=50,duration=300"
+        default: ""
+  workflow_call:
+    inputs:
+      commit:
+        type: string
+      tests:
+        type: string
+      validators:
+        type: string
+      network:
+        type: string
+      params:
+        type: string
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [testnet, mainnet]
+
+permissions:
+  contents: read
+
+jobs:
+  stress:
+    if: github.repository == 'aleo-labs-protocol/snarkOS' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-latest
+    environment: stress-test
+    # Past start_host's longest wait, twice: the enqueue may start the host again. Billed only if it waits.
+    timeout-minutes: 90
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: us-west-2
+      HOST_ID: ${{ secrets.GAUNTLET_HOST_INSTANCE_ID }}
+      ROLE_ARN: ${{ secrets.GAUNTLET_ROLE_ARN }}
+      HOST_KEY: ${{ vars.GAUNTLET_HOST_KEY }}
+      GATE_USER: gha-gauntlet
+    steps:
+      - name: Resolve the request
+        id: req
+        env:
+          EVENT: ${{ github.event_name }}
+          IN_COMMIT: ${{ inputs.commit }}
+          IN_TESTS: ${{ inputs.tests }}
+          IN_VALIDATORS: ${{ inputs.validators }}
+          IN_NETWORK: ${{ inputs.network }}
+          IN_PARAMS: ${{ inputs.params }}
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+          RELEASE_TESTS: ${{ vars.GAUNTLET_RELEASE_TESTS }}
+          RELEASE_VALIDATORS: ${{ vars.GAUNTLET_RELEASE_VALIDATORS }}
+          ACTOR: ${{ github.triggering_actor }}
+        run: |
+          if [[ "$EVENT" == workflow_run ]]; then
+            commit="$RELEASE_SHA"; tests="${RELEASE_TESTS:-prerelease}"; validators="${RELEASE_VALIDATORS:-5}"
+            network=testnet; params=""
+          else
+            commit="${IN_COMMIT:-$GITHUB_SHA}"; tests="$IN_TESTS"; validators="$IN_VALIDATORS"; network="$IN_NETWORK"; params="$IN_PARAMS"
+          fi
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::commit must be a full 40-character SHA"; exit 1; }
+          for value in "$commit" "$tests" "$validators" "$network" "$params" "$ACTOR"; do
+            [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || {
+              echo "::error::request values must be single-line"
+              exit 1
+            }
+          done
+          {
+            echo "commit=$commit"; echo "tests=$tests"; echo "validators=$validators"; echo "network=$network"
+            echo "params=$params"; echo "run_id=gh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"; echo "actor=$ACTOR"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Connect to the Gauntlet host
+        run: |
+          : "${HOST_ID:?GAUNTLET_HOST_INSTANCE_ID must be configured}"
+          : "${ROLE_ARN:?GAUNTLET_ROLE_ARN must be configured}"
+          # AWS errors quote ARNs that differ from the secret, so mask the account too.
+          echo "::add-mask::$(cut -d: -f5 <<<"$ROLE_ARN")"
+          # The Gauntlet host's gate users can only run the gate, and gha-gauntlet-status can't
+          # start a run. Each connection pushes a key that lives 60 seconds, through the
+          # Instance Connect Endpoint.
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/gauntlet
+          : "${HOST_KEY:?GAUNTLET_HOST_KEY must be configured}"
+          printf '%s %s\n' "$HOST_ID" "$HOST_KEY" > ~/.ssh/known_hosts
+          cat > "$RUNNER_TEMP/gate.sh" <<'EOF'
+          # AWS credentials from GitHub's OIDC token, fresh for every call: starting the host
+          # can outlast the role's one-hour session.
+          aws_login() {
+            local token creds
+            token="$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)"
+            creds="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" \
+              --role-session-name "stress-$GITHUB_RUN_ID" --web-identity-token "$token" \
+              --duration-seconds 3600 --query Credentials --output json)"
+            export AWS_ACCESS_KEY_ID="$(jq -r .AccessKeyId <<<"$creds")"
+            export AWS_SECRET_ACCESS_KEY="$(jq -r .SecretAccessKey <<<"$creds")"
+            export AWS_SESSION_TOKEN="$(jq -r .SessionToken <<<"$creds")"
+          }
+          gate() {
+            aws_login
+            aws ec2-instance-connect send-ssh-public-key --instance-id "$HOST_ID" \
+              --instance-os-user "$GATE_USER" --ssh-public-key "file://$HOME/.ssh/gauntlet.pub" >/dev/null
+            ssh -i ~/.ssh/gauntlet -o BatchMode=yes -o StrictHostKeyChecking=yes \
+              -o "ProxyCommand=aws ec2-instance-connect open-tunnel --instance-id $HOST_ID" \
+              "$GATE_USER@$HOST_ID" "$@"
+          }
+          # Starts the host, which stops itself when idle, until its gate answers. A host that is
+          # stopping is started once stopped, and holds the gate's lock until then. EC2 may have no
+          # capacity for it for a while.
+          start_host() {
+            local error="" rc
+            aws_login
+            for _ in {1..100}; do
+              if aws ec2 start-instances --instance-ids "$HOST_ID" >/dev/null 2> start.err; then
+                rc=0; gate status "$RUN_ID" >/dev/null 2> probe.err || rc=$?
+                (( rc == 255 )) || grep -q 'undergoing maintenance' probe.err || return 0
+              fi
+              # Only the error's code: its message names the instance type and zone.
+              error="$(sed -n 's/.*An error occurred (\([A-Za-z.]*\)).*/\1/p' start.err)"
+              case "$error" in
+                ''|IncorrectInstanceState|InsufficientInstanceCapacity|VcpuLimitExceeded) sleep 15 ;;
+                *) echo "::error::could not start the Gauntlet host: ${error}"; return 1 ;;
+              esac
+            done
+            case "$error" in
+              InsufficientInstanceCapacity|VcpuLimitExceeded)
+                echo "::error::EC2 had no capacity to start the Gauntlet host"; touch no-capacity ;;
+              *) echo "::error::the Gauntlet host did not answer: $(tail -n 1 probe.err)" ;;
+            esac
+            return 1
+          }
+          EOF
+
+      - name: Start the Gauntlet host
+        env:
+          RUN_ID: ${{ steps.req.outputs.run_id }}
+        run: |
+          source "$RUNNER_TEMP/gate.sh"
+          start_host
+
+      - name: Queue the run
+        env:
+          COMMIT: ${{ steps.req.outputs.commit }}
+          TESTS: ${{ steps.req.outputs.tests }}
+          VALIDATORS: ${{ steps.req.outputs.validators }}
+          NETWORK: ${{ steps.req.outputs.network }}
+          PARAMS: ${{ steps.req.outputs.params }}
+          RUN_ID: ${{ steps.req.outputs.run_id }}
+          ACTOR: ${{ steps.req.outputs.actor }}
+        run: |
+          source "$RUNNER_TEMP/gate.sh"
+          # Only a rejection's message reaches the summary.
+          trap 'cat enqueue.err >&2; sed -n "s/^rejected: //p" enqueue.err | head -c 2000 > rejected.txt' EXIT
+          request=(enqueue "$RUN_ID" "$COMMIT" "$TESTS" "$VALIDATORS" "$NETWORK" "$ACTOR" "$PARAMS")
+          rc=0; gate "${request[@]}" 2> enqueue.err || rc=$?
+          # The host may have begun stopping since it was started: start it again, once.
+          if (( rc )); then
+            grep -q 'undergoing maintenance' enqueue.err || exit "$rc"
+            start_host || { : > enqueue.err; exit 1; }
+            gate "${request[@]}" 2> enqueue.err
+          fi
+          echo "Queued \`$RUN_ID\`. The stress-test check on \`${COMMIT:0:10}\` reports it." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report a rejection or an orchestration failure
+        if: failure() && steps.req.outcome == 'success'
+        run: |
+          if [[ -f no-capacity ]]; then
+            echo "**No capacity for the Gauntlet host**: EC2 had none to start it, so no run started and nothing was tested. Run the workflow again later." >> "$GITHUB_STEP_SUMMARY"
+          elif [[ -s rejected.txt ]]; then
+            echo "**Request rejected**: the Gauntlet host started no run: $(cat rejected.txt)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "**Orchestration interrupted**: GitHub could not queue this run. The Gauntlet host may still be running it: look for its stress-test check before retrying." >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -103,16 +103,16 @@ if [[ $build_binary == "y" ]]; then
   crate_features=${crate_features:-test_network}
 
   # Build command
-  build_cmd="cargo install --locked --path $repo_root"
+  build_cmd=(cargo install --locked --path "$repo_root")
 
   # Add any extra features if provided
   if [[ -n $crate_features ]]; then
-    build_cmd+=" --features ${crate_features}"
+    build_cmd+=(--features "$crate_features")
   fi
 
   # Build command
-  echo "Running build command: \"$build_cmd\""
-  eval "$build_cmd" || exit 1
+  echo "Running build command: \"${build_cmd[*]}\""
+  "${build_cmd[@]}" || exit 1
 else
   # Ask the user whether to use a custom relative path
   read -r -p "Do you want to run snarkos from a relative path? (e.g. ./target/debug/, defaults to the installed binary): " binary_path

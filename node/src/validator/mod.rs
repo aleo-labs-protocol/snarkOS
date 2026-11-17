@@ -20,7 +20,7 @@ use crate::traits::NodeInterface;
 use snarkos_account::Account;
 #[cfg(feature = "test_network")]
 use snarkos_node_bft::ledger_service::{persist_dev_committee_start_round_if_unwritten, prepare_dev_committee_options};
-use snarkos_node_bft::{ledger_service::CoreLedgerService, spawn_blocking};
+use snarkos_node_bft::{helpers::UpgradeMonitor, ledger_service::CoreLedgerService, spawn_blocking};
 use snarkos_node_cdn::CdnBlockSync;
 use snarkos_node_consensus::Consensus;
 use snarkos_node_network::{ConnectionMode, NodeType, PeerPoolHandling};
@@ -185,6 +185,9 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
             handles: Default::default(),
         };
 
+        // Stop the node once validators run a consensus version this build lacks.
+        node.initialize_upgrade_check(signal_handler.clone());
+
         // Perform sync with CDN (if enabled).
         let cdn_sync = cdn.map(|base_url| Arc::new(CdnBlockSync::new(base_url, ledger.clone(), signal_handler)));
 
@@ -248,6 +251,45 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
     /// Starts the BFT and consensus handlers.
     async fn start_consensus_handlers(&self) -> Result<()> {
         self.consensus.start_consensus_handlers().await
+    }
+
+    /// Returns the upgrade monitor.
+    fn upgrade_monitor(&self) -> &UpgradeMonitor<N> {
+        self.consensus.bft().primary().gateway().upgrade_monitor()
+    }
+
+    /// Stops the node through `signal_handler` once validators require a consensus upgrade.
+    ///
+    /// The required upgrade is stored first, so that the requirement outlives the process. Consensus
+    /// builds no block in the meantime, as the status is already `Required`.
+    fn initialize_upgrade_check(&self, signal_handler: Arc<SignalHandler>) {
+        let mut receiver = self.upgrade_monitor().subscribe();
+        let record_path = self.upgrade_monitor().record_path().to_path_buf();
+        self.spawn(async move {
+            let Some(required) =
+                receiver.wait_for(|status| status.required().is_some()).await.ok().and_then(|status| status.required())
+            else {
+                return;
+            };
+            let stored = tokio::task::spawn_blocking(move || {
+                let stored = required.store(&record_path);
+                (stored, record_path)
+            })
+            .await;
+            match stored {
+                Ok((Ok(()), _)) => (),
+                Ok((Err(error), record_path)) => error!(
+                    "Unable to record the required upgrade at {} - {error}. Until upgraded, this node stops again only \
+                     once its handshakes find the upgrade.",
+                    record_path.display()
+                ),
+                Err(error) => error!("Unable to record the required upgrade - {error}"),
+            }
+            let error =
+                format!("{required}, but this build does not schedule it at that height, and must be upgraded.");
+            error!("{error} Shutting down.");
+            signal_handler.stop_with_error(error);
+        });
     }
 
     // /// Initialize the transaction pool.

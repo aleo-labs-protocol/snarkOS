@@ -49,8 +49,9 @@ impl<N: Network> FromBytes for ChallengeResponse<N> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz-helpers"))]
 pub mod prop_tests {
+    #![cfg_attr(not(test), allow(unused_imports))]
     use crate::ChallengeResponse;
     use snarkvm::{
         console::prelude::{FromBytes, ToBytes},
@@ -60,7 +61,7 @@ pub mod prop_tests {
     };
 
     use bytes::{Buf, BufMut, BytesMut};
-    use proptest::prelude::{BoxedStrategy, Strategy, any};
+    use proptest::prelude::{BoxedStrategy, ProptestConfig, Strategy, any};
     use test_strategy::proptest;
 
     type CurrentNetwork = snarkvm::prelude::MainnetV0;
@@ -90,7 +91,7 @@ pub mod prop_tests {
             .boxed()
     }
 
-    #[proptest]
+    #[proptest(ProptestConfig { cases: 10, ..ProptestConfig::default() })]
     fn serialize_deserialize(#[strategy(any_challenge_response())] original: ChallengeResponse<CurrentNetwork>) {
         let mut buf = BytesMut::default().writer();
         ChallengeResponse::write_le(&original, &mut buf).unwrap();

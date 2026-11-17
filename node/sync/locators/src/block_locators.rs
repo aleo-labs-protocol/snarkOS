@@ -442,9 +442,18 @@ pub mod test_helpers {
     /// A test to ensure that the sample block locators are valid.
     #[test]
     fn test_sample_block_locators() {
-        for expected_height in 0..=100_001u32 {
-            println!("Testing height - {expected_height}");
+        // Every 1009th height up to `10 * CHECKPOINT_INTERVAL + 1`, plus the heights next to each multiple `c`
+        // of `CHECKPOINT_INTERVAL` and next to `c + NUM_RECENT_BLOCKS`. The number of recents, the number of
+        // checkpoints and the overlap between them only change at these boundaries.
+        let max_height = 10 * CHECKPOINT_INTERVAL + 1;
+        let mut heights: std::collections::BTreeSet<u32> = (0..=max_height).step_by(1009).collect();
+        for checkpoint in (0..max_height).step_by(CHECKPOINT_INTERVAL as usize) {
+            for boundary in [checkpoint, checkpoint + NUM_RECENT_BLOCKS as u32] {
+                heights.extend(boundary.saturating_sub(1)..=boundary + 1);
+            }
+        }
 
+        for expected_height in heights {
             let expected_num_checkpoints = (expected_height / CHECKPOINT_INTERVAL) + 1;
             let expected_num_recents = match expected_height < NUM_RECENT_BLOCKS as u32 {
                 true => expected_height + 1,

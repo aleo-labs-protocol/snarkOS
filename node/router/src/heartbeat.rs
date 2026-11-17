@@ -28,7 +28,6 @@ use snarkos_node_tcp::{ConnectError, P2P};
 
 use snarkvm::prelude::Network;
 
-use colored::Colorize;
 use futures::future::join_all;
 use rand::{SeedableRng, prelude::IteratorRandom};
 use rand_chacha::ChaChaRng;
@@ -99,7 +98,7 @@ pub trait Heartbeat<N: Network>: Outbound<N> {
     fn log_connected_peers(&self) {
         // Log the connected peers.
         let connected_peers = self.router().connected_peers();
-        let connected_peers_fmt = format!("{connected_peers:?}").dimmed();
+        let connected_peers_fmt = format!("{connected_peers:?}");
         match connected_peers.len() {
             0 => {
                 // Only log a warning if the node has been running for a while.
@@ -107,8 +106,8 @@ pub trait Heartbeat<N: Network>: Outbound<N> {
                     warn!("No connected peers")
                 }
             }
-            1 => debug!("Connected to 1 peer: {connected_peers_fmt}"),
-            num_connected => debug!("Connected to {num_connected} peers {connected_peers_fmt}"),
+            1 => debug!(dim = true, "Connected to 1 peer: {connected_peers_fmt}"),
+            num_connected => debug!(dim = true, "Connected to {num_connected} peers {connected_peers_fmt}"),
         }
     }
 
