@@ -23,9 +23,17 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
-# Every self-hosted job carries the same guard: a fork's code never runs on
-# the fleet, whose target dirs, sccache and home directories persist between
-# jobs.
+# GitHub holds an outside contributor's pull request run until a maintainer
+# approves it. A fork's run gets no secrets, so start-cpu-runners is skipped and
+# fork-pr-runners.yml starts the boxes. The fleet jobs therefore accept a
+# skipped start-cpu-runners, and run only in this repository, which alone may
+# use the fleet.
+#
+# The fleet jobs also wait for check-shared-refs, a hosted job. GitHub reports
+# a run as `in_progress`, and fires the `workflow_run` event that starts the
+# boxes, only once none of its ready jobs is waiting for a runner. With no
+# hosted job ahead of them, a fork's fleet jobs would wait for boxes that only
+# that event starts.
 jobs:
   start-cpu-runners:
     # gh-actions is ours; check-shared-refs requires a @vN tag here, not a SHA.
@@ -37,7 +45,8 @@ jobs:
       role-to-assume: ${{ vars.RUNNER_ROLE_ARN }}
       label: cpu
       # Below the default of 3: snarkOS's jobs run ten minutes or more, so a
-      # box absorbs fewer of them within the critical path.
+      # box absorbs fewer of them within the critical path. fork-pr-runners.yml
+      # repeats this.
       jobs-per-box: 2
       runner-app-id: ${{ vars.RUNNER_APP_ID }}
     if: >-
@@ -99,12 +108,13 @@ jobs:
       - run: .github/merge-fixup.test.sh
 
   lint:
-    needs: start-cpu-runners
+    needs: [check-shared-refs, start-cpu-runners]
     runs-on: [self-hosted, linux, x64, cpu]
     timeout-minutes: 90
-    if: >-
-      github.event.pull_request == null ||
-      github.event.pull_request.head.repo.full_name == github.repository
+    if: &fleet-if >-
+      !cancelled() && needs.check-shared-refs.result == 'success' &&
+      contains(fromJSON('["success", "skipped"]'), needs.start-cpu-runners.result) &&
+      github.repository == 'aleo-labs-protocol/snarkOS'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
@@ -209,13 +219,11 @@ jobs:
         with: *aleo-resources
 
   test:
-    needs: start-cpu-runners
+    needs: [check-shared-refs, start-cpu-runners]
     permissions: { contents: read, actions: write }
     runs-on: [self-hosted, linux, x64, cpu]
     timeout-minutes: 90
-    if: >-
-      github.event.pull_request == null ||
-      github.event.pull_request.head.repo.full_name == github.repository
+    if: *fleet-if
     strategy:
       fail-fast: false
       matrix:
@@ -245,12 +253,10 @@ jobs:
 
   # The node binary the devnet jobs run, built once per workflow run.
   build-snarkos:
-    needs: start-cpu-runners
+    needs: [check-shared-refs, start-cpu-runners]
     runs-on: [self-hosted, linux, x64, cpu]
     timeout-minutes: 60
-    if: >-
-      github.event.pull_request == null ||
-      github.event.pull_request.head.repo.full_name == github.repository
+    if: *fleet-if
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
@@ -280,8 +286,9 @@ jobs:
     runs-on: [self-hosted, linux, x64, cpu]
     timeout-minutes: ${{ matrix.timeout }}
     if: >-
-      github.event.pull_request == null ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      !cancelled() && needs.build-snarkos.result == 'success' &&
+      contains(fromJSON('["success", "skipped"]'), needs.start-cpu-runners.result) &&
+      github.repository == 'aleo-labs-protocol/snarkOS'
     strategy:
       fail-fast: false
       matrix:

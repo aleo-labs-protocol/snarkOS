@@ -1,0 +1,40 @@
+name: fork-pr-runners
+
+# Starts the self-hosted boxes for a pull request from a fork when its run
+# starts. GitHub holds an outside contributor's run until a maintainer approves
+# it.
+#
+# A fork's `pull_request` run gets no secrets, so its own start-runner job is
+# skipped. GitHub runs this workflow from the default branch, with this
+# repository's secrets. A fork's run fires `requested` before approval and
+# `in_progress` after it.
+#
+# SECURITY: this workflow holds the runner role, which can change a box's user
+# data. It must never check out or run the pull request's code. It must never
+# put a `workflow_run` field into a `run:` script either: the fork controls its
+# branch name, its commit messages and its workflow names.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [in_progress]
+
+permissions: {}
+
+jobs:
+  start-runners:
+    # A mirror receives this file by push; see ci.yml.
+    if: >-
+      github.repository == 'aleo-labs-protocol/snarkOS' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name != github.repository
+    # gh-actions is ours; check-shared-refs requires a @vN tag here, not a SHA.
+    uses: aleo-labs-protocol/gh-actions/.github/workflows/start-runner.yml@v2
+    permissions: { id-token: write, contents: read, actions: read }
+    secrets:
+      runner_app_key: ${{ secrets.RUNNER_APP_KEY }}
+    with:
+      role-to-assume: ${{ vars.RUNNER_ROLE_ARN }}
+      label: cpu
+      # The same box share as ci.yml's start-cpu-runners.
+      jobs-per-box: 2
+      runner-app-id: ${{ vars.RUNNER_APP_ID }}
