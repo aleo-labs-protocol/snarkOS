@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
-"""Checks the Rust sources of the repository.
+"""Checks the `.rs` files that git tracks.
 
-- Every `.rs` file outside the root-level dot directories starts with the license
-  header in `.resources/license_header`. On Linux, the copyright range in that
-  header must end in the current year.
-- In every `.rs` file, each `Mutex` or `RwLock` imported from `parking_lot` or
+Tracked files that are deleted from the working tree are not checked.
+
+- Every file starts with the license header in `.resources/license_header`.
+  On Linux, the copyright range in that header must end in the current year.
+- In every file, each `Mutex` or `RwLock` imported from `parking_lot` or
   `tokio` has a matching import from `locktick`. The `locktick` feature relies
   on this to swap in its instrumented lock types.
 
 Usage: scripts/check_sources.py [ROOT]
 
-ROOT defaults to the repository root. The exit status is 1 if a check fails.
+ROOT is a git working tree and defaults to this repository. The exit status is 1 if a check fails.
 """
 
 import datetime
 import os
 import re
+import subprocess
 import sys
 from itertools import dropwhile, takewhile
 from pathlib import Path
@@ -23,17 +25,14 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LICENSE_HEADER = (REPO_ROOT / ".resources" / "license_header").read_bytes()
 
-# Directories with these names are skipped at any depth.
-DIRS_TO_SKIP = {"examples", "js", "target"}
-
 
 def rust_files(root):
-    """Yields the `.rs` files under `root`, skipping `DIRS_TO_SKIP`."""
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in DIRS_TO_SKIP)
-        for name in sorted(filenames):
-            if name.endswith(".rs"):
-                yield Path(dirpath) / name
+    """Yields the tracked `.rs` files under `root` that exist in the working tree."""
+    output = subprocess.run(["git", "-C", root, "ls-files", "-z", "--", "*.rs"], check=True, capture_output=True).stdout
+    for name in output.split(b"\0"):
+        path = root / os.fsdecode(name)
+        if name and os.path.lexists(path):
+            yield path
 
 
 def check_license_year():
@@ -109,8 +108,7 @@ def main():
         except OSError as error:
             errors.append(f"{name}: cannot be read: {error}")
             continue
-        in_root_dot_dir = len(name.parts) > 1 and name.parts[0].startswith(".")
-        if not in_root_dot_dir and not contents.startswith(LICENSE_HEADER):
+        if not contents.startswith(LICENSE_HEADER):
             errors.append(f"{name}: the license header is missing or does not match .resources/license_header")
         try:
             text = contents.decode("utf-8")
