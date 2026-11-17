@@ -382,19 +382,8 @@ version = "0.11.2"
 [build-dependencies.built]
 workspace = true
 
-[build-dependencies.toml]
-version = "1"
-
 [profile.release]
 lto = "thin"
-# uncomment the 2 lines below when building with the locktick feature or use the `release-locktick` profile
-# debug = "line-tables-only"
-# strip = "none"
-
-[profile.release-locktick]
-inherits = "release"
-debug = "line-tables-only"
-strip = "none"
 
 [profile.dev]
 debug = "line-tables-only"
