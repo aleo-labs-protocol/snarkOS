@@ -111,12 +111,12 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
             let storage_mode = storage_mode.clone();
             let genesis = genesis.clone();
 
-            let options = authority_retention.load_options();
             #[cfg(feature = "test_network")]
-            let options = match dev_hotswap_config {
-                Some(cfg) => options.with_dev_committee(prepare_dev_committee_options(&node_data_dir, cfg)?),
-                None => options,
-            };
+            let options = authority_retention.load_options_with_dev_committee(
+                dev_hotswap_config.map(|cfg| prepare_dev_committee_options(&node_data_dir, cfg)).transpose()?,
+            );
+            #[cfg(not(feature = "test_network"))]
+            let options = authority_retention.load_options();
             spawn_blocking!(Ledger::<N, C>::load_with_options(genesis, storage_mode, options))
         }
         .with_context(|| "Failed to initialize the ledger")?;
@@ -154,7 +154,7 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         let sync = Arc::new(
             BlockSync::new(ledger_service.clone(), ConnectionMode::Gateway)
                 .with_trusted_peers_only(trusted_peers_only)
-                .with_authority_retention_blocks(authority_retention.blocks)?,
+                .with_authority_retention_blocks(authority_retention.blocks()),
         );
         let locators = sync.get_block_locators()?;
         let ping = Arc::new(Ping::new(router.clone(), locators));

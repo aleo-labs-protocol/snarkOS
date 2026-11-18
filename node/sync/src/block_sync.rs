@@ -28,7 +28,7 @@ use snarkvm::{
     ledger::{
         Block,
         CheckBlockError,
-        store::{AUTHORITY_RETENTION_BLOCKS, check_authority_retention_blocks, oldest_retained_authority_height},
+        store::{AUTHORITY_RETENTION_BLOCKS, oldest_retained_authority_height},
     },
     utilities::flatten_error,
 };
@@ -107,6 +107,11 @@ pub const STUCK_SYNC_SHUTDOWN_THRESHOLD: Duration = Duration::from_secs(5 * 60);
 /// as stuck rather than caught up over P2P.
 const PEER_FLOOR_MARGIN: u32 = 50;
 
+/// The smallest authority retention window that block sync accepts. Peers are then assumed to serve at
+/// least the last `3 * PEER_FLOOR_MARGIN` blocks, so a node that falls a few minutes behind still syncs
+/// over P2P.
+pub const MIN_SYNC_RETENTION_BLOCKS: u32 = 4 * PEER_FLOOR_MARGIN;
+
 /// Returns `true` if a peer at `peer_tip` is assumed to serve block `height`: every node is
 /// assumed to prune authority data older than `retention_blocks` blocks, so a peer at `tip` serves
 /// `tip - (retention_blocks - 1)..=tip`, less `PEER_FLOOR_MARGIN` blocks at the bottom. A tip that
@@ -119,16 +124,17 @@ fn peer_can_serve(peer_tip: u32, height: u32, retention_blocks: u32) -> bool {
 
 /// Returns `true` if the range `start_height..end_height` reaches below `pruned_below`, the store's
 /// authority-pruning watermark. Genesis is never pruned.
-pub fn range_pruned(start_height: u32, end_height: u32, pruned_below: Option<u32>) -> bool {
+pub fn range_pruned(start_height: u32, end_height: u32, pruned_below: u32) -> bool {
     let first_prunable = start_height.max(1);
-    end_height > first_prunable && pruned_below.is_some_and(|pruned_below| first_prunable < pruned_below)
+    end_height > first_prunable && first_prunable < pruned_below
 }
 
 /// Returns the blocks to answer a block request for `start_height..end_height` with: the blocks
 /// from `get_blocks`, or none if this node has pruned the range or it reaches past the tip (see
 /// [`DataBlocks::ensure_response_is_well_formed`]). A range below the store's watermark
 /// (`pruned_below`) is answered empty without reading the blocks. A read error above it is returned,
-/// so that the requester sees a disconnect rather than a "pruned" signal.
+/// so that the requester sees a disconnect rather than a "pruned" signal. A failure to read the
+/// watermark does not fail the request; it is attached to a read error that it leaves unexplained.
 pub fn blocks_or_empty<N: Network>(
     start_height: u32,
     end_height: u32,
@@ -136,13 +142,27 @@ pub fn blocks_or_empty<N: Network>(
     pruned_below: impl Fn() -> Result<Option<u32>>,
     get_blocks: impl FnOnce() -> Result<Vec<Block<N>>>,
 ) -> Result<DataBlocks<N>> {
-    if range_pruned(start_height, end_height, pruned_below()?) {
-        debug!("Cannot serve block request {start_height}..{end_height} - the blocks are pruned");
-        return Ok(DataBlocks(vec![]));
+    let is_pruned = |pruned_below: Option<u32>| pruned_below.is_some_and(|w| range_pruned(start_height, end_height, w));
+    match pruned_below() {
+        Ok(pruned_below) if is_pruned(pruned_below) => {
+            debug!("Cannot serve block request {start_height}..{end_height} - the blocks are pruned");
+            return Ok(DataBlocks(vec![]));
+        }
+        Ok(_) => {}
+        Err(error) => debug!("Failed to read the authority-pruning watermark - {}", flatten_error(&error)),
     }
     get_blocks().map(DataBlocks).or_else(|error| {
         // Re-read the tip and the watermark: the range may have been pruned since the check above.
-        if end_height > latest_height().saturating_add(1) || range_pruned(start_height, end_height, pruned_below()?) {
+        let pruned = end_height > latest_height().saturating_add(1)
+            || match pruned_below() {
+                Ok(pruned_below) => is_pruned(pruned_below),
+                Err(watermark_error) => {
+                    let context =
+                        format!("Failed to read the authority-pruning watermark: {}", flatten_error(&watermark_error));
+                    return Err(error.context(context));
+                }
+            };
+        if pruned {
             debug!("Cannot serve block request {start_height}..{end_height} - {}", flatten_error(&error));
             Ok(DataBlocks(vec![]))
         } else {
@@ -367,15 +387,10 @@ impl<N: Network> BlockSync<N> {
 
     /// Sets the authority retention window assumed for every peer, whether or not this node prunes.
     /// The default is `AUTHORITY_RETENTION_BLOCKS`.
-    pub fn with_authority_retention_blocks(self, authority_retention_blocks: u32) -> Result<Self> {
-        check_authority_retention_blocks::<N>(authority_retention_blocks)?;
-        // Holds while snarkVM's minimum window exceeds the margin.
-        ensure!(
-            PEER_FLOOR_MARGIN < authority_retention_blocks,
-            "The authority retention window ({authority_retention_blocks}) must exceed the peer floor margin \
-            ({PEER_FLOOR_MARGIN})"
-        );
-        Ok(Self { authority_retention_blocks, ..self })
+    /// The window must be at least [`MIN_SYNC_RETENTION_BLOCKS`].
+    pub fn with_authority_retention_blocks(self, authority_retention_blocks: u32) -> Self {
+        debug_assert!(authority_retention_blocks >= MIN_SYNC_RETENTION_BLOCKS);
+        Self { authority_retention_blocks, ..self }
     }
 
     /// Blocks until something about a peer changes,
@@ -2860,7 +2875,7 @@ mod tests {
             assert!(blocks.unwrap().0.is_empty());
             read.get()
         };
-        // Without a watermark, every range is read, whatever the window.
+        // Without a watermark, every range is read.
         assert!(serve(1, 3, None));
         // Below the watermark, nothing is read; genesis and the watermark itself are.
         assert!(!serve(1, 3, Some(10)));
@@ -2880,6 +2895,14 @@ mod tests {
         let pruned_below = || Ok(watermark.replace(Some(latest + 1)));
         let blocks = blocks_or_empty::<CurrentNetwork>(latest, latest + 1, || latest, pruned_below, || bail!("pruned"));
         assert!(blocks.unwrap().0.is_empty());
+
+        // A failure to read the watermark does not fail the request, and is attached to a read error.
+        let no_watermark = || bail!("watermark error");
+        let blocks = blocks_or_empty::<CurrentNetwork>(1, 3, || latest, no_watermark, || Ok(vec![]));
+        assert!(blocks.unwrap().0.is_empty());
+        let error = blocks_or_empty::<CurrentNetwork>(1, 3, || latest, no_watermark, || bail!("storage error"));
+        let error = flatten_error(error.unwrap_err());
+        assert!(error.contains("watermark error") && error.contains("storage error"), "{error}");
     }
 
     #[test]
@@ -2899,12 +2922,11 @@ mod tests {
         assert_eq!(tip_with_floor(AUTHORITY_RETENTION_BLOCKS + 1 + M), 2 * AUTHORITY_RETENTION_BLOCKS);
     }
 
-    /// Tests that the configured retention window, not the default, sets the peer floor, and that a
-    /// window below snarkVM's minimum is refused.
+    /// Tests that the configured retention window, not the default, sets the peer floor.
     #[test]
     fn test_configured_retention_window() {
         const WINDOW: u32 = 300;
-        let sample_sync = || sample_sync_at_height(1_000).with_authority_retention_blocks(WINDOW).unwrap();
+        let sample_sync = || sample_sync_at_height(1_000).with_authority_retention_blocks(WINDOW);
         // A peer whose floor under this window is the next needed block can serve it.
         let tip = tip_with_floor_in(1_001, WINDOW);
         let sync = sample_sync();
@@ -2915,9 +2937,6 @@ mod tests {
         add_peers(&sync, 1, MINIMUM_NUMBER_OF_PEERS, tip + 1);
         assert!(sync.prepare_block_requests().is_empty());
         assert!(sync.sync_stuck_below_peer_floors().is_some());
-
-        let min = snarkvm::ledger::store::min_authority_retention_blocks::<CurrentNetwork>();
-        assert!(sample_sync_at_height(0).with_authority_retention_blocks(min - 1).is_err());
     }
 
     /// Tests that a peer that answered empty is not sent new requests until its locators change,

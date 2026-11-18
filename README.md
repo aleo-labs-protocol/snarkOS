@@ -278,9 +278,10 @@ peers fetch them from the CDN or an archival node.
 The first start with the flag prunes the existing ledger before the node joins the network, which can take
 a while on a large ledger. A pruned ledger opened without the flag keeps working and stops pruning.
 
-Every node assumes its peers keep this window, whether or not it prunes. On a devnet,
-`--dev-authority-retention-blocks <N>` (with `--dev`, at least 100) sets another window; pass it to every
-node of the devnet, pruning or not.
+Every node assumes its peers keep this window, whether or not it prunes. On a devnet, pass another window
+to every node, pruning or not, for example `--dev-authority-retention-blocks 300` (with `--dev`). The
+window must be at least 200 blocks, so that peers serve the last 150 blocks and a node a few minutes
+behind still syncs over P2P.
 
 ## 4. FAQs
 

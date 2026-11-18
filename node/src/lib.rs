@@ -52,16 +52,19 @@ pub use traits::*;
 
 use snarkos_node_cdn::{CdnBlockSync, CdnSyncOutcome};
 use snarkos_node_router::messages::DataBlocks;
-use snarkos_node_sync::{BlockSync, STUCK_SYNC_SHUTDOWN_THRESHOLD, blocks_or_empty};
+use snarkos_node_sync::{BlockSync, MIN_SYNC_RETENTION_BLOCKS, STUCK_SYNC_SHUTDOWN_THRESHOLD, blocks_or_empty};
 use snarkos_utilities::SignalHandler;
 use snarkvm::{
-    ledger::{LoadOptions, store::AUTHORITY_RETENTION_BLOCKS},
+    ledger::{
+        LoadOptions,
+        store::{AUTHORITY_RETENTION_BLOCKS, check_authority_retention_blocks},
+    },
     prelude::{Ledger, Network, store::ConsensusStorage},
     utilities::flatten_error,
 };
 
 use aleo_std::StorageMode;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use std::{sync::Arc, time::Duration};
 
 /// A helper to log instructions to recover.
@@ -80,14 +83,12 @@ pub fn log_clean_error(storage_mode: &StorageMode) {
     }
 }
 
-/// How a node treats the authority data of old blocks (see `--prune-authority-data`).
+/// How a node treats the authority data of old blocks (see `--prune-authority-data`). The default
+/// keeps everything and assumes peers keep `AUTHORITY_RETENTION_BLOCKS`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AuthorityRetention {
-    /// The retention window in blocks: what this node keeps if it prunes, and what it assumes every
-    /// peer keeps.
-    pub blocks: u32,
-    /// Whether this node prunes.
-    pub prune: bool,
+    blocks: u32,
+    prune: bool,
 }
 
 impl Default for AuthorityRetention {
@@ -97,9 +98,44 @@ impl Default for AuthorityRetention {
 }
 
 impl AuthorityRetention {
+    /// Returns a retention window of `blocks`, which this node keeps if `prune` is set and assumes
+    /// every peer keeps. The window must meet snarkVM's minimum and [`MIN_SYNC_RETENTION_BLOCKS`].
+    pub fn new<N: Network>(blocks: u32, prune: bool) -> Result<Self> {
+        check_authority_retention_blocks::<N>(blocks)?;
+        ensure!(
+            blocks >= MIN_SYNC_RETENTION_BLOCKS,
+            "The authority retention window must be at least {MIN_SYNC_RETENTION_BLOCKS} blocks for block sync \
+            (got {blocks})"
+        );
+        Ok(Self { blocks, prune })
+    }
+
+    /// Returns the retention window in blocks.
+    pub fn blocks(&self) -> u32 {
+        self.blocks
+    }
+
+    /// Returns `true` if this node prunes.
+    pub fn prune(&self) -> bool {
+        self.prune
+    }
+
     /// Returns the options to load the ledger with.
     fn load_options(self) -> LoadOptions {
         LoadOptions::default().with_authority_retention(self.prune.then_some(self.blocks))
+    }
+
+    /// Returns the options to load the ledger with, installing `dev_committee` if it is set.
+    #[cfg(feature = "test_network")]
+    fn load_options_with_dev_committee(
+        self,
+        dev_committee: Option<snarkvm::ledger::DevCommitteeOptions>,
+    ) -> LoadOptions {
+        let options = self.load_options();
+        match dev_committee {
+            Some(dev_committee) => options.with_dev_committee(dev_committee),
+            None => options,
+        }
     }
 }
 
@@ -266,6 +302,32 @@ pub fn notification_message() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type CurrentNetwork = snarkvm::prelude::MainnetV0;
+
+    #[test]
+    fn authority_retention_window_and_load_options() {
+        assert_eq!(AuthorityRetention::default().load_options().authority_retention, None);
+        let pruning = AuthorityRetention::new::<CurrentNetwork>(300, true).unwrap();
+        assert_eq!(pruning.load_options().authority_retention, Some(300));
+        let archival = AuthorityRetention::new::<CurrentNetwork>(300, false).unwrap();
+        assert_eq!(archival.load_options().authority_retention, None);
+
+        // Below block sync's minimum, although snarkVM's allows it.
+        assert!(AuthorityRetention::new::<CurrentNetwork>(MIN_SYNC_RETENTION_BLOCKS - 1, false).is_err());
+        assert!(AuthorityRetention::new::<CurrentNetwork>(MIN_SYNC_RETENTION_BLOCKS, false).is_ok());
+    }
+
+    #[cfg(feature = "test_network")]
+    #[test]
+    fn dev_committee_keeps_the_retention_window() {
+        let dev_committee = snarkvm::ledger::DevCommitteeOptions { start_round: None, dev_num_validators: 4, seed: 0 };
+        let pruning = AuthorityRetention::new::<CurrentNetwork>(300, true).unwrap();
+        let options = pruning.load_options_with_dev_committee(Some(dev_committee));
+        assert_eq!(options.authority_retention, Some(300));
+        assert!(options.dev_committee.is_some());
+        assert_eq!(pruning.load_options_with_dev_committee(None).authority_retention, Some(300));
+    }
 
     #[test]
     fn stuck_sync_is_fatal_at_once_only_without_a_cdn_to_wait_for() {

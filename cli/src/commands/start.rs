@@ -39,12 +39,7 @@ use snarkvm::{
     ledger::{
         block::Block,
         committee::{Committee, MIN_DELEGATOR_STAKE, MIN_VALIDATOR_STAKE},
-        store::{
-            AUTHORITY_RETENTION_BLOCKS,
-            ConsensusStore,
-            check_authority_retention_blocks,
-            helpers::memory::ConsensusMemory,
-        },
+        store::{ConsensusStore, helpers::memory::ConsensusMemory},
     },
     prelude::{FromBytes, Itertools, ToBits, ToBytes},
     synthesizer::VM,
@@ -505,12 +500,12 @@ impl Start {
     /// Returns how the node treats old authority data. The window is checked even when this node does not
     /// prune, since every node assumes its peers keep it.
     fn parse_authority_retention<N: Network>(&self) -> Result<AuthorityRetention> {
-        let authority_retention = AuthorityRetention {
-            blocks: self.dev_authority_retention_blocks.unwrap_or(AUTHORITY_RETENTION_BLOCKS),
-            prune: self.prune_authority_data,
-        };
-        check_authority_retention_blocks::<N>(authority_retention.blocks)?;
-        Ok(authority_retention)
+        // Clients and validators keep a ledger, so only they can prune it.
+        if self.prune_authority_data && !matches!(self.parse_node_type(), NodeType::Client | NodeType::Validator) {
+            bail!("`--prune-authority-data` prunes the ledger and is only supported on a client or validator");
+        }
+        let blocks = self.dev_authority_retention_blocks.unwrap_or(AuthorityRetention::default().blocks());
+        AuthorityRetention::new::<N>(blocks, self.prune_authority_data)
     }
 
     /// Returns the CDN to prefetch initial blocks from, or `None` if fetching from the CDN is disabled.
@@ -996,10 +991,6 @@ impl Start {
             dev_num_validators: self.dev_num_validators,
         });
 
-        // Clients and validators keep a ledger, so only they can prune it.
-        if self.prune_authority_data && !matches!(node_type, NodeType::Client | NodeType::Validator) {
-            bail!("`--prune-authority-data` prunes the ledger and is only supported on a client or validator");
-        }
         let authority_retention = self.parse_authority_retention::<N>()?;
 
         // JSON history is written while a client or validator finalizes blocks.
@@ -1405,13 +1396,18 @@ mod tests {
             let config = Start::try_parse_from(["snarkos"].iter().chain(args)).unwrap();
             config.parse_authority_retention::<CurrentNetwork>()
         };
+        let default_blocks = AuthorityRetention::default().blocks();
         assert_eq!(parse(&[]).unwrap(), AuthorityRetention::default());
-        let pruning = AuthorityRetention { prune: true, ..Default::default() };
+        let pruning = AuthorityRetention::new::<CurrentNetwork>(default_blocks, true).unwrap();
         assert_eq!(parse(&["--prune-authority-data"]).unwrap(), pruning);
+        assert_eq!(parse(&["--validator", "--prune-authority-data"]).unwrap(), pruning);
+        // Only clients and validators prune.
+        assert!(parse(&["--prover", "--prune-authority-data"]).is_err());
+        assert!(parse(&["--bootstrap-client", "--prune-authority-data"]).is_err());
         // A devnet window applies whether or not the node prunes, and has a floor.
-        let devnet = AuthorityRetention { blocks: 300, prune: false };
+        let devnet = AuthorityRetention::new::<CurrentNetwork>(300, false).unwrap();
         assert_eq!(parse(&["--dev", "0", "--dev-authority-retention-blocks", "300"]).unwrap(), devnet);
-        assert!(parse(&["--dev", "0", "--dev-authority-retention-blocks", "99"]).is_err());
+        assert!(parse(&["--dev", "0", "--dev-authority-retention-blocks", "199"]).is_err());
         // The devnet window requires `--dev`.
         assert!(Start::try_parse_from(["snarkos", "--dev-authority-retention-blocks", "300"].iter()).is_err());
     }
