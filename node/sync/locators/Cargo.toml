@@ -20,6 +20,9 @@ edition = "2024"
 default = [ ]
 test = [ ]
 
+[dependencies]
+rayon = "1.10"
+
 [dependencies.anyhow]
 workspace = true
 
