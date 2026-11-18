@@ -48,7 +48,7 @@ use std::{
     net::SocketAddr,
     ops::Deref,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 #[cfg(not(feature = "locktick"))]
 use tokio::sync::Mutex as TMutex;
@@ -580,11 +580,13 @@ impl<N: Network> Sync<N> {
                     break;
                 };
                 info!("Trying to sync next block at height {} with the BFT...", block.height());
+                let timer = Instant::now();
                 // Sync the storage with the block.
                 match self.sync_storage_with_block(block, true).await {
                     Ok(_) => {
                         // Update the current height if sync succeeds.
                         current_height = next_height;
+                        self.log_block_sync_step(next_height, timer);
                     }
                     Err(err) => {
                         // Mark the current height as processed in block_sync.
@@ -623,6 +625,7 @@ impl<N: Network> Sync<N> {
                     break;
                 };
                 info!("Syncing the ledger to block {}...", block.height());
+                let timer = Instant::now();
 
                 // Sync the ledger with the block without BFT.
                 match self.sync_storage_with_block(block, false).await {
@@ -630,6 +633,7 @@ impl<N: Network> Sync<N> {
                         // Update the current height if sync succeeds.
                         current_height = next_height;
                         self.block_sync.count_request_completed();
+                        self.log_block_sync_step(next_height, timer);
                     }
                     Err(err) => {
                         // Mark the current height as processed in block_sync.
@@ -649,6 +653,19 @@ impl<N: Network> Sync<N> {
 
             cleanup(start_height, current_height, None)
         }
+    }
+
+    /// Logs how long syncing the storage with the block at `height` took, measured from `timer`.
+    ///
+    /// The ledger height is part of the line because the ledger advances by a block only once a
+    /// later block confirms it, so the time covers the blocks the ledger advanced by in this step,
+    /// which is not necessarily the block at `height`.
+    fn log_block_sync_step(&self, height: u32, timer: Instant) {
+        debug!(
+            "Synced block {height} in {}ms (ledger height {})",
+            timer.elapsed().as_millis(),
+            self.ledger.latest_block_height(),
+        );
     }
 
     /// Helper function for [`Self::sync_storage_with_block`].

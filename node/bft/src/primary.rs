@@ -34,12 +34,15 @@ use crate::{
         Proposal,
         ProposalCache,
         SignedProposals,
+        SkippedMessage,
+        SkippedWhileSyncing,
         Storage,
         assign_to_worker,
         assign_to_workers,
         fmt_id,
         init_sync_channels,
         init_worker_channels,
+        is_awaiting_ledger_sync,
         now,
     },
     spawn_blocking,
@@ -185,6 +188,10 @@ pub struct Primary<N: Network> {
     /// Replaced (and the old one cancelled) on every recheck, so at most one set of resends is in flight.
     resend_token: Arc<Mutex<CancellationToken>>,
 
+    /// The batch proposals and batch certificates from peers that could not be validated
+    /// because the ledger is behind, pending their next summary in the log.
+    skipped_while_syncing: Arc<SkippedWhileSyncing>,
+
     /// The handles for all background tasks spawned by this primary.
     handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
 
@@ -251,6 +258,7 @@ impl<N: Network> Primary<N> {
             latest_proposal_timestamp: Default::default(),
             signed_proposals: Default::default(),
             resend_token: Default::default(),
+            skipped_while_syncing: Default::default(),
             handles: Default::default(),
             proposal_task: Default::default(),
             round_increment_notify: Default::default(),
@@ -1324,6 +1332,31 @@ impl<N: Network> Primary<N> {
         Ok(())
     }
 
+    /// Logs a failure to process a batch proposal or batch certificate from a peer.
+    ///
+    /// A failure that is expected because the ledger is behind is logged at TRACE and counted
+    /// towards a periodic summary; every live message from every validator fails this way until
+    /// the ledger catches up. Any other failure is logged at WARN.
+    fn log_peer_message_failure(&self, message: SkippedMessage, error: anyhow::Error) {
+        if !is_awaiting_ledger_sync(&error, self.sync.is_synced(), self.ledger.latest_round()) {
+            warn!("{}", flatten_error(error));
+            return;
+        }
+
+        trace!("{}", flatten_error(error));
+        if let Some(summary) = self.skipped_while_syncing.record(message, Instant::now()) {
+            let ledger_round = self.ledger.latest_round();
+            match self.sync.num_blocks_behind() {
+                Some(num_blocks_behind) => info!(
+                    "{summary} - the ledger is {num_blocks_behind} blocks behind (at round {ledger_round}) and has no committee for their rounds yet"
+                ),
+                None => info!(
+                    "{summary} - the ledger is behind (at round {ledger_round}) and has no committee for their rounds yet"
+                ),
+            }
+        }
+    }
+
     /// Processes a batch certificate from a peer.
     ///
     /// This method performs the following steps:
@@ -1549,7 +1582,7 @@ impl<N: Network> Primary<N> {
                     let round = batch_propose.round;
                     if let Err(err) = self__.process_batch_propose_from_peer(peer_ip, batch_propose).await {
                         let err = err.context(format!("Cannot sign a batch at round {round} from '{peer_ip}'"));
-                        warn!("{}", flatten_error(err));
+                        self__.log_peer_message_failure(SkippedMessage::BatchProposal, err);
                     }
                 });
             }
@@ -1588,12 +1621,9 @@ impl<N: Network> Primary<N> {
                     let id = fmt_id(batch_certificate.id());
                     let round = batch_certificate.round();
                     if let Err(err) = self__.process_batch_certificate_from_peer(peer_ip, batch_certificate).await {
-                        warn!(
-                            "{}",
-                            flatten_error(err.context(format!(
-                                "Cannot store a certificate '{id}' for round {round} from '{peer_ip}'"
-                            )))
-                        );
+                        let err = err
+                            .context(format!("Cannot store a certificate '{id}' for round {round} from '{peer_ip}'"));
+                        self__.log_peer_message_failure(SkippedMessage::BatchCertificate, err);
                     }
                 });
             }

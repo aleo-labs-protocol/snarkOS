@@ -43,6 +43,9 @@ pub use signed_proposals::*;
 pub mod storage;
 pub use storage::*;
 
+pub mod sync_skips;
+pub use sync_skips::*;
+
 #[cfg(feature = "metrics")]
 pub mod telemetry;
 #[cfg(feature = "metrics")]
