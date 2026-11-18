@@ -49,11 +49,11 @@ on:
         options: [default, open, per-payer]
         default: default
       min_inclusion:
-        description: "Share of the transactions sent that must land. Empty: Gauntlet's default."
+        description: "Share of the transactions sent that must land. Empty: Gauntlet's default, which judges none under packet loss."
         required: false
         default: ""
       packet_loss:
-        description: "Percent of P2P packets every node drops while sending; on the wire it comes in bursts. Inclusion is then reported, not judged. Not with a ramp."
+        description: "Percent of P2P packets every node drops while sending; on the wire it comes in bursts. Inclusion is then reported, and judged only against a min_inclusion given. Not with a ramp."
         type: choice
         options: ["0", "1", "5", "10", "20", "30", "50", "70"]
         default: "0"
@@ -72,6 +72,7 @@ jobs:
     secrets: inherit
     with:
       commit: ${{ inputs.commit }}
+      leg: ""
       tests: replay_stockpile
       validators: ${{ inputs.validators }}
       network: ${{ startsWith(inputs.stockpile, 'mainnet-') && 'mainnet' || 'testnet' }}

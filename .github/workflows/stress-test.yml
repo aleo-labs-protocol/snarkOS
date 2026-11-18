@@ -1,7 +1,7 @@
 # Copy to aleo-labs-protocol/snarkOS as .github/workflows/stress-test.yml.
 #
-# Runs snarkOS stress tests on the Gauntlet host. "Run workflow", load-test.yml, or a release
-# whose CI passed: approval in the stress-test environment, then start the Gauntlet host, which
+# Runs snarkOS stress tests on the Gauntlet host. "Run workflow", load-test.yml or release-test.yml:
+# approval in the stress-test environment, then start the Gauntlet host, which
 # stops itself when idle, and queue the run through its gate. The host reports the run as the
 # "stress-test" check on the commit, through its App, so this job ends once the run is queued.
 # gauntlet-report.yml adds the report when it finishes.
@@ -13,7 +13,6 @@
 #   environment secret  GAUNTLET_ROLE_ARN           the role
 #   environment secret  GAUNTLET_HOST_INSTANCE_ID   the Gauntlet host
 #   variable            GAUNTLET_HOST_KEY           the Gauntlet host's ssh host key line
-#   variable            GAUNTLET_RELEASE_TESTS / GAUNTLET_RELEASE_VALIDATORS   what a release runs
 name: "Gauntlet: Stress test"
 
 on:
@@ -39,9 +38,14 @@ on:
       params:
         description: "Test parameter overrides, e.g. rate=50,duration=300"
         default: ""
+      leg:
+        description: "Report as the check stress-test (LEG), beside the commit's other runs. Empty: stress-test."
+        default: ""
   workflow_call:
     inputs:
       commit:
+        type: string
+      leg:
         type: string
       tests:
         type: string
@@ -51,17 +55,14 @@ on:
         type: string
       params:
         type: string
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
-    branches: [testnet, mainnet]
 
 permissions:
   contents: read
 
 jobs:
   stress:
-    if: github.repository == 'aleo-labs-protocol/snarkOS' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository))
+    # A called workflow sees its caller's event: only a person starts a run.
+    if: github.repository == 'aleo-labs-protocol/snarkOS' && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment: stress-test
     # Past start_host's longest wait, twice: the enqueue may start the host again. Billed only if it waits.
@@ -79,33 +80,29 @@ jobs:
       - name: Resolve the request
         id: req
         env:
-          EVENT: ${{ github.event_name }}
           IN_COMMIT: ${{ inputs.commit }}
           IN_TESTS: ${{ inputs.tests }}
           IN_VALIDATORS: ${{ inputs.validators }}
           IN_NETWORK: ${{ inputs.network }}
           IN_PARAMS: ${{ inputs.params }}
-          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
-          RELEASE_TESTS: ${{ vars.GAUNTLET_RELEASE_TESTS }}
-          RELEASE_VALIDATORS: ${{ vars.GAUNTLET_RELEASE_VALIDATORS }}
+          IN_LEG: ${{ inputs.leg }}
           ACTOR: ${{ github.triggering_actor }}
         run: |
-          if [[ "$EVENT" == workflow_run ]]; then
-            commit="$RELEASE_SHA"; tests="${RELEASE_TESTS:-prerelease}"; validators="${RELEASE_VALIDATORS:-5}"
-            network=testnet; params=""
-          else
-            commit="${IN_COMMIT:-$GITHUB_SHA}"; tests="$IN_TESTS"; validators="$IN_VALIDATORS"; network="$IN_NETWORK"; params="$IN_PARAMS"
-          fi
+          commit="${IN_COMMIT:-$GITHUB_SHA}"; params="$IN_PARAMS"
           [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::commit must be a full 40-character SHA"; exit 1; }
-          for value in "$commit" "$tests" "$validators" "$network" "$params" "$ACTOR"; do
+          # A leg names the run's check, so one commit holds several runs' verdicts. It goes as a param, and in the run's id.
+          [[ "$IN_LEG" =~ ^([a-z0-9][a-z0-9-]{0,29})?$ ]] || { echo "::error::leg must be lowercase letters, digits and dashes"; exit 1; }
+          [[ ",$params" != *,leg=* ]] || { echo "::error::leg has its own field: drop leg= from params"; exit 1; }
+          [[ -z "$IN_LEG" ]] || params="leg=${IN_LEG}${params:+,$params}"
+          for value in "$commit" "$IN_TESTS" "$IN_VALIDATORS" "$IN_NETWORK" "$params" "$ACTOR"; do
             [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || {
               echo "::error::request values must be single-line"
               exit 1
             }
           done
           {
-            echo "commit=$commit"; echo "tests=$tests"; echo "validators=$validators"; echo "network=$network"
-            echo "params=$params"; echo "run_id=gh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"; echo "actor=$ACTOR"
+            echo "commit=$commit"; echo "tests=$IN_TESTS"; echo "validators=$IN_VALIDATORS"; echo "network=$IN_NETWORK"
+            echo "params=$params"; echo "run_id=gh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}${IN_LEG:+-$IN_LEG}"; echo "actor=$ACTOR"; echo "check=stress-test${IN_LEG:+ ($IN_LEG)}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Connect to the Gauntlet host
@@ -186,6 +183,7 @@ jobs:
           PARAMS: ${{ steps.req.outputs.params }}
           RUN_ID: ${{ steps.req.outputs.run_id }}
           ACTOR: ${{ steps.req.outputs.actor }}
+          CHECK: ${{ steps.req.outputs.check }}
         run: |
           source "$RUNNER_TEMP/gate.sh"
           # Only a rejection's message reaches the summary.
@@ -198,7 +196,7 @@ jobs:
             start_host || { : > enqueue.err; exit 1; }
             gate "${request[@]}" 2> enqueue.err
           fi
-          echo "Queued \`$RUN_ID\`. The stress-test check on \`${COMMIT:0:10}\` reports it." >> "$GITHUB_STEP_SUMMARY"
+          echo "Queued \`$RUN_ID\`. The $CHECK check on \`${COMMIT:0:10}\` reports it." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Report a rejection or an orchestration failure
         if: failure() && steps.req.outcome == 'success'

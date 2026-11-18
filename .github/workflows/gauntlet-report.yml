@@ -27,10 +27,12 @@ jobs:
     if: >-
       github.repository == 'aleo-labs-protocol/snarkOS'
       && github.event.check_run.app.slug == 'snarkos-gauntlet'
-      && (github.event.check_run.name == 'stress-test' || github.event.check_run.name == 'sync-test')
+      && (github.event.check_run.name == 'stress-test' || startsWith(github.event.check_run.name, 'stress-test (')
+      || github.event.check_run.name == 'sync-test' || startsWith(github.event.check_run.name, 'sync-test ('))
       && contains(fromJSON('["success", "failure", "action_required", "neutral"]'), github.event.check_run.conclusion)
     runs-on: ubuntu-latest
-    environment: ${{ github.event.check_run.name }}-status
+    # A run with a leg reports as "stress-test (LEG)".
+    environment: ${{ startsWith(github.event.check_run.name, 'sync-test') && 'sync-test' || 'stress-test' }}-status
     timeout-minutes: 60
     permissions:
       id-token: write
