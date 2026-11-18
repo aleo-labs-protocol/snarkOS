@@ -71,10 +71,10 @@ use tracing::{debug, info, warn};
 use ureq::http;
 
 /// The minimum open-files limit for a node that opens the ledger.
-/// RocksDB keeps up to 8,192 ledger table files open (snarkVM's `max_open_files` setting), plus its log, manifest and
-/// compaction files. A validator needs about 2,048 more for its connections, and the rest is headroom.
+/// RocksDB keeps up to `MAX_OPEN_FILES` (8,192) ledger table files open, plus its log, manifest and compaction files.
+/// A validator needs about 2,048 more for its connections, and the rest is headroom.
 #[cfg(target_family = "unix")]
-const MIN_NOFILES_LIMIT: u64 = 16384;
+const MIN_NOFILES_LIMIT: u64 = 2 * snarkvm::ledger::store::helpers::rocksdb::MAX_OPEN_FILES as u64;
 
 /// Default (and maximum) concurrent REST deploy verifications.
 const DEFAULT_NUM_VERIFYING_DEPLOYS: usize =
