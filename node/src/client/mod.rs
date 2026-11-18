@@ -47,7 +47,7 @@ use snarkvm::{
         puzzle::{Puzzle, Solution, SolutionID},
         store::{ConsensusStorage, StorageMode},
     },
-    prelude::{VM, block::Transaction},
+    prelude::{ProgramID, VM, block::Transaction},
 };
 
 use anyhow::{Context, Result};
@@ -138,6 +138,8 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
         rest_verification_limits: RestVerificationLimits,
         history_api_url: Option<String>,
         history_json: bool,
+        history_programs: Vec<ProgramID<N>>,
+        archival: bool,
         account: Account<N>,
         trusted_peers: &[SocketAddr],
         genesis: Block<N>,
@@ -161,6 +163,8 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
         if history_json {
             ledger.vm().finalize_store().set_record_history_json(true);
         }
+        ledger.vm().finalize_store().set_history_programs(history_programs);
+        ledger.vm().finalize_store().set_archival(archival);
 
         // Initialize the ledger service.
         let ledger_service = Arc::new(CoreLedgerService::<N, C>::new(ledger.clone(), signal_handler.clone()));
