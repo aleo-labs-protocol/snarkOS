@@ -122,14 +122,16 @@ fn check_block_retained(height: u32, pruned_below: Option<u32>) -> Result<(), Re
 /// Returns a `410 Gone` if the non-empty range `start..end` reaches below the watermark (see
 /// [`check_block_retained`]).
 fn check_range_retained(start: u32, end: u32, pruned_below: Option<u32>) -> Result<(), RestError> {
-    let Some(earliest) = pruned_below.filter(|_| range_pruned(start, end, pruned_below)) else {
-        return Ok(());
-    };
-    let height = start.max(1);
-    Err(RestError::gone(anyhow!(
-        "block {height} is below this node's authority retention window (earliest {earliest}); \
-        use /block/{height}/header, /block/{height}/transactions, or an archival node"
-    )))
+    if let Some(earliest) = pruned_below
+        && range_pruned(start, end, pruned_below)
+    {
+        let height = start.max(1);
+        return Err(RestError::gone(anyhow!(
+            "the authority of block {height} has been pruned (earliest {earliest}); \
+            use /block/{height}/header, /block/{height}/transactions, or an archival node"
+        )));
+    }
+    Ok(())
 }
 
 /// Deserialize a CSV string into a vector of strings.

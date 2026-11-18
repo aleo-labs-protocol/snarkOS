@@ -113,8 +113,8 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
 
             let options = authority_retention.load_options();
             #[cfg(feature = "test_network")]
-            let options = match dev_hotswap_config.map(|cfg| prepare_dev_committee_options(&node_data_dir, cfg)) {
-                Some(config) => options.with_dev_committee(config?),
+            let options = match dev_hotswap_config {
+                Some(cfg) => options.with_dev_committee(prepare_dev_committee_options(&node_data_dir, cfg)?),
                 None => options,
             };
             spawn_blocking!(Ledger::<N, C>::load_with_options(genesis, storage_mode, options))

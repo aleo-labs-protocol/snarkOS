@@ -1405,13 +1405,12 @@ mod tests {
             let config = Start::try_parse_from(["snarkos"].iter().chain(args)).unwrap();
             config.parse_authority_retention::<CurrentNetwork>()
         };
-        let retention = parse(&[]).unwrap();
-        assert_eq!((retention.blocks, retention.prune), (AUTHORITY_RETENTION_BLOCKS, false));
-        let retention = parse(&["--prune-authority-data"]).unwrap();
-        assert_eq!((retention.blocks, retention.prune), (AUTHORITY_RETENTION_BLOCKS, true));
+        assert_eq!(parse(&[]).unwrap(), AuthorityRetention::default());
+        let pruning = AuthorityRetention { prune: true, ..Default::default() };
+        assert_eq!(parse(&["--prune-authority-data"]).unwrap(), pruning);
         // A devnet window applies whether or not the node prunes, and has a floor.
-        let retention = parse(&["--dev", "0", "--dev-authority-retention-blocks", "300"]).unwrap();
-        assert_eq!((retention.blocks, retention.prune), (300, false));
+        let devnet = AuthorityRetention { blocks: 300, prune: false };
+        assert_eq!(parse(&["--dev", "0", "--dev-authority-retention-blocks", "300"]).unwrap(), devnet);
         assert!(parse(&["--dev", "0", "--dev-authority-retention-blocks", "99"]).is_err());
         // The devnet window requires `--dev`.
         assert!(Start::try_parse_from(["snarkos", "--dev-authority-retention-blocks", "300"].iter()).is_err());

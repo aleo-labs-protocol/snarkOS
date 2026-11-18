@@ -81,7 +81,7 @@ pub fn log_clean_error(storage_mode: &StorageMode) {
 }
 
 /// How a node treats the authority data of old blocks (see `--prune-authority-data`).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AuthorityRetention {
     /// The retention window in blocks: what this node keeps if it prunes, and what it assumes every
     /// peer keeps.

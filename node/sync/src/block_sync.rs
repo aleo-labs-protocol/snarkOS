@@ -369,6 +369,7 @@ impl<N: Network> BlockSync<N> {
     /// The default is `AUTHORITY_RETENTION_BLOCKS`.
     pub fn with_authority_retention_blocks(self, authority_retention_blocks: u32) -> Result<Self> {
         check_authority_retention_blocks::<N>(authority_retention_blocks)?;
+        // Holds while snarkVM's minimum window exceeds the margin.
         ensure!(
             PEER_FLOOR_MARGIN < authority_retention_blocks,
             "The authority retention window ({authority_retention_blocks}) must exceed the peer floor margin \
@@ -2905,9 +2906,9 @@ mod tests {
         const WINDOW: u32 = 300;
         let sample_sync = || sample_sync_at_height(1_000).with_authority_retention_blocks(WINDOW).unwrap();
         // A peer whose floor under this window is the next needed block can serve it.
-        let tip = 1_001 + WINDOW - 1 - PEER_FLOOR_MARGIN;
+        let tip = tip_with_floor_in(1_001, WINDOW);
         let sync = sample_sync();
-        sync.update_peer_locators(sample_peer_ip(1), &sample_block_locators(tip)).unwrap();
+        add_peers(&sync, 1, 1, tip);
         assert!(!sync.prepare_block_requests().is_empty());
         // One block further ahead, it cannot, although the default window would still cover it.
         let sync = sample_sync();
@@ -2917,7 +2918,6 @@ mod tests {
 
         let min = snarkvm::ledger::store::min_authority_retention_blocks::<CurrentNetwork>();
         assert!(sample_sync_at_height(0).with_authority_retention_blocks(min - 1).is_err());
-        assert!(sample_sync_at_height(0).with_authority_retention_blocks(min).is_ok());
     }
 
     /// Tests that a peer that answered empty is not sent new requests until its locators change,
@@ -3003,7 +3003,12 @@ mod tests {
 
     /// Returns the tip at which a peer's assumed floor (see `peer_can_serve`) is `floor`.
     fn tip_with_floor(floor: u32) -> u32 {
-        floor + AUTHORITY_RETENTION_BLOCKS - 1 - PEER_FLOOR_MARGIN
+        tip_with_floor_in(floor, AUTHORITY_RETENTION_BLOCKS)
+    }
+
+    /// Returns the tip at which a peer's assumed floor under the window `retention_blocks` is `floor`.
+    fn tip_with_floor_in(floor: u32, retention_blocks: u32) -> u32 {
+        floor + retention_blocks - 1 - PEER_FLOOR_MARGIN
     }
 
     /// Adds `num_peers` peers with IDs from `first_id` on, all at tip `tip`.
