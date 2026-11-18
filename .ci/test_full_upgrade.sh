@@ -10,6 +10,9 @@
 # 4. Compute CONSENSUS_VERSION_HEIGHTS for latest release and PR.
 # 5. Start the devnet with latest release binaries and pass CONSENSUS_VERSION_HEIGHTS to nodes.
 # 6. Restart nodes one-by-one with the PR binary.
+#    After upgrading the first validator, restart the last validator on the release binary and check
+#    that it dials the upgraded validator. After upgrading the first client, do the same for the
+#    last client.
 ####################################################
 
 set -eo pipefail  # error on any command failure
@@ -308,6 +311,176 @@ function wait_for_height_increase_window() {
   fi
 }
 
+# Prints the given message and the tail of the given node log, then exits the test.
+function fail_with_log() {
+  local log_file="$1"
+  local message="$2"
+
+  echo "❌ $message"
+  echo "Last 50 lines of $(basename "$log_file"):"
+  tail -n 50 "$log_file" || true
+  exit 1
+}
+
+# Blocks until a node that was just (re)started serves its REST API again. Exits the test otherwise.
+# Without this, a node that fails to come back up is not distinguishable from a chain that stopped
+# advancing.
+function wait_for_restarted_node() {
+  local description="$1"
+  local log_file="$2"
+
+  if ! wait_for_nodes "$total_validators" "$total_clients" "$network_name" "$MAX_RESTART_WAIT"; then
+    fail_with_log "$log_file" "Restart failed: ${description} did not become ready within ${MAX_RESTART_WAIT}s."
+  fi
+}
+
+# Blocks until the chain advances for WAIT_BETWEEN_UPGRADES seconds. Exits the test otherwise.
+# Call it only once the restarted node is back, so that the window measures the network advancing
+# *with* it, rather than crediting progress made while it was down.
+function wait_for_chain_to_advance() {
+  local description="$1"
+  local log_file="$2"
+
+  local baseline_height
+  baseline_height=$(get_network_block_height "$((total_validators + total_clients))" "$network_name")
+  if ! (is_integer "$baseline_height"); then
+    baseline_height=0
+  fi
+
+  if ! wait_for_height_increase_window "$baseline_height" "$WAIT_BETWEEN_UPGRADES" 5; then
+    fail_with_log "$log_file" "Restart failed: chain did not advance after restarting ${description}."
+  fi
+}
+
+# Blocks for up to max_wait seconds until the given log has a line at or after since_epoch that
+# matches the given extended regex.
+function wait_for_log_line_since() {
+  local log_file="$1"
+  local since_epoch="$2"
+  local pattern="$3"
+  local max_wait="$4"
+
+  local start
+  start=$(now)
+  while (( $(elapsed_since "$start") < max_wait )); do
+    local lines
+    lines=$(log_lines_since "$log_file" "$since_epoch")
+    if grep -qE "$pattern" <<< "$lines"; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+# Succeeds if the node with the given index is connected to peer_addr over its gateway ("bft") or
+# router ("p2p"), and that peer opened the connection: since since_epoch, the node's log has an
+# inbound connection request and no outbound handshake with peer_addr.
+#
+# Both lines are logged when a handshake starts. A failed inbound handshake does not pass: the node
+# then connects only by dialing the peer itself, which logs the outbound handshake.
+function check_connection_opened_by_peer() {
+  local node_index="$1"
+  local kind="$2"
+  local peer_addr="$3"
+  local log_file="$4"
+  local since_epoch="$5"
+
+  local target
+  if [ "$kind" = "bft" ]; then
+    target="snarkos_node_bft::gateway: \[MemoryPool\]"
+  else
+    target="snarkos_node_router::handshake:"
+  fi
+
+  local connected
+  connected=$(curl -s "http://$localhost:$((3030 + node_index))/v2/$network_name/connections/$kind/all")
+  if ! grep -qF "\"$peer_addr\"" <<< "$connected"; then
+    return 1
+  fi
+
+  local lines
+  lines=$(log_lines_since "$log_file" "$since_epoch")
+  grep -qE "$target Received a connection request" <<< "$lines" &&
+    ! grep -qE "$target Shaking hands with '?${peer_addr}'?\.\.\." <<< "$lines"
+}
+
+# Restarts a node that still runs the release binary on the release binary, with its flags and
+# ledger unchanged. Its handshakes with the upgraded nodes then have the old node as the initiator.
+# Checks that it reconnects, that it opened the connection to an upgraded node, and that the chain
+# advances.
+function restart_on_release_binary() {
+  local node_index="$1"
+  local role="$2"
+  local log_file="$3"
+  local description="release ${role} (node index ${node_index})"
+
+  log "=============================="
+  log "Restarting ${description} so that it dials upgraded nodes"
+  log "=============================="
+
+  local since_epoch
+  since_epoch=$(epoch_now)
+  stop_node "$node_index"
+
+  if [ "$role" = "validator" ]; then
+    # Validator 0 redials a missing validator on each gateway heartbeat, 15s apart; the restarted
+    # validator dials its peers 1s after it starts listening. Starting it right after a heartbeat
+    # of validator 0 lets it dial first.
+    #
+    # HAZARD: if the restarted validator takes more than about 13s to start listening, validator 0
+    # may dial it first, and the direction check below fails.
+    if ! wait_for_log_line_since "$log_dir/validator-0.log" "$since_epoch" \
+        "snarkos_node_bft::gateway: Reconnecting to" 60; then
+      fail_with_log "$log_dir/validator-0.log" "Validator 0 did not try to reconnect to the stopped ${description}."
+    fi
+  fi
+
+  since_epoch=$(epoch_now)
+  start_node "$SNARKOS_RELEASE_BIN" "$node_index" "$role" "$log_file"
+  wait_for_restarted_node "$description" "$log_file"
+
+  # Check the direction before the height window: from then on, peers may disconnect and redial for
+  # unrelated reasons.
+  if [ "$role" = "validator" ]; then
+    if ! wait_for_bft_connections "$node_index" "$((total_validators - 1))" "$network_name" ||
+       ! wait_for_bft_connections 0 "$((total_validators - 1))" "$network_name"; then
+      fail_with_log "$log_file" "The ${description} did not reconnect to all validators."
+    fi
+    # Validator 0 is the only upgraded validator at this point.
+    if ! check_connection_opened_by_peer 0 bft "127.0.0.1:$((5000 + node_index))" \
+        "$log_dir/validator-0.log" "$since_epoch"; then
+      fail_with_log "$log_dir/validator-0.log" "Validator 0 did not accept a gateway connection from the ${description}."
+    fi
+    log "✅ The ${description} opened a gateway connection to upgraded validator 0."
+  else
+    # A dev client dials two validators.
+    if ! wait_for_peers "$node_index" 2 "$network_name"; then
+      fail_with_log "$log_file" "The ${description} did not reconnect to its peers."
+    fi
+    # Every validator is upgraded at this point. A validator lists the client shortly after the
+    # client lists the validator.
+    local responder=""
+    local validator_index
+    for _ in $(seq 1 10); do
+      for validator_index in $(seq 0 $((total_validators - 1))); do
+        if check_connection_opened_by_peer "$validator_index" p2p "127.0.0.1:$((4130 + node_index))" \
+            "$log_dir/validator-$validator_index.log" "$since_epoch"; then
+          responder="$validator_index"
+          break 2
+        fi
+      done
+      sleep 1
+    done
+    if [ -z "$responder" ]; then
+      fail_with_log "$log_file" "No upgraded validator accepted a router connection from the ${description}."
+    fi
+    log "✅ The ${description} opened a router connection to upgraded validator ${responder}."
+  fi
+
+  wait_for_chain_to_advance "$description" "$log_file"
+}
+
 ########################################
 # MAIN
 ########################################
@@ -369,27 +542,16 @@ for node_index in $(seq 0 $((total_validators+total_clients-1))); do
   stop_node "$node_index"
   start_node "$SNARKOS_CURRENT_BIN" "$node_index" "$role" "$log_file"
 
-  # Block until the upgraded node serves its REST API again. Without this, a node that
-  # fails to come back up is not distinguishable from a chain that stopped advancing.
-  if ! wait_for_nodes "$total_validators" "$total_clients" "$network_name" "$MAX_RESTART_WAIT"; then
-    echo "❌ Upgrade failed: ${role} ${idx_label} (node index ${node_index}) did not become ready within ${MAX_RESTART_WAIT}s."
-    echo "Last 50 lines of ${role} ${idx_label} log:"
-    tail -n 50 "$log_file" || true
-    exit 1
-  fi
+  description="upgraded ${role} ${idx_label} (node index ${node_index})"
+  wait_for_restarted_node "$description" "$log_file"
+  wait_for_chain_to_advance "$description" "$log_file"
 
-  # Take the baseline only once the upgraded node is back, so that the window measures the
-  # network advancing *with* it, rather than crediting progress made while it was down.
-  baseline_height=$(get_network_block_height "$((total_validators + total_clients))" "$network_name")
-  if ! (is_integer "$baseline_height"); then
-    baseline_height=0
-  fi
-
-  if ! wait_for_height_increase_window "$baseline_height" "$WAIT_BETWEEN_UPGRADES" 5; then
-    echo "❌ Upgrade failed: chain did not advance after restarting ${role} ${idx_label} (node index ${node_index})."
-    echo "Last 50 lines of ${role} ${idx_label} log:"
-    tail -n 50 "$log_file" || true
-    exit 1
+  # The last validator and the last client still run the release binary.
+  if (( node_index == 0 )); then
+    last_validator=$((total_validators - 1))
+    restart_on_release_binary "$last_validator" validator "$log_dir/validator-$last_validator.log"
+  elif (( node_index == total_validators && total_clients >= 2 )); then
+    restart_on_release_binary "$((total_validators + total_clients - 1))" client "$log_dir/client-$((total_clients - 1)).log"
   fi
 done
 
