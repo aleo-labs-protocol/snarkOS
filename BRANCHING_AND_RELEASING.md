@@ -32,7 +32,7 @@ To build what runs on a network, check out its latest release tag:
 ./scripts/checkout-latest-release.sh testnet
 ```
 
-This replaces `git checkout mainnet` and `git pull`. The script asks GitHub for the newest release, checks out its tag, and prints the commit. It leaves git on a detached HEAD, so rerun it to update. It needs `curl` and `jq`.
+This replaces `git checkout mainnet` and `git pull`. The script asks GitHub for the newest release, checks out its tag, and prints the commit. It leaves git on a detached HEAD, so rerun it to update. The `scripts/run-*.sh` scripts run what is checked out and no longer pull. It needs `curl` and `jq`.
 
 ## CI
 

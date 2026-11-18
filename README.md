@@ -88,6 +88,11 @@ cd snarkOS
 ```
 Rerun the script to update to a new release. See [Branching and Releasing](BRANCHING_AND_RELEASING.md).
 
+A release older than `v5.0.0` does not contain the script. From such a checkout, run it from `staging`:
+```
+git fetch origin staging && git show FETCH_HEAD:scripts/checkout-latest-release.sh | bash -s mainnet
+```
+
 **[For Ubuntu users]** A helper script to install dependencies is available. From the `snarkOS` directory, run:
 ```
 ./build_ubuntu.sh

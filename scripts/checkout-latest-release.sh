@@ -23,5 +23,5 @@ tag=$(curl -fsSL "https://api.github.com/repos/$repo/releases?per_page=100" | jq
 cd "$(dirname "$0")"
 # Without --force, git refuses to replace a tag that was moved after it was fetched.
 git fetch --no-tags "https://github.com/$repo.git" "refs/tags/$tag:refs/tags/$tag"
-git checkout --detach "$tag"
+git checkout --detach "refs/tags/$tag"
 echo "Checked out $tag ($(git rev-parse --short HEAD))"
