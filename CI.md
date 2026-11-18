@@ -18,14 +18,14 @@ Jobs run in one of two places:
 
 | Event | Runs |
 |---|---|
-| Pull request | `fmt`, `deny`, `shellcheck`, `source-checks`, `machete`, `lint`, `test`, `build-snarkos`, `devnet`, `ci-ok` |
-| Push to `staging`, `canary`, `testnet`, `mainnet`, or manual dispatch | the above, plus `devnet-merge`, `windows` |
-| Push to `canary`, `testnet`, `mainnet`, or manual dispatch | the above, plus `devnet-release` |
+| Pull request into `staging` | `fmt`, `deny`, `shellcheck`, `source-checks`, `machete`, `lint`, `test`, `build-snarkos`, `devnet`, `ci-ok` |
+| Push to `staging` | the above, plus `devnet-merge`, `windows` |
+| Pull request into `release/**`, push to `release/**`, or manual dispatch | the above, plus `devnet-release` |
 
 ## Jobs
 
-A job marked "merge" runs only on the second row of the table above, and a job
-marked "release" only on the third. The other jobs run on every event.
+A job marked "merge" runs on the second and third rows of the table above, and
+a job marked "release" only on the third. The other jobs run on every event.
 
 | Job | Runner | Trigger | Timeout (min) | What it runs |
 |---|---|---|---|---|
@@ -55,7 +55,7 @@ marked "release" only on the third. The other jobs run on every event.
 | `devnet (chaotic-restart-all)` | `cpu` | release | 45 | `test_restart_all.sh`, with delays |
 | `machete` | hosted | all | | `cargo machete` |
 | `windows` | hosted (Windows) | merge | | `cargo check --examples --benches --tests` in `account`, `cli`, `display`, `node` |
-| `ci-ok` | hosted | all | | fails unless every job a pull request runs succeeded |
+| `ci-ok` | hosted | all | | fails unless every job succeeded; a merge or release job may be skipped where it is not meant to run |
 
 A job with no timeout gets the GitHub default of six hours. Only hosted jobs
 have none, and a hosted job holds no fleet box.
@@ -66,7 +66,7 @@ passed for a required check, and a fleet job is skipped when
 fails in both cases.
 
 A pull request that changes only Markdown files starts no run, so it gets no
-`ci-ok` check. A push runs everything. Where a branch rule requires `ci-ok`,
+`ci-ok` check. Where a branch rule requires `ci-ok`,
 such a pull request cannot merge until a workflow reports that check for it.
 
 ## Test groups

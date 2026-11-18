@@ -19,7 +19,7 @@ The `mainnet`, `testnet` and `canary` branches are no longer updated. The networ
 | `vX.Y.Z` | Release | mainnet |
 
 - Release tags are made only on release branches.
-- A final tag `vX.Y.Z` goes on the same commit as the accepted release candidate. mainnet runs exactly the commit that testnet accepted.
+- A final tag `vX.Y.Z` goes on the accepted release candidate's commit, or on one that differs from it only in Cargo manifests, when the final pins snarkVM's published release. mainnet runs the code that testnet accepted.
 - Never move or delete a release tag.
 - Tags of the form `testnet-vX.Y.Z` come from the old process.
 
@@ -36,7 +36,7 @@ This replaces `git checkout mainnet` and `git pull`. The script asks GitHub for 
 
 ## CI
 
-Pull requests that target a `release/**` branch, and pushes to a `release/**` branch, run the merge and release jobs in addition to the normal CI. See [CI.md](CI.md).
+Pull requests that target a `release/**` branch, and pushes to a `release/**` branch, run the merge and release jobs in addition to the normal CI, and `ci-ok` fails if one is skipped. See [CI.md](CI.md).
 
 ## Release process
 
@@ -49,11 +49,11 @@ The example below makes the `v5.0` release.
    git push origin origin/staging:refs/heads/release/v5.0
    ```
 
-2. **Bump the version and pin snarkVM.** Open a pull request against `release/v5.0` that sets every crate version to `5.0.0` and pins snarkVM to its release candidate tag. Push fixes to the same pull request until CI passes. Work on `staging` continues as usual.
+2. **Bump the version and pin snarkVM.** Open a pull request against `release/v5.0` that sets every crate version to `5.0.0` and pins snarkVM to its release candidate. The pin is moved by hand. Push fixes to the same pull request until CI passes. Work on `staging` continues as usual.
 
 3. **Tag a release candidate.** When no more changes are planned, tag the head of `release/v5.0` as `v5.0.0-rc.1` and make a GitHub pre-release from the tag. Operators take it to testnet. If testnet finds a problem, fix it with a pull request against `release/v5.0`, and tag `v5.0.0-rc.2`. Repeat until a release candidate is accepted.
 
-4. **Release.** When testnet accepts a release candidate, tag the same commit as `v5.0.0` and make a GitHub release from the tag. Operators take it to mainnet. snarkVM's final tag is on the same commit as its release candidate, so the pin does not change.
+4. **Release.** When testnet accepts a release candidate, tag the same commit as `v5.0.0` and make a GitHub release from the tag. Operators take it to mainnet.
 
 5. **Merge the release branch into staging.** A bot does this after each change to the release branch. See [Merging a release branch](#merging-a-release-branch).
 
