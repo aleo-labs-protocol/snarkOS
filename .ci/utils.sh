@@ -462,6 +462,7 @@ function check_nodes() {
   local total_clients=$2
   local network_name=$3
 
+  local node_index port status
   for node_index in $(seq 0 $((total_validators+total_clients-1))); do
     port=$((3030 + node_index))
     status=$(curl -s -o /dev/null -w "%{http_code}" "http://$localhost:$port/v2/$network_name/version")
@@ -963,7 +964,7 @@ function get_network_block_height() {
   local network_name=$2
 
   local greatest=""
-  local height
+  local height node_index
 
   for ((node_index = 0; node_index < total_nodes; node_index++)); do
     height=$(get_block_height_by_port $((3030 + node_index)) "$network_name" 5)
