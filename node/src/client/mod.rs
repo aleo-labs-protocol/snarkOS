@@ -190,7 +190,7 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
         let sync = Arc::new(
             BlockSync::new(ledger_service.clone(), ConnectionMode::Router)
                 .with_trusted_peers_only(trusted_peers_only)
-                .with_authority_retention_blocks(authority_retention.blocks()),
+                .with_authority_retention_blocks(authority_retention.blocks())?,
         );
 
         // Set up the ping logic.

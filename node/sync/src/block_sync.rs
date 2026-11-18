@@ -129,12 +129,46 @@ pub fn range_pruned(start_height: u32, end_height: u32, pruned_below: u32) -> bo
     end_height > first_prunable && first_prunable < pruned_below
 }
 
+/// Returns `true` if a store at `latest_height` may have pruned part of `start_height..end_height`.
+/// Every accepted window is at least [`MIN_SYNC_RETENTION_BLOCKS`], so a range above that many recent
+/// blocks is retained without reading the watermark, whatever window pruned the store.
+pub fn range_may_be_pruned(start_height: u32, end_height: u32, latest_height: u32) -> bool {
+    range_pruned(start_height, end_height, oldest_retained_authority_height(latest_height, MIN_SYNC_RETENTION_BLOCKS))
+}
+
+/// Whether the store has pruned a range of blocks, by its authority-pruning watermark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RangePruning {
+    /// The range reaches below the watermark `pruned_below`.
+    Pruned { pruned_below: u32 },
+    /// The range is retained.
+    Retained,
+    /// The watermark could not be read.
+    Unknown,
+}
+
+impl RangePruning {
+    /// Returns whether `start_height..end_height` is pruned, given the result of reading the
+    /// watermark. A failure to read it is logged.
+    pub fn of(start_height: u32, end_height: u32, pruned_below: Result<Option<u32>>) -> Self {
+        match pruned_below {
+            Ok(Some(pruned_below)) if range_pruned(start_height, end_height, pruned_below) => {
+                Self::Pruned { pruned_below }
+            }
+            Ok(_) => Self::Retained,
+            Err(error) => {
+                warn!("Failed to read the authority-pruning watermark - {}", flatten_error(&error));
+                Self::Unknown
+            }
+        }
+    }
+}
+
 /// Returns the blocks to answer a block request for `start_height..end_height` with: the blocks
 /// from `get_blocks`, or none if this node has pruned the range or it reaches past the tip (see
 /// [`DataBlocks::ensure_response_is_well_formed`]). A range below the store's watermark
-/// (`pruned_below`) is answered empty without reading the blocks. A read error above it is returned,
-/// so that the requester sees a disconnect rather than a "pruned" signal. A failure to read the
-/// watermark does not fail the request; it is attached to a read error that it leaves unexplained.
+/// (`pruned_below`) is answered empty without reading the blocks. Any other read error is returned,
+/// so that the requester sees a disconnect rather than a "pruned" signal.
 pub fn blocks_or_empty<N: Network>(
     start_height: u32,
     end_height: u32,
@@ -142,33 +176,21 @@ pub fn blocks_or_empty<N: Network>(
     pruned_below: impl Fn() -> Result<Option<u32>>,
     get_blocks: impl FnOnce() -> Result<Vec<Block<N>>>,
 ) -> Result<DataBlocks<N>> {
-    let is_pruned = |pruned_below: Option<u32>| pruned_below.is_some_and(|w| range_pruned(start_height, end_height, w));
-    match pruned_below() {
-        Ok(pruned_below) if is_pruned(pruned_below) => {
-            debug!("Cannot serve block request {start_height}..{end_height} - the blocks are pruned");
-            return Ok(DataBlocks(vec![]));
-        }
-        Ok(_) => {}
-        Err(error) => debug!("Failed to read the authority-pruning watermark - {}", flatten_error(&error)),
+    let pruned = || matches!(RangePruning::of(start_height, end_height, pruned_below()), RangePruning::Pruned { .. });
+    if pruned() {
+        debug!("Cannot serve block request {start_height}..{end_height} - the blocks are pruned");
+        return Ok(DataBlocks(vec![]));
     }
-    get_blocks().map(DataBlocks).or_else(|error| {
-        // Re-read the tip and the watermark: the range may have been pruned since the check above.
-        let pruned = end_height > latest_height().saturating_add(1)
-            || match pruned_below() {
-                Ok(pruned_below) => is_pruned(pruned_below),
-                Err(watermark_error) => {
-                    let context =
-                        format!("Failed to read the authority-pruning watermark: {}", flatten_error(&watermark_error));
-                    return Err(error.context(context));
-                }
-            };
-        if pruned {
-            debug!("Cannot serve block request {start_height}..{end_height} - {}", flatten_error(&error));
-            Ok(DataBlocks(vec![]))
-        } else {
-            Err(error)
-        }
-    })
+    let error = match get_blocks() {
+        Ok(blocks) => return Ok(DataBlocks(blocks)),
+        Err(error) => error,
+    };
+    // Re-read the tip and the watermark: the range may have been pruned since the check above.
+    if end_height > latest_height().saturating_add(1) || pruned() {
+        debug!("Cannot serve block request {start_height}..{end_height} - {}", flatten_error(&error));
+        return Ok(DataBlocks(vec![]));
+    }
+    Err(error)
 }
 
 /// This is a dummy IP address that is used to represent the local node.
@@ -386,11 +408,14 @@ impl<N: Network> BlockSync<N> {
     }
 
     /// Sets the authority retention window assumed for every peer, whether or not this node prunes.
-    /// The default is `AUTHORITY_RETENTION_BLOCKS`.
-    /// The window must be at least [`MIN_SYNC_RETENTION_BLOCKS`].
-    pub fn with_authority_retention_blocks(self, authority_retention_blocks: u32) -> Self {
-        debug_assert!(authority_retention_blocks >= MIN_SYNC_RETENTION_BLOCKS);
-        Self { authority_retention_blocks, ..self }
+    /// The default is `AUTHORITY_RETENTION_BLOCKS`, and the minimum [`MIN_SYNC_RETENTION_BLOCKS`].
+    pub fn with_authority_retention_blocks(self, authority_retention_blocks: u32) -> Result<Self> {
+        ensure!(
+            authority_retention_blocks >= MIN_SYNC_RETENTION_BLOCKS,
+            "The authority retention window must be at least {MIN_SYNC_RETENTION_BLOCKS} blocks for block sync \
+            (got {authority_retention_blocks})"
+        );
+        Ok(Self { authority_retention_blocks, ..self })
     }
 
     /// Blocks until something about a peer changes,
@@ -2896,13 +2921,51 @@ mod tests {
         let blocks = blocks_or_empty::<CurrentNetwork>(latest, latest + 1, || latest, pruned_below, || bail!("pruned"));
         assert!(blocks.unwrap().0.is_empty());
 
-        // A failure to read the watermark does not fail the request, and is attached to a read error.
+        // A failure to read the watermark does not fail the request: the blocks are read.
         let no_watermark = || bail!("watermark error");
-        let blocks = blocks_or_empty::<CurrentNetwork>(1, 3, || latest, no_watermark, || Ok(vec![]));
-        assert!(blocks.unwrap().0.is_empty());
+        let read = std::cell::Cell::new(false);
+        let get_blocks = || {
+            read.set(true);
+            Ok(vec![])
+        };
+        assert!(blocks_or_empty::<CurrentNetwork>(1, 3, || latest, no_watermark, get_blocks).is_ok());
+        assert!(read.get());
+        // With a read error too, the read error is returned unchanged.
         let error = blocks_or_empty::<CurrentNetwork>(1, 3, || latest, no_watermark, || bail!("storage error"));
-        let error = flatten_error(error.unwrap_err());
-        assert!(error.contains("watermark error") && error.contains("storage error"), "{error}");
+        let error = error.unwrap_err();
+        assert_eq!((error.to_string().as_str(), error.chain().count()), ("storage error", 1));
+        // A failed first read of the watermark, then a re-read that finds the range pruned: empty.
+        let reads = std::cell::Cell::new(0);
+        let pruned_below = || match reads.replace(reads.get() + 1) {
+            0 => bail!("watermark error"),
+            _ => Ok(Some(latest + 1)),
+        };
+        let blocks = blocks_or_empty::<CurrentNetwork>(latest, latest + 1, || latest, pruned_below, || bail!("pruned"));
+        assert!(blocks.unwrap().0.is_empty());
+        // Past the tip, the response is empty whatever the watermark read does.
+        let blocks =
+            blocks_or_empty::<CurrentNetwork>(latest, latest + 2, || latest, no_watermark, || bail!("missing"));
+        assert!(blocks.unwrap().0.is_empty());
+    }
+
+    /// Tests how a watermark read decides that a range is pruned, and which ranges may be pruned.
+    #[test]
+    fn test_range_pruning() {
+        const W: u32 = 1_000;
+        assert_eq!(RangePruning::of(1, 2, Ok(None)), RangePruning::Retained);
+        assert_eq!(RangePruning::of(W, W + 1, Ok(Some(W))), RangePruning::Retained);
+        assert_eq!(RangePruning::of(0, 1, Ok(Some(W))), RangePruning::Retained);
+        assert_eq!(RangePruning::of(5, 5, Ok(Some(W))), RangePruning::Retained);
+        assert_eq!(RangePruning::of(0, 10, Ok(Some(W))), RangePruning::Pruned { pruned_below: W });
+        assert_eq!(RangePruning::of(W - 1, W, Ok(Some(W))), RangePruning::Pruned { pruned_below: W });
+        assert_eq!(RangePruning::of(W - 1, W, Err(anyhow!("watermark error"))), RangePruning::Unknown);
+
+        // The last `MIN_SYNC_RETENTION_BLOCKS` blocks are never pruned; genesis never is.
+        let latest = 10_000;
+        let first_retained = latest - (MIN_SYNC_RETENTION_BLOCKS - 1);
+        assert!(!range_may_be_pruned(first_retained, latest + 1, latest));
+        assert!(range_may_be_pruned(first_retained - 1, first_retained, latest));
+        assert!(!range_may_be_pruned(0, 1, latest));
     }
 
     #[test]
@@ -2922,11 +2985,12 @@ mod tests {
         assert_eq!(tip_with_floor(AUTHORITY_RETENTION_BLOCKS + 1 + M), 2 * AUTHORITY_RETENTION_BLOCKS);
     }
 
-    /// Tests that the configured retention window, not the default, sets the peer floor.
+    /// Tests that the configured retention window, not the default, sets the peer floor, and that a
+    /// window below block sync's minimum is refused.
     #[test]
     fn test_configured_retention_window() {
         const WINDOW: u32 = 300;
-        let sample_sync = || sample_sync_at_height(1_000).with_authority_retention_blocks(WINDOW);
+        let sample_sync = || sample_sync_at_height(1_000).with_authority_retention_blocks(WINDOW).unwrap();
         // A peer whose floor under this window is the next needed block can serve it.
         let tip = tip_with_floor_in(1_001, WINDOW);
         let sync = sample_sync();
@@ -2937,6 +3001,9 @@ mod tests {
         add_peers(&sync, 1, MINIMUM_NUMBER_OF_PEERS, tip + 1);
         assert!(sync.prepare_block_requests().is_empty());
         assert!(sync.sync_stuck_below_peer_floors().is_some());
+
+        let below_minimum = sample_sync_at_height(0).with_authority_retention_blocks(MIN_SYNC_RETENTION_BLOCKS - 1);
+        assert!(below_minimum.is_err());
     }
 
     /// Tests that a peer that answered empty is not sent new requests until its locators change,

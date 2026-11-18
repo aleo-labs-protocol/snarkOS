@@ -57,7 +57,7 @@ use snarkos_utilities::SignalHandler;
 use snarkvm::{
     ledger::{
         LoadOptions,
-        store::{AUTHORITY_RETENTION_BLOCKS, check_authority_retention_blocks},
+        store::{AUTHORITY_RETENTION_BLOCKS, min_authority_retention_blocks},
     },
     prelude::{Ledger, Network, store::ConsensusStorage},
     utilities::flatten_error,
@@ -99,14 +99,10 @@ impl Default for AuthorityRetention {
 
 impl AuthorityRetention {
     /// Returns a retention window of `blocks`, which this node keeps if `prune` is set and assumes
-    /// every peer keeps. The window must meet snarkVM's minimum and [`MIN_SYNC_RETENTION_BLOCKS`].
+    /// every peer keeps. The window must meet both snarkVM's minimum and [`MIN_SYNC_RETENTION_BLOCKS`].
     pub fn new<N: Network>(blocks: u32, prune: bool) -> Result<Self> {
-        check_authority_retention_blocks::<N>(blocks)?;
-        ensure!(
-            blocks >= MIN_SYNC_RETENTION_BLOCKS,
-            "The authority retention window must be at least {MIN_SYNC_RETENTION_BLOCKS} blocks for block sync \
-            (got {blocks})"
-        );
+        let min = min_authority_retention_blocks::<N>().max(MIN_SYNC_RETENTION_BLOCKS);
+        ensure!(blocks >= min, "The authority retention window must be at least {min} blocks (got {blocks})");
         Ok(Self { blocks, prune })
     }
 
