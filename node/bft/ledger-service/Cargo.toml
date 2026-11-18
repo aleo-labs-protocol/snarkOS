@@ -87,6 +87,10 @@ workspace = true
 optional = true
 features = [ "log" ]
 
+[dev-dependencies.snarkos-utilities]
+workspace = true
+features = [ "test-helpers" ]
+
 [dev-dependencies.snarkvm]
 workspace = true
 features = [ "test-helpers" ]

@@ -57,6 +57,9 @@ pub use puzzle_request::PuzzleRequest;
 mod puzzle_response;
 pub use puzzle_response::PuzzleResponse;
 
+#[cfg(any(test, feature = "fuzz-helpers"))]
+mod samples;
+
 mod unconfirmed_solution;
 pub use unconfirmed_solution::UnconfirmedSolution;
 

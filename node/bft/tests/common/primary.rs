@@ -30,12 +30,11 @@ use snarkos_node_bft::{
 use snarkos_node_bft_storage_service::BFTMemoryService;
 use snarkos_node_network::{ConnectionMode, PeerPoolHandling};
 use snarkos_node_sync::BlockSync;
-use snarkos_utilities::{NodeDataDir, SimpleStoppable};
+use snarkos_utilities::{NodeDataDir, SimpleStoppable, test_fixture::cached_fixture};
 
 use snarkvm::{
     console::{
         account::{Address, PrivateKey},
-        algorithms::{BHP256, Hash},
         network::Network,
     },
     ledger::{
@@ -45,7 +44,7 @@ use snarkvm::{
         narwhal::BatchHeader,
         store::{ConsensusStore, StorageMode, helpers::memory::ConsensusMemory},
     },
-    prelude::{CryptoRng, FromBytes, Rng, TestRng, ToBits, ToBytes, VM},
+    prelude::{CryptoRng, FromBytes, Rng, TestRng, ToBytes, VM},
     utilities::to_bytes_le,
 };
 
@@ -379,6 +378,21 @@ pub fn new_test_committee(n: u16, rng: &mut TestRng) -> (Vec<Account<CurrentNetw
     (accounts, committee)
 }
 
+/// Initializes a test committee of `n` members that every test process of this binary shares, so
+/// that they also share the genesis block [`genesis_ledger`] builds for it.
+///
+/// `rng` seeds the committee only in the process that stores the seed.
+pub fn shared_test_committee(n: u16, rng: &mut TestRng) -> (Vec<Account<CurrentNetwork>>, Committee<CurrentNetwork>) {
+    let seed = cached_fixture(
+        "committee-seed",
+        &[],
+        |seed: &u64| seed.to_le_bytes().to_vec(),
+        |bytes| Some(u64::from_le_bytes(bytes.try_into().ok()?)),
+        || rng.random(),
+    );
+    new_test_committee(n, &mut TestRng::fixed(seed))
+}
+
 fn genesis_cache() -> &'static Mutex<HashMap<Vec<u8>, Block<CurrentNetwork>>> {
     static CACHE: OnceLock<Mutex<HashMap<Vec<u8>, Block<CurrentNetwork>>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -414,17 +428,13 @@ pub fn genesis_ledger(
         .lock()
         .entry(cache_key.clone())
         .or_insert_with(|| {
-            let hasher = BHP256::<CurrentNetwork>::setup("aleo.dev.block").unwrap();
-            let file_name = hasher.hash(&cache_key.to_bits_le()).unwrap().to_string() + ".genesis";
-            let file_path = std::env::temp_dir().join(file_name);
-            if file_path.exists() {
-                let buffer = std::fs::read(file_path).unwrap();
-                return Block::from_bytes_le(&buffer).unwrap();
-            }
-
-            let block = genesis_block(genesis_private_key, committee, public_balances, bonded_balances, rng);
-            std::fs::write(&file_path, block.to_bytes_le().unwrap()).unwrap();
-            block
+            cached_fixture(
+                "genesis",
+                &cache_key,
+                |block: &Block<CurrentNetwork>| block.to_bytes_le().unwrap(),
+                |bytes| Block::from_bytes_le(bytes).ok(),
+                || genesis_block(genesis_private_key, committee, public_balances, bonded_balances, rng),
+            )
         })
         .clone();
     // Initialize the ledger with the genesis block.

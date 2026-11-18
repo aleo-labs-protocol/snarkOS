@@ -188,17 +188,38 @@ pub mod prop_tests {
     #![cfg_attr(not(test), allow(unused_imports))]
     use crate::{BlockRequest, BlockResponse, DataBlocks, block_request::prop_tests::any_block_request};
 
+    use snarkos_utilities::test_fixture::cached_fixture;
     use snarkvm::{
         console::network::ConsensusVersion,
-        ledger::{narwhal::Data, test_helpers::sample_genesis_block},
+        ledger::narwhal::Data,
         prelude::{FromBytes, TestRng, ToBytes, block::Block},
     };
 
     use bytes::{Buf, BufMut, BytesMut};
     use proptest::prelude::{BoxedStrategy, ProptestConfig, Strategy, any};
+    use std::sync::OnceLock;
     use test_strategy::proptest;
 
     type CurrentNetwork = snarkvm::prelude::MainnetV0;
+
+    /// Returns a sample genesis block, which costs two execution proofs to build.
+    ///
+    /// Every call returns the same block, whatever `rng` is, and so does every test process of this
+    /// binary.
+    pub fn sample_genesis_block(rng: &mut TestRng) -> Block<CurrentNetwork> {
+        static BLOCK: OnceLock<Block<CurrentNetwork>> = OnceLock::new();
+        BLOCK
+            .get_or_init(|| {
+                cached_fixture(
+                    "sample-genesis-block",
+                    &[],
+                    |block: &Block<CurrentNetwork>| block.to_bytes_le().unwrap(),
+                    |bytes| Block::from_bytes_le(bytes).ok(),
+                    || snarkvm::ledger::test_helpers::sample_genesis_block(rng),
+                )
+            })
+            .clone()
+    }
 
     pub fn any_block_response() -> BoxedStrategy<BlockResponse<CurrentNetwork>> {
         (any_block_request(), any::<u64>())

@@ -29,7 +29,7 @@ test-helpers = [ "dep:rand_chacha", "dep:rand", "dep:proptest" ]
 # means something narrower here (it pulls the rng and proptest dependencies but
 # un-gates nothing). Enabling this in a production build would compile the
 # generators into the binary, so it is deliberately not implied by anything.
-fuzz-helpers = [ "test-helpers", "dep:test-strategy", "dep:time", "snarkos-node-sync-locators/test", "snarkvm/test-helpers", "snarkvm/algorithms" ]
+fuzz-helpers = [ "test-helpers", "dep:snarkos-utilities", "dep:test-strategy", "dep:time", "snarkos-node-sync-locators/test", "snarkvm/test-helpers", "snarkvm/algorithms" ]
 
 [dependencies.anyhow]
 workspace = true
@@ -57,6 +57,11 @@ workspace = true
 
 [dependencies.snarkos-node-sync-locators]
 workspace = true
+
+[dependencies.snarkos-utilities]
+workspace = true
+features = [ "test-helpers" ]
+optional = true
 
 [dependencies.snarkos-node-tcp]
 workspace = true
@@ -104,6 +109,10 @@ workspace = true
 [dev-dependencies.snarkos-node-sync-locators]
 workspace = true
 features = [ "test" ]
+
+[dev-dependencies.snarkos-utilities]
+workspace = true
+features = [ "test-helpers" ]
 
 [dev-dependencies.snarkos-node-bft-events]
 path = "."

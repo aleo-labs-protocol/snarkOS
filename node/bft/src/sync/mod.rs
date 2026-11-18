@@ -1108,7 +1108,7 @@ mod tests {
     use snarkos_account::Account;
     use snarkos_node_network::ConnectionMode;
     use snarkos_node_sync::BlockSync;
-    use snarkos_utilities::{NodeDataDir, SimpleStoppable};
+    use snarkos_utilities::{NodeDataDir, SimpleStoppable, test_fixture::Fixture};
 
     use snarkvm::{
         console::{
@@ -1119,7 +1119,7 @@ mod tests {
             narwhal::{BatchCertificate, BatchHeader, Subdag},
             store::{ConsensusStore, StorageMode, helpers::memory::ConsensusMemory},
         },
-        prelude::{Ledger, VM},
+        prelude::{FromBytes, Ledger, ToBytes, VM},
         utilities::TestRng,
     };
 
@@ -1131,27 +1131,28 @@ mod tests {
     type CurrentLedger = Ledger<CurrentNetwork, ConsensusMemory<CurrentNetwork>>;
     type CurrentConsensusStore = ConsensusStore<CurrentNetwork, ConsensusMemory<CurrentNetwork>>;
 
-    /// Create four blocks, where only the last one contains enough certificates to advance the ledger.
-    async fn setup_commit_chain(rng: &mut TestRng) -> (Block<CurrentNetwork>, Vec<Block<CurrentNetwork>>) {
-        static CHAIN_CACHE: OnceLock<(Block<CurrentNetwork>, Vec<Block<CurrentNetwork>>)> = OnceLock::new();
+    /// Returns the genesis block of a ledger with four validators, and their private keys.
+    ///
+    /// Every call returns the same block and keys, whatever `rng` is, and so does every test process
+    /// of this binary.
+    async fn sample_genesis(rng: &mut TestRng) -> (Block<CurrentNetwork>, [PrivateKey<CurrentNetwork>; 4]) {
+        static GENESIS_CACHE: OnceLock<(Block<CurrentNetwork>, [PrivateKey<CurrentNetwork>; 4])> = OnceLock::new();
 
-        // Use cached version if it exists.
-        if let Some((genesis, blocks)) = CHAIN_CACHE.get() {
-            return (genesis.clone(), blocks.clone());
+        if let Some(genesis) = GENESIS_CACHE.get() {
+            return genesis.clone();
         }
 
-        // Initialize the round parameters.
-        let max_gc_rounds = BatchHeader::<CurrentNetwork>::MAX_GC_ROUNDS as u64;
-
-        // The first round of the first block.
-        let first_round: u64 = 1;
-        // The total number of blocks we test
-        let num_blocks = 3;
-        // The last round of the last block.
-        let last_round = first_round + num_blocks * 2;
-        // The first round that has at least N-f certificates referencing the anchor from the previous round.
-        // This is also the last round we use in the test.
-        let first_threshold_round = 5;
+        let fixture = Fixture::open("sync-genesis", &[]);
+        let stored = fixture.load(|mut bytes| {
+            let mut private_keys = Vec::with_capacity(4);
+            for _ in 0..4 {
+                private_keys.push(PrivateKey::read_le(&mut bytes).ok()?);
+            }
+            Some((Block::read_le(&mut bytes).ok()?, private_keys.try_into().ok()?))
+        });
+        if let Some(genesis) = stored {
+            return GENESIS_CACHE.get_or_init(|| genesis).clone();
+        }
 
         // Initialize the store.
         let store = CurrentConsensusStore::open(StorageMode::new_test(None)).unwrap();
@@ -1171,6 +1172,52 @@ mod tests {
             PrivateKey::new(genesis_rng).unwrap(),
             PrivateKey::new(genesis_rng).unwrap(),
         ];
+
+        let mut bytes = Vec::new();
+        private_keys.as_slice().write_le(&mut bytes).unwrap();
+        genesis.write_le(&mut bytes).unwrap();
+        fixture.store(&bytes);
+
+        GENESIS_CACHE.get_or_init(|| (genesis, private_keys)).clone()
+    }
+
+    /// Create four blocks, where only the last one contains enough certificates to advance the ledger.
+    ///
+    /// Every call returns the same blocks, whatever `rng` is, and so does every test process of this
+    /// binary.
+    async fn setup_commit_chain(rng: &mut TestRng) -> (Block<CurrentNetwork>, Vec<Block<CurrentNetwork>>) {
+        static CHAIN_CACHE: OnceLock<(Block<CurrentNetwork>, Vec<Block<CurrentNetwork>>)> = OnceLock::new();
+
+        // Use cached version if it exists.
+        if let Some((genesis, blocks)) = CHAIN_CACHE.get() {
+            return (genesis.clone(), blocks.clone());
+        }
+
+        let fixture = Fixture::open("sync-commit-chain", &[]);
+        let stored = fixture.load(|mut bytes| {
+            let genesis = Block::read_le(&mut bytes).ok()?;
+            let num_blocks = u32::read_le(&mut bytes).ok()?;
+            let blocks = (0..num_blocks).map(|_| Block::read_le(&mut bytes).ok()).collect::<Option<Vec<_>>>()?;
+            Some((genesis, blocks))
+        });
+        if let Some(chain) = stored {
+            return CHAIN_CACHE.get_or_init(|| chain).clone();
+        }
+
+        // Initialize the round parameters.
+        let max_gc_rounds = BatchHeader::<CurrentNetwork>::MAX_GC_ROUNDS as u64;
+
+        // The first round of the first block.
+        let first_round: u64 = 1;
+        // The total number of blocks we test
+        let num_blocks = 3;
+        // The last round of the last block.
+        let last_round = first_round + num_blocks * 2;
+        // The first round that has at least N-f certificates referencing the anchor from the previous round.
+        // This is also the last round we use in the test.
+        let first_threshold_round = 5;
+
+        let (genesis, private_keys) = sample_genesis(rng).await;
 
         // Initialize the ledger with the genesis block.
         let genesis_clone = genesis.clone();
@@ -1323,6 +1370,12 @@ mod tests {
 
             blocks.push(block);
         }
+
+        let mut bytes = Vec::new();
+        genesis.write_le(&mut bytes).unwrap();
+        (blocks.len() as u32).write_le(&mut bytes).unwrap();
+        blocks.write_le(&mut bytes).unwrap();
+        fixture.store(&bytes);
 
         CHAIN_CACHE.get_or_init(|| (genesis, blocks)).clone()
     }
@@ -1742,24 +1795,7 @@ mod tests {
         let max_gc_rounds = BatchHeader::<CurrentNetwork>::MAX_GC_ROUNDS as u64;
         let commit_round = 2;
 
-        // Initialize the store.
-        let store = CurrentConsensusStore::open(StorageMode::new_test(None)).unwrap();
-        let account: Account<CurrentNetwork> = Account::new(rng)?;
-
-        // Create a genesis block with a seeded RNG to reproduce the same genesis private keys.
-        let seed: u64 = rng.random();
-        let vm = VM::from(store).unwrap();
-        let genesis_pk = *account.private_key();
-        let genesis = spawn_blocking!(vm.genesis_beacon(&genesis_pk, &mut TestRng::from_seed(seed))).unwrap();
-
-        // Extract the private keys from the genesis committee by using the same RNG to sample private keys.
-        let genesis_rng = &mut TestRng::from_seed(seed);
-        let private_keys = [
-            *account.private_key(),
-            PrivateKey::new(genesis_rng)?,
-            PrivateKey::new(genesis_rng)?,
-            PrivateKey::new(genesis_rng)?,
-        ];
+        let (genesis, private_keys) = sample_genesis(rng).await;
 
         // Initialize the ledger with the genesis block.
         let core_ledger = {

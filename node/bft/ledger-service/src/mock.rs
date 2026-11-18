@@ -62,10 +62,8 @@ impl<N: Network> MockLedgerService<N> {
 
     /// Initializes a new mock ledger service at the specified height.
     pub fn new_at_height(committee: Committee<N>, height: u32) -> Self {
-        let mut height_to_hash = BTreeMap::new();
-        for i in 0..=height {
-            height_to_hash.insert(i, (i as u64 * 2, Field::<N>::from_u32(i).into()));
-        }
+        let height_to_hash: BTreeMap<_, _> =
+            (0..=height).map(|i| (i, (i as u64 * 2, Field::<N>::from_u32(i).into()))).collect();
         Self { height_to_round_and_hash: Mutex::new(height_to_hash), ..Self::new(committee) }
     }
 

@@ -681,7 +681,7 @@ impl<N: Network> Worker<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::helpers::CALLBACK_EXPIRATION_IN_SECS;
+    use crate::{helpers::CALLBACK_EXPIRATION_IN_SECS, test_helpers::sample_transaction};
     use snarkos_node_bft_ledger_service::{BeginLedgerUpdateError, LedgerService, LedgerUpdateService};
     use snarkos_node_bft_storage_service::BFTMemoryService;
     use snarkvm::{
@@ -692,7 +692,6 @@ mod tests {
             PendingBlock,
             committee::Committee,
             narwhal::{BatchCertificate, Transmission, TransmissionID},
-            test_helpers::sample_execution_transaction_with_fee,
         },
         prelude::Address,
     };
@@ -1045,7 +1044,7 @@ mod tests {
 
         // Create the Worker.
         let worker = Worker::new(0, Arc::new(gateway), storage, ledger, Default::default()).unwrap();
-        let transaction = sample_execution_transaction_with_fee(false, rng, 0);
+        let transaction = sample_transaction(rng);
         let transaction_id = transaction.id();
         let transaction_data = Data::Object(transaction);
         let checksum = transaction_data.to_checksum::<CurrentNetwork>().unwrap();
@@ -1120,7 +1119,7 @@ mod tests {
 
         // Create the Worker.
         let worker = Worker::new(0, Arc::new(gateway), storage, ledger, Default::default()).unwrap();
-        let transaction = sample_execution_transaction_with_fee(false, rng, 0);
+        let transaction = sample_transaction(rng);
         let transaction_id = transaction.id();
         let transaction_data = Data::Object(transaction);
         let checksum = transaction_data.to_checksum::<CurrentNetwork>().unwrap();

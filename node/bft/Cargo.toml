@@ -202,6 +202,10 @@ features = [ "test" ]
 workspace = true
 features = [ "test" ]
 
+[dev-dependencies.snarkos-utilities]
+workspace = true
+features = [ "test-helpers" ]
+
 [dev-dependencies.snarkvm]
 workspace = true
 features = [ "prop-tests" ]

@@ -2237,15 +2237,13 @@ impl<N: Network> Primary<N> {
 #[cfg(test)]
 mod tests {
     use super::{proposal_task::BatchPropose as _, *};
+    use crate::test_helpers::sample_transaction;
 
     use snarkos_node_bft_ledger_service::MockLedgerService;
     use snarkos_node_bft_storage_service::BFTMemoryService;
     use snarkos_node_sync::BlockSync;
     use snarkvm::{
-        ledger::{
-            committee::{Committee, MIN_VALIDATOR_STAKE},
-            test_helpers::sample_execution_transaction_with_fee,
-        },
+        ledger::committee::{Committee, MIN_VALIDATOR_STAKE},
         prelude::{Address, Signature},
     };
 
@@ -2345,7 +2343,7 @@ mod tests {
     fn sample_unconfirmed_transaction(
         rng: &mut TestRng,
     ) -> (<CurrentNetwork as Network>::TransactionID, Data<Transaction<CurrentNetwork>>) {
-        let transaction = sample_execution_transaction_with_fee(false, rng, 0);
+        let transaction = sample_transaction(rng);
         let id = transaction.id();
 
         (id, Data::Object(transaction))
@@ -2580,7 +2578,7 @@ mod tests {
         let peer_ip = accounts[1].0;
 
         // Queue a valid transaction, a transaction buffer with a trailing byte, and another valid transaction.
-        let bad_transaction = sample_execution_transaction_with_fee(false, &mut rng, 0);
+        let bad_transaction = sample_transaction(&mut rng);
         // A sampled transaction always serializes.
         let mut bad_bytes = bad_transaction.to_bytes_le().unwrap();
         bad_bytes.push(0);
