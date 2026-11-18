@@ -109,6 +109,9 @@ fn parse_log_verbosity(verbosity: u8) -> Result<EnvFilter> {
         filter.add_directive("snarkos_node_tcp=off".parse().unwrap())
     };
 
+    // The snarkVM timing spans and events (target `timing::<module path>`) are only shown with a custom log filter.
+    let filter = filter.add_directive("timing=off".parse().unwrap());
+
     Ok(filter)
 }
 
@@ -130,6 +133,8 @@ fn parse_log_filter(filter_str: &str) -> Result<EnvFilter> {
 /// 5 => info, debug, trace, snarkos_node_router=trace
 /// 6 => info, debug, trace, snarkos_node_tcp=trace
 /// ```
+///
+/// The snarkVM `timing` targets are off at every level.
 pub fn initialize_logger<P: AsRef<Path>>(
     verbosity: u8,
     log_filter: &Option<String>,
@@ -262,5 +267,22 @@ mod tests {
 
         let result = parse_log_filter("snarkos=trace");
         assert!(result.is_ok(), "must allow valid log filter");
+    }
+
+    #[test]
+    fn timing_targets_are_off_at_every_verbosity() {
+        for verbosity in 0..=6 {
+            let subscriber = tracing_subscriber::registry().with(parse_log_verbosity(verbosity).unwrap());
+            tracing::subscriber::with_default(subscriber, || {
+                // `tracing` caches whether a callsite is enabled from the subscribers that existed when it was first hit.
+                tracing::callsite::rebuild_interest_cache();
+                let timing_event = tracing::enabled!(target: "timing::snarkvm_ledger", tracing::Level::TRACE);
+                let timing_span = !tracing::trace_span!(target: "timing::snarkvm_ledger", "Ledger::load").is_disabled();
+                let snarkvm_event = tracing::enabled!(target: "snarkvm_ledger", tracing::Level::TRACE);
+                assert!(!timing_event, "verbosity {verbosity} enables timing events");
+                assert!(!timing_span, "verbosity {verbosity} enables timing spans");
+                assert_eq!(snarkvm_event, verbosity >= 2, "verbosity {verbosity} changes the other snarkVM targets");
+            });
+        }
     }
 }
