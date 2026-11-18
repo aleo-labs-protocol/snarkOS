@@ -739,6 +739,7 @@ impl<N: Network> Gateway<N> {
                         start_height,
                         end_height,
                         || self_.ledger.latest_block_height(),
+                        || self_.ledger.authority_pruned_below(),
                         || self_.ledger.get_blocks(start_height..end_height),
                     )
                     .map_err(|error| {

@@ -39,6 +39,8 @@ pub async fn client_with_genesis(
         RestVerificationLimits::max::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>(),
         None,  // No history compatibility mode.
         false, // Do not write JSON history.
+        // Keep all authority data, and assume peers keep the standard window.
+        Default::default(),
         Account::<CurrentNetwork>::from_str("APrivateKey1zkp2oVPTci9kKcUprnbzMwq95Di1MQERpYBhEeqvkrDirK1").unwrap(),
         &[],
         genesis,
@@ -77,6 +79,8 @@ pub async fn validator() -> Validator<CurrentNetwork, ConsensusMemory<CurrentNet
         RestVerificationLimits::max::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>(),
         None,  // No history compatibility mode.
         false, // Do not write JSON history.
+        // Keep all authority data, and assume peers keep the standard window.
+        Default::default(),
         Account::<CurrentNetwork>::from_str("APrivateKey1zkp2oVPTci9kKcUprnbzMwq95Di1MQERpYBhEeqvkrDirK1").unwrap(),
         &[],
         &[],

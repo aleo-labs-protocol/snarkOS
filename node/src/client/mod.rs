@@ -16,6 +16,7 @@
 mod router;
 
 use crate::{
+    AuthorityRetention,
     CdnFallback,
     bft::{helpers::fmt_id, ledger_service::CoreLedgerService, spawn_blocking},
     cdn::CdnBlockSync,
@@ -140,6 +141,7 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
         rest_verification_limits: RestVerificationLimits,
         history_api_url: Option<String>,
         history_json: bool,
+        authority_retention: AuthorityRetention,
         account: Account<N>,
         trusted_peers: &[SocketAddr],
         genesis: Block<N>,
@@ -155,7 +157,11 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
             let storage_mode = storage_mode.clone();
             let genesis = genesis.clone();
 
-            spawn_blocking!(Ledger::<N, C>::load(genesis, storage_mode))
+            spawn_blocking!(Ledger::<N, C>::load_with_options(
+                genesis,
+                storage_mode,
+                authority_retention.load_options()
+            ))
         }
         .with_context(|| "Failed to initialize the ledger")?;
 
@@ -182,7 +188,9 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
 
         // Initialize the sync module.
         let sync = Arc::new(
-            BlockSync::new(ledger_service.clone(), ConnectionMode::Router).with_trusted_peers_only(trusted_peers_only),
+            BlockSync::new(ledger_service.clone(), ConnectionMode::Router)
+                .with_trusted_peers_only(trusted_peers_only)
+                .with_authority_retention_blocks(authority_retention.blocks)?,
         );
 
         // Set up the ping logic.

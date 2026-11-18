@@ -21,6 +21,7 @@ use crate::helpers::{
 use snarkos_account::Account;
 use snarkos_display::Display;
 use snarkos_node::{
+    AuthorityRetention,
     Node,
     bft::MEMORY_POOL_PORT,
     network::{NodeType, bootstrap_peers},
@@ -38,7 +39,12 @@ use snarkvm::{
     ledger::{
         block::Block,
         committee::{Committee, MIN_DELEGATOR_STAKE, MIN_VALIDATOR_STAKE},
-        store::{ConsensusStore, helpers::memory::ConsensusMemory},
+        store::{
+            AUTHORITY_RETENTION_BLOCKS,
+            ConsensusStore,
+            check_authority_retention_blocks,
+            helpers::memory::ConsensusMemory,
+        },
     },
     prelude::{FromBytes, Itertools, ToBits, ToBytes},
     synthesizer::VM,
@@ -350,6 +356,10 @@ pub struct Start {
     #[clap(long)]
     pub nocdn: bool,
 
+    /// Prune the authority data (certificates) of blocks older than the retention window. See "Prune Old Authority Data"
+    #[clap(long)]
+    pub prune_authority_data: bool,
+
     /// Enables development mode used to set up test networks.
     ///
     /// The purpose of this flag is to run multiple nodes on the same machine and in the same working directory.
@@ -378,6 +388,11 @@ pub struct Start {
     /// If development mode is enabled, specify the custom bonded balances as a JSON object.
     #[clap(long, group = "dev_flags")]
     pub dev_bonded_balances: Option<BondedBalances>,
+
+    /// If development mode is enabled, set the authority retention window in blocks: what this node keeps with
+    /// `--prune-authority-data`, and what it assumes every peer keeps. Pass the same value to every node of the devnet.
+    #[clap(long, group = "dev_flags", hide = true)]
+    pub dev_authority_retention_blocks: Option<u32>,
 
     /// If development mode is enabled, specify whether to run the node on a production ledger.
     #[clap(long, group = "dev_flags", requires = "dev_num_validators", default_value_t = false)]
@@ -485,6 +500,17 @@ impl Start {
             "The `--history-compat-mode` URL '{url}' must be absolute, e.g. https://mainnet.historical-staking.provable.com"
         );
         Ok(Some(url))
+    }
+
+    /// Returns how the node treats old authority data. The window is checked even when this node does not
+    /// prune, since every node assumes its peers keep it.
+    fn parse_authority_retention<N: Network>(&self) -> Result<AuthorityRetention> {
+        let authority_retention = AuthorityRetention {
+            blocks: self.dev_authority_retention_blocks.unwrap_or(AUTHORITY_RETENTION_BLOCKS),
+            prune: self.prune_authority_data,
+        };
+        check_authority_retention_blocks::<N>(authority_retention.blocks)?;
+        Ok(authority_retention)
     }
 
     /// Returns the CDN to prefetch initial blocks from, or `None` if fetching from the CDN is disabled.
@@ -970,6 +996,12 @@ impl Start {
             dev_num_validators: self.dev_num_validators,
         });
 
+        // Clients and validators keep a ledger, so only they can prune it.
+        if self.prune_authority_data && !matches!(node_type, NodeType::Client | NodeType::Validator) {
+            bail!("`--prune-authority-data` prunes the ledger and is only supported on a client or validator");
+        }
+        let authority_retention = self.parse_authority_retention::<N>()?;
+
         // JSON history is written while a client or validator finalizes blocks.
         if self.history_json && !matches!(node_type, NodeType::Client | NodeType::Validator) {
             bail!("`--history-json` writes JSON history and is only supported on a client or validator");
@@ -1000,9 +1032,9 @@ impl Start {
 
         // Initialize the node.
         let node = match node_type {
-            NodeType::Validator => Node::new_validator(node_ip, self.bft, rest_ip, self.rest_rps, rest_verification_limits, history_api_url.clone(), self.history_json, account, &trusted_peers, &trusted_validators, genesis, cdn, storage_mode, node_data_dir, self.trusted_peers_only, self.auto_db_checkpoints.clone(), dev_txs, self.dev, dev_hotswap_config, self.proposal_spent_limit_multiplier, signal_handler.clone()).await,
+            NodeType::Validator => Node::new_validator(node_ip, self.bft, rest_ip, self.rest_rps, rest_verification_limits, history_api_url.clone(), self.history_json, authority_retention, account, &trusted_peers, &trusted_validators, genesis, cdn, storage_mode, node_data_dir, self.trusted_peers_only, self.auto_db_checkpoints.clone(), dev_txs, self.dev, dev_hotswap_config, self.proposal_spent_limit_multiplier, signal_handler.clone()).await,
             NodeType::Prover => Node::new_prover(node_ip, account, &trusted_peers, genesis, node_data_dir, self.trusted_peers_only, self.dev, signal_handler.clone()).await,
-            NodeType::Client => Node::new_client(node_ip, rest_ip, self.rest_rps, rest_verification_limits, history_api_url.clone(), self.history_json, account, &trusted_peers, genesis, cdn, storage_mode, node_data_dir, self.trusted_peers_only, self.auto_db_checkpoints.clone(), self.dev, signal_handler.clone()).await,
+            NodeType::Client => Node::new_client(node_ip, rest_ip, self.rest_rps, rest_verification_limits, history_api_url.clone(), self.history_json, authority_retention, account, &trusted_peers, genesis, cdn, storage_mode, node_data_dir, self.trusted_peers_only, self.auto_db_checkpoints.clone(), self.dev, signal_handler.clone()).await,
             NodeType::BootstrapClient => Node::new_bootstrap_client(node_ip, account, *genesis.header(), self.dev).await,
         }?;
 
@@ -1365,6 +1397,24 @@ mod tests {
         assert_eq!(config.verbosity, 5);
         let config = Start::try_parse_from(["snarkos", "--log-filter=snarkos=warn"].iter()).unwrap();
         assert_eq!(config.log_filter, Some("snarkos=warn".to_string()));
+    }
+
+    #[test]
+    fn test_parse_authority_retention() {
+        let parse = |args: &[&str]| {
+            let config = Start::try_parse_from(["snarkos"].iter().chain(args)).unwrap();
+            config.parse_authority_retention::<CurrentNetwork>()
+        };
+        let retention = parse(&[]).unwrap();
+        assert_eq!((retention.blocks, retention.prune), (AUTHORITY_RETENTION_BLOCKS, false));
+        let retention = parse(&["--prune-authority-data"]).unwrap();
+        assert_eq!((retention.blocks, retention.prune), (AUTHORITY_RETENTION_BLOCKS, true));
+        // A devnet window applies whether or not the node prunes, and has a floor.
+        let retention = parse(&["--dev", "0", "--dev-authority-retention-blocks", "300"]).unwrap();
+        assert_eq!((retention.blocks, retention.prune), (300, false));
+        assert!(parse(&["--dev", "0", "--dev-authority-retention-blocks", "99"]).is_err());
+        // The devnet window requires `--dev`.
+        assert!(Start::try_parse_from(["snarkos", "--dev-authority-retention-blocks", "300"].iter()).is_err());
     }
 
     #[test]

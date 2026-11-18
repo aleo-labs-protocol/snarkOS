@@ -20,6 +20,7 @@
   * [3.1 Run an Aleo Client](#31-run-an-aleo-client)
   * [3.2 Run an Aleo Validator](#32-run-an-aleo-validator)
   * [3.3 Run an Aleo Prover](#33-run-an-aleo-prover)
+  * [3.4 Prune Old Authority Data](#34-prune-old-authority-data)
 * [4. FAQs](#4-faqs)
 * [5. Command Line Interface](#5-command-line-interface)
 * [6. Development Guide](#6-development-guide)
@@ -266,6 +267,21 @@ Enter the Aleo Prover account private key:
 APrivateKey1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
+## 3.4 Prune Old Authority Data
+
+A block's authority (the certificates that committed it) is most of its size, and nodes need only recent
+ones for consensus and sync. Start a client or validator with `--prune-authority-data` to keep the
+authority data of only the last 500,000 blocks, about two weeks (snarkVM's `AUTHORITY_RETENTION_BLOCKS`).
+Older blocks keep their headers and transactions; `/v2/block/{height}` answers `410 Gone` for them, and
+peers fetch them from the CDN or an archival node.
+
+The first start with the flag prunes the existing ledger before the node joins the network, which can take
+a while on a large ledger. A pruned ledger opened without the flag keeps working and stops pruning.
+
+Every node assumes its peers keep this window, whether or not it prunes. On a devnet,
+`--dev-authority-retention-blocks <N>` (with `--dev`, at least 100) sets another window; pass it to every
+node of the devnet, pruning or not.
+
 ## 4. FAQs
 
 ### 1. My node is unable to compile.
@@ -448,6 +464,9 @@ The following are the options for the `snarkos start` command:
       --nocdn
           If the flag is set, the node will not prefetch from a CDN
 
+      --prune-authority-data
+          Prune the authority data (certificates) of blocks older than the retention window. See "Prune Old Authority Data"
+
       --dev <DEV>
           Enables development mode used to set up test networks.
           
@@ -616,10 +635,6 @@ telemetry described in [Validator Telemetry Metrics](#321-validator-telemetry-me
 
 * **history** -
   Enables a /history REST endpoint.
-* **prune-authority-data** -
-  Prunes the authority data (certificates) of blocks older than snarkVM's `AUTHORITY_RETENTION_BLOCKS`.
-  Peers assume this retention window regardless of whether the feature is enabled, and fetch older blocks from the CDN.
-  **test_authority_retention** enables it with a 300-block window (and **test_network**) for devnet testing.
 * **telemetry** -
   Deprecated alias for **metrics**, kept so that existing build commands keep working.
   Validator telemetry is part of **metrics**.

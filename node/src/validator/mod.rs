@@ -15,7 +15,7 @@
 
 mod router;
 
-use crate::{CdnFallback, traits::NodeInterface};
+use crate::{AuthorityRetention, CdnFallback, traits::NodeInterface};
 
 use snarkos_account::Account;
 #[cfg(feature = "test_network")]
@@ -50,7 +50,6 @@ use snarkvm::prelude::{
 
 use aleo_std::StorageMode;
 use anyhow::{Context, Result};
-use cfg_if::cfg_if;
 use core::future::Future;
 #[cfg(feature = "locktick")]
 use locktick::parking_lot::Mutex;
@@ -90,6 +89,7 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         rest_verification_limits: RestVerificationLimits,
         history_api_url: Option<String>,
         history_json: bool,
+        authority_retention: AuthorityRetention,
         account: Account<N>,
         trusted_peers: &[SocketAddr],
         trusted_validators: &[SocketAddr],
@@ -111,18 +111,13 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
             let storage_mode = storage_mode.clone();
             let genesis = genesis.clone();
 
-            cfg_if! {
-                if #[cfg(feature = "test_network")] {
-                    if let Some(config) = dev_hotswap_config
-                        .map(|cfg| prepare_dev_committee_options(&node_data_dir, cfg)) {
-                            spawn_blocking!(Ledger::<N, C>::load_with_dev_committee(genesis, storage_mode, config?))
-                    } else {
-                         spawn_blocking!(Ledger::<N, C>::load(genesis, storage_mode))
-                    }
-                }  else {
-                    spawn_blocking!(Ledger::<N, C>::load(genesis, storage_mode))
-                }
-            }
+            let options = authority_retention.load_options();
+            #[cfg(feature = "test_network")]
+            let options = match dev_hotswap_config.map(|cfg| prepare_dev_committee_options(&node_data_dir, cfg)) {
+                Some(config) => options.with_dev_committee(config?),
+                None => options,
+            };
+            spawn_blocking!(Ledger::<N, C>::load_with_options(genesis, storage_mode, options))
         }
         .with_context(|| "Failed to initialize the ledger")?;
 
@@ -157,7 +152,9 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
 
         // Initialize the block synchronization logic.
         let sync = Arc::new(
-            BlockSync::new(ledger_service.clone(), ConnectionMode::Gateway).with_trusted_peers_only(trusted_peers_only),
+            BlockSync::new(ledger_service.clone(), ConnectionMode::Gateway)
+                .with_trusted_peers_only(trusted_peers_only)
+                .with_authority_retention_blocks(authority_retention.blocks)?,
         );
         let locators = sync.get_block_locators()?;
         let ping = Arc::new(Ping::new(router.clone(), locators));
@@ -658,6 +655,7 @@ mod tests {
             RestVerificationLimits::max::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>(),
             None,
             false,
+            Default::default(),
             account,
             &[],
             &[],

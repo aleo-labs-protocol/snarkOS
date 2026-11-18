@@ -55,6 +55,7 @@ use snarkos_node_router::messages::DataBlocks;
 use snarkos_node_sync::{BlockSync, STUCK_SYNC_SHUTDOWN_THRESHOLD, blocks_or_empty};
 use snarkos_utilities::SignalHandler;
 use snarkvm::{
+    ledger::{LoadOptions, store::AUTHORITY_RETENTION_BLOCKS},
     prelude::{Ledger, Network, store::ConsensusStorage},
     utilities::flatten_error,
 };
@@ -76,6 +77,29 @@ pub fn log_clean_error(storage_mode: &StorageMode) {
         StorageMode::Test(_) => {
             // Ephemeral location - no need for cleanups.
         }
+    }
+}
+
+/// How a node treats the authority data of old blocks (see `--prune-authority-data`).
+#[derive(Clone, Copy, Debug)]
+pub struct AuthorityRetention {
+    /// The retention window in blocks: what this node keeps if it prunes, and what it assumes every
+    /// peer keeps.
+    pub blocks: u32,
+    /// Whether this node prunes.
+    pub prune: bool,
+}
+
+impl Default for AuthorityRetention {
+    fn default() -> Self {
+        Self { blocks: AUTHORITY_RETENTION_BLOCKS, prune: false }
+    }
+}
+
+impl AuthorityRetention {
+    /// Returns the options to load the ledger with.
+    fn load_options(self) -> LoadOptions {
+        LoadOptions::default().with_authority_retention(self.prune.then_some(self.blocks))
     }
 }
 
@@ -155,7 +179,9 @@ pub(crate) fn blocks_for_request<N: Network, C: ConsensusStorage<N>>(
     end_height: u32,
 ) -> Option<DataBlocks<N>> {
     let latest_height = || ledger.latest_height();
-    match blocks_or_empty(start_height, end_height, latest_height, || ledger.get_blocks(start_height..end_height)) {
+    let pruned_below = || ledger.vm().block_store().authority_pruned_below();
+    let get_blocks = || ledger.get_blocks(start_height..end_height);
+    match blocks_or_empty(start_height, end_height, latest_height, pruned_below, get_blocks) {
         Ok(blocks) => Some(blocks),
         Err(error) => {
             let err =

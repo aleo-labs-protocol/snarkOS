@@ -46,7 +46,6 @@ metrics = [
 # The names stay so existing build commands keep resolving.
 history = []
 history-staking-rewards = []
-prune-authority-data = [ "snarkos-node-rest/prune-authority-data", "snarkvm/prune-authority-data" ]
 cuda = [
   "snarkvm/cuda",
   "snarkos-account/cuda",
@@ -63,7 +62,6 @@ serial = [
 ]
 test = []
 test_network = [ "snarkos-node-bft/test_network", "snarkos-node-consensus/test_network", "snarkos-utilities/test_network" ]
-test_authority_retention = [ "test_network", "prune-authority-data", "snarkvm/test_authority_retention" ]
 
 [dependencies.aleo-std]
 workspace = true
@@ -75,9 +73,6 @@ workspace = true
 workspace = true
 
 [dependencies.bytes]
-workspace = true
-
-[dependencies.cfg-if]
 workspace = true
 
 [dependencies.colored]
