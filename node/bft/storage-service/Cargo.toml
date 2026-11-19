@@ -52,3 +52,7 @@ optional = true
 
 [dev-dependencies.bytes]
 workspace = true
+
+[dev-dependencies.snarkvm]
+workspace = true
+features = [ "test-helpers" ]

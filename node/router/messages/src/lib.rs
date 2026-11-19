@@ -170,16 +170,22 @@ impl<N: Network> Message<N> {
         (ConsensusVersion::V20, 31),
         (ConsensusVersion::V21, 32),
         (ConsensusVersion::V22, 33),
-        (ConsensusVersion::V23, 34),
+        (ConsensusVersion::V23, Self::STATUS_MESSAGE_VERSION),
     ];
 
     /// Returns the latest message version whose consensus upgrade has a scheduled block height.
     pub fn latest_message_version() -> u32 {
+        Self::latest_message_version_with(|consensus_version| N::CONSENSUS_HEIGHT(consensus_version).ok())
+    }
+
+    /// Returns the latest message version whose consensus upgrade has a scheduled height in
+    /// `consensus_height`.
+    fn latest_message_version_with(consensus_height: impl Fn(ConsensusVersion) -> Option<u32>) -> u32 {
         Self::VERSIONS
             .iter()
             .rev()
             .find(|(consensus_version, _)| {
-                N::CONSENSUS_HEIGHT(*consensus_version).is_ok_and(|height| height != u32::MAX)
+                consensus_height(*consensus_version).is_some_and(|height| height != u32::MAX)
             })
             .map(|(_, version)| *version)
             .unwrap_or(0)
@@ -193,23 +199,21 @@ impl<N: Network> Message<N> {
     ///     Until block `X`, they stay connected and can communicate.
     ///     After block `X`, Client A will reject messages from Client B.
     pub fn lowest_accepted_message_version(current_block_height: u32) -> u32 {
-        // Fetch the latest message version.
-        let latest_message_version = Self::latest_message_version();
-
-        // Fetch the versions.
-        let versions = Self::VERSIONS;
-
         // Determine the minimum accepted message version.
-        N::CONSENSUS_VERSION(current_block_height).map_or(latest_message_version, |seek_version| {
-            // Search the consensus value for the specified version.
-            match versions.binary_search_by(|(version, _)| version.cmp(&seek_version)) {
-                // If a value was found for this consensus version, return it.
-                Ok(index) => versions[index].1,
-                // If the specified version was not found exactly, return the appropriate value belonging to the consensus version *lower* than the sought version.
-                // If the constant is not yet in effect at this consensus version, use the earliest version.
-                Err(index) => versions[index.saturating_sub(1)].1,
-            }
-        })
+        N::CONSENSUS_VERSION(current_block_height).map_or(Self::latest_message_version(), Self::message_version_of)
+    }
+
+    /// Returns the message version that consensus version `seek_version` requires.
+    fn message_version_of(seek_version: ConsensusVersion) -> u32 {
+        let versions = Self::VERSIONS;
+        // Search the consensus value for the specified version.
+        match versions.binary_search_by(|(version, _)| version.cmp(&seek_version)) {
+            // If a value was found for this consensus version, return it.
+            Ok(index) => versions[index].1,
+            // If the specified version was not found exactly, return the appropriate value belonging to the consensus version *lower* than the sought version.
+            // If the constant is not yet in effect at this consensus version, use the earliest version.
+            Err(index) => versions[index.saturating_sub(1)].1,
+        }
     }
 
     /// Returns the message type. Instance fields, such as a block height range, are omitted.
@@ -408,20 +412,25 @@ mod tests {
         latest_message_version_has_scheduled_height::<CanaryV0>();
     }
 
-    /// Tests that the status message version takes effect with `ConsensusVersion::V23`: a node
-    /// advertises it once V23 is scheduled, and requires it from the V23 height on.
+    /// Tests that the status message version takes effect with `ConsensusVersion::V23`, under
+    /// snarkVM's test heights: a node advertises it once V23 is scheduled, and requires it from
+    /// the V23 height on.
     #[test]
     fn test_status_message_version_follows_v23() {
-        let status_version = Message::<MainnetV0>::STATUS_MESSAGE_VERSION;
-        assert_eq!(Message::<MainnetV0>::VERSIONS.last(), Some(&(ConsensusVersion::V23, status_version)));
-        match MainnetV0::CONSENSUS_HEIGHT(ConsensusVersion::V23).unwrap() {
-            u32::MAX => assert_eq!(Message::<MainnetV0>::latest_message_version(), status_version - 1),
-            height => {
-                assert_eq!(Message::<MainnetV0>::latest_message_version(), status_version);
-                assert_eq!(Message::<MainnetV0>::lowest_accepted_message_version(height - 1), status_version - 1);
-                assert_eq!(Message::<MainnetV0>::lowest_accepted_message_version(height), status_version);
-            }
-        }
+        type Versions = Message<MainnetV0>;
+        let status_version = Versions::STATUS_MESSAGE_VERSION;
+        assert!(Versions::VERSIONS.contains(&(ConsensusVersion::V23, status_version)));
+
+        let heights = snarkvm::console::network::TEST_CONSENSUS_VERSION_HEIGHTS;
+        let height_of = |version| heights.iter().find(|(v, _)| *v == version).map(|(_, height)| *height);
+        let version_at = |height| heights.iter().rev().find(|(_, start)| *start <= height).unwrap().0;
+        let v23_height = height_of(ConsensusVersion::V23).unwrap();
+
+        let up_to = |last| move |version| (version <= last).then(|| height_of(version)).flatten();
+        assert_eq!(Versions::latest_message_version_with(up_to(ConsensusVersion::V22)), status_version - 1);
+        assert_eq!(Versions::latest_message_version_with(up_to(ConsensusVersion::V23)), status_version);
+        assert_eq!(Versions::message_version_of(version_at(v23_height - 1)), status_version - 1);
+        assert_eq!(Versions::message_version_of(version_at(v23_height)), status_version);
     }
 
     #[test]
