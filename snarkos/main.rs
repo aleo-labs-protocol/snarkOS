@@ -14,13 +14,9 @@
 // limitations under the License.
 
 use snarkos_cli::{commands::CLI, helpers::Updater};
-#[cfg(locktick)]
-use snarkos_utilities::locks::lock_snapshots;
 use snarkvm::utilities::{display_error, flatten_error};
 
 use clap::Parser;
-#[cfg(locktick)]
-use std::time::Instant;
 use std::{backtrace::Backtrace, env, io, io::IsTerminal, panic::catch_unwind};
 use tracing::{log::logger, subscriber::NoSubscriber};
 
@@ -75,39 +71,7 @@ fn main() {
     // A hack to avoid having to go through clap to display advanced version information.
     check_for_version();
 
-    #[cfg(locktick)]
-    std::thread::spawn(|| {
-        loop {
-            tracing::info!("[locktick] checking for active lock guards");
-            let ts = Instant::now();
-            let mut infos = lock_snapshots();
-            infos.sort_unstable_by(|l1, l2| l1.location.cmp(&l2.location));
-
-            for lock in infos {
-                // Show all guards that are held or that threads are waiting for.
-                let mut guards = lock.known_guards.values().filter(|g| g.is_in_use()).collect::<Vec<_>>();
-                guards.sort_unstable_by(|g1, g2| g1.location.cmp(&g2.location));
-
-                for guard in guards {
-                    let location = &guard.location;
-                    let kind = guard.kind;
-                    let num_uses = guard.num_uses;
-                    let active_users = guard.num_active_uses();
-                    let avg_duration = guard.avg_duration();
-                    let avg_wait_time = guard.avg_wait_time();
-                    let num_waiting = guard.num_waiting();
-                    tracing::info!(
-                        "[locktick] {location} ({:?}): {num_uses}; {active_users} active; {num_waiting} waiting; avg d: {:?}; avg w: {:?}",
-                        kind,
-                        avg_duration,
-                        avg_wait_time
-                    );
-                }
-            }
-            tracing::debug!("[locktick] finished the check in {:?}", ts.elapsed());
-            std::thread::sleep(std::time::Duration::from_secs(3));
-        }
-    });
+    snarkos_utilities::locks::spawn_lock_reporter();
 
     // Set a custom hook here to show "pretty" errors when panicking.
     std::panic::set_hook(Box::new(|err| {

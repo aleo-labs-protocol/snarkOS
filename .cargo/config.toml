@@ -9,7 +9,7 @@ rustflags = [
 # `cargo locktick-<command>` runs a cargo command with `--cfg locktick`, which swaps every lock
 # in `snarkos_utilities::locks` for its `locktick` counterpart, for example
 # `cargo locktick-build --release`. The `--config` adds to the `rustflags` above rather than
-# replacing them. Both builds share one target directory without rebuilding each other.
+# replacing them.
 #
 # Hazard: cargo drops a `--config` placed before an external subcommand such as `clippy`,
 # `nextest` or `hack`, so each alias puts it after its subcommand.

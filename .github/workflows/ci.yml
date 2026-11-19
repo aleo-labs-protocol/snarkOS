@@ -138,9 +138,6 @@ jobs:
       - run: cargo check -p snarkos-node-router-messages --features test-helpers
       - run: cargo check -p snarkos-node-bft-events --features test-helpers
 
-  # Clippy with `--cfg locktick`, which swaps in the `locktick` lock types. The
-  # first step fails if the alias stops applying the cfg, for example because
-  # RUSTFLAGS is set.
   lint-locktick:
     needs: [check-shared-refs, start-cpu-runners]
     runs-on: [self-hosted, linux, x64, cpu]

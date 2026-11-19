@@ -388,6 +388,3 @@ ignored = [
   "snarkos-node-router", # Needed for cuda feature
   "snarkos-node-metrics", # Needed for default and serial features
 ]
-
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = [ 'cfg(locktick)' ] }
