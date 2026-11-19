@@ -423,10 +423,9 @@ impl<N: Network> CommunicationService for Gateway<N> {
         Event::BlockRequest(BlockRequest { start_height, end_height })
     }
 
-    /// Returns the block request limit that `inbound` enforces: it drops a peer's block requests
-    /// from the `max_cache_duplicates()`-th within `CACHE_REQUESTS_INTERVAL`, counted in whole seconds.
-    fn block_request_limit(&self) -> (usize, Duration) {
-        (self.max_cache_duplicates().saturating_sub(1), Duration::from_secs(CACHE_REQUESTS_INTERVAL as u64 + 1))
+    /// Returns `None`: the block requests sent to validators are not limited.
+    fn block_request_limit(&self) -> Option<(usize, Duration)> {
+        None
     }
 
     /// Sends the given message to specified peer.
@@ -2482,35 +2481,6 @@ mod prop_tests {
 
         assert!(!gateway.supports_status_replies(old_peer));
         assert!(gateway.supports_status_replies(new_peer));
-    }
-
-    /// Tests that `inbound` accepts the block request limit the gateway reports, and drops the next
-    /// request within the interval.
-    #[test]
-    fn test_block_request_limit_matches_inbound() {
-        use super::CACHE_REQUESTS_INTERVAL;
-        use snarkos_node_sync::communication_service::CommunicationService;
-
-        let rng = &mut TestRng::default();
-        let committee = snarkvm::ledger::committee::test_helpers::sample_committee(rng);
-        let ledger = Arc::new(MockLedgerService::new(committee));
-        let storage = Storage::new(ledger.clone(), Arc::new(BFTMemoryService::new()), 10).unwrap();
-        let account = Account::new(rng).unwrap();
-        let gateway =
-            Gateway::new(account, storage, ledger, None, &[], false, NodeDataDir::new_test(None), Some(0)).unwrap();
-
-        let (limit, _) = gateway.block_request_limit();
-        let peer_ip = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5001);
-        for _ in 0..limit {
-            assert!(
-                gateway.cache.insert_inbound_block_request(peer_ip, CACHE_REQUESTS_INTERVAL)
-                    < gateway.max_cache_duplicates()
-            );
-        }
-        assert!(
-            gateway.cache.insert_inbound_block_request(peer_ip, CACHE_REQUESTS_INTERVAL)
-                >= gateway.max_cache_duplicates()
-        );
     }
 
     #[proptest]
