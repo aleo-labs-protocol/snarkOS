@@ -142,6 +142,9 @@ pub const API_VERSION_V2: &str = "v2";
 /// The capacity of the LRU holding recently requested blocks.
 const BLOCK_CACHE_SIZE: usize = 128;
 
+/// Recently requested blocks, serialized, with their heights.
+type BlockCache<N> = LruCache<<N as Network>::BlockHash, (u32, ErasedJson)>;
+
 /// Permits that keep a REST verification in a type's queue and in a concurrent slot.
 ///
 /// Move the slot into the blocking task that performs the verification, so the permits are
@@ -222,7 +225,7 @@ pub struct Rest<N: Network, C: ConsensusStorage<N>, R: Routing<N>> {
     /// Concurrent and queued REST verification slots for deploys, executions, and solutions.
     verification_slots: Arc<VerificationSlots>,
     /// A cache containing recently requested blocks.
-    block_cache: Arc<Mutex<LruCache<N::BlockHash, ErasedJson>>>,
+    block_cache: Arc<Mutex<BlockCache<N>>>,
     /// The upstream for the routes of the removed `history` feature, if `--history-compat-mode` is set.
     history_compat: Option<Arc<HistoryCompat>>,
 }
@@ -689,6 +692,7 @@ mod tests {
             Router::new()
                 .route("/not_found", get(|| async { Err::<(), RestError>(RestError::not_found(anyhow!("missing"))) }))
                 .route("/bad_request", get(|| async { Err::<(), RestError>(RestError::bad_request(anyhow!("bad"))) }))
+                .route("/gone", get(|| async { Err::<(), RestError>(RestError::gone(anyhow!("pruned"))) }))
                 .route(
                     "/service_unavailable",
                     get(|| async { Err::<(), RestError>(RestError::service_unavailable(anyhow!("gone"))) }),
@@ -710,6 +714,9 @@ mod tests {
             app.clone().oneshot(Request::builder().uri("/bad_request").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
+        let res = app.clone().oneshot(Request::builder().uri("/gone").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
         let res =
             app.oneshot(Request::builder().uri("/service_unavailable").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -726,6 +733,9 @@ mod tests {
         let res =
             app.clone().oneshot(Request::builder().uri("/v2/bad_request").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        let res = app.clone().oneshot(Request::builder().uri("/v2/gone").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(res.status(), StatusCode::GONE);
 
         let res =
             app.oneshot(Request::builder().uri("/v2/service_unavailable").body(Body::empty()).unwrap()).await.unwrap();
@@ -814,8 +824,6 @@ mod route_tests {
     /// port and spawn a server. None of the routes exercised here touch `consensus`, `cdn_sync`,
     /// `routing` or `block_sync`; those fields exist only to satisfy the type.
     async fn sample_rest() -> CurrentRest {
-        let rng = &mut TestRng::default();
-
         // `Ledger::load` reaches snarkVM's sequential-operation thread and blocks on the reply,
         // which panics if called from an async context. Production always drives these from a
         // blocking task, so do the same here.
@@ -828,7 +836,12 @@ mod route_tests {
         .await
         .expect("the ledger task panicked")
         .expect("couldn't load the test ledger");
+        sample_rest_with_ledger(ledger).await
+    }
 
+    /// Builds a `Rest` over `ledger` (see [`sample_rest`]).
+    async fn sample_rest_with_ledger(ledger: Ledger<CurrentNetwork, ConsensusMemory<CurrentNetwork>>) -> CurrentRest {
+        let rng = &mut TestRng::default();
         let ledger_service = Arc::new(MockLedgerService::new(sample_committee(rng)));
 
         Rest {
@@ -1083,6 +1096,69 @@ mod route_tests {
     /// Sends a request through the full versioned router, so the version prefixes apply.
     async fn get_versioned(rest: &CurrentRest, uri: &str) -> (StatusCode, String) {
         send(&rest.build_versioned_router(TEST_RPS), uri).await
+    }
+
+    /// Tests the `/v2` block routes on a ledger that prunes with snarkVM's smallest window: a block or
+    /// a range below the watermark is gone, also when the block is cached, and everything from the
+    /// watermark on is served.
+    #[tokio::test]
+    async fn pruned_blocks_are_gone() {
+        use snarkvm::{
+            ledger::{LoadOptions, store::min_authority_retention_blocks},
+            prelude::{PrivateKey, VM, store::ConsensusStore},
+        };
+        type PrunedLedger = Ledger<CurrentNetwork, ConsensusMemory<CurrentNetwork>>;
+
+        const TIP: u32 = 110;
+        let window = min_authority_retention_blocks::<CurrentNetwork>();
+        let advance = |ledger: PrunedLedger, private_key: PrivateKey<CurrentNetwork>, to: u32| {
+            tokio::task::spawn_blocking(move || {
+                let rng = &mut TestRng::default();
+                while ledger.latest_height() < to {
+                    let block = ledger.prepare_advance_to_next_beacon_block(&private_key, vec![], vec![], vec![], rng);
+                    ledger.advance_to_next_block(&block.unwrap()).unwrap();
+                }
+                ledger
+            })
+        };
+        let (ledger, private_key) = tokio::task::spawn_blocking(move || {
+            let rng = &mut TestRng::default();
+            let private_key = PrivateKey::<CurrentNetwork>::new(rng).unwrap();
+            let store = ConsensusStore::<CurrentNetwork, ConsensusMemory<_>>::open(StorageMode::new_test(None));
+            let genesis = VM::from(store.unwrap()).unwrap().genesis_beacon(&private_key, rng).unwrap();
+            let options = LoadOptions::default().with_authority_retention(Some(window));
+            (PrunedLedger::load_with_options(genesis, StorageMode::new_test(None), options).unwrap(), private_key)
+        })
+        .await
+        .unwrap();
+
+        // Cache block 1 while it is the latest, then advance until it is pruned.
+        let ledger = advance(ledger, private_key, 1).await.unwrap();
+        let rest = sample_rest_with_ledger(ledger.clone()).await;
+        assert_eq!(get_versioned(&rest, "/v2/mainnet/block/latest").await.0, StatusCode::OK);
+        let ledger = advance(ledger, private_key, TIP).await.unwrap();
+        let w = ledger.vm().block_store().authority_pruned_below().unwrap().unwrap();
+        assert_eq!(w, TIP - (window - 1));
+
+        let status = async |uri: &str| get_versioned(&rest, uri).await.0;
+        let hash = |height: u32| ledger.get_hash(height).unwrap();
+        // The cached block, by height and by hash.
+        assert!(rest.block_cache.lock().contains(&hash(1)));
+        assert_eq!(status("/v2/mainnet/block/1").await, StatusCode::GONE);
+        assert_eq!(status(&format!("/v2/mainnet/block/{}", hash(1))).await, StatusCode::GONE);
+        // Uncached blocks below the watermark.
+        assert_eq!(status("/v2/mainnet/block/2").await, StatusCode::GONE);
+        assert_eq!(status(&format!("/v2/mainnet/block/{}", w - 1)).await, StatusCode::GONE);
+        assert_eq!(status(&format!("/v2/mainnet/block/{}", hash(w - 1))).await, StatusCode::GONE);
+        // Ranges that start below the watermark, or straddle it.
+        assert_eq!(status("/v2/mainnet/blocks?start=1&end=5").await, StatusCode::GONE);
+        assert_eq!(status(&format!("/v2/mainnet/blocks?start={}&end={}", w - 1, w + 1)).await, StatusCode::GONE);
+        // Genesis and everything from the watermark on are served.
+        assert_eq!(status("/v2/mainnet/block/0").await, StatusCode::OK);
+        assert_eq!(status("/v2/mainnet/blocks?start=0&end=1").await, StatusCode::OK);
+        assert_eq!(status(&format!("/v2/mainnet/block/{w}")).await, StatusCode::OK);
+        assert_eq!(status(&format!("/v2/mainnet/block/{}", hash(w))).await, StatusCode::OK);
+        assert_eq!(status(&format!("/v2/mainnet/blocks?start={w}&end={}", w + 5)).await, StatusCode::OK);
     }
 
     /// Sends a request through an already-built router, so that state held by its layers -- the

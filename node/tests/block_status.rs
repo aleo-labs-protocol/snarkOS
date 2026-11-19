@@ -62,7 +62,7 @@ fn pings(peer: &TestPeer) -> Vec<Ping<CurrentNetwork>> {
 /// dropped with them, so the test sends its own.
 async fn ping_peer(router: &Router<CurrentNetwork>, peer: &TestPeer) -> Ping<CurrentNetwork> {
     let num_pings = pings(peer).len();
-    assert!(router.send_ping(peer.listening_addr().await, Some(locators(0))));
+    assert!(router.send_ping(peer.listening_addr().await, Some(locators(0)), router.oldest_retained_height()));
     let peer_clone = peer.clone();
     deadline!(Duration::from_secs(5), move || pings(&peer_clone).len() > num_pings);
     pings(peer).pop().unwrap()
