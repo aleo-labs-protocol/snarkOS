@@ -42,8 +42,7 @@ marked "release" only on the third. The other jobs run on every event.
 | `test (services)` | `cpu` | all | 90 | `snarkos-node-consensus`, `-node-rest`, `-cli` |
 | `test (node)` | `cpu` | all | 90 | `snarkos-node` with `snarkos-node-bft-storage-service` (features `memory,persistent`) |
 | `test (bft)` | `cpu` | all | 90 | `snarkos-node-bft` with `metrics` |
-| `test (router)` | `cpu` | all | 90 | `snarkos-node-router` |
-| `test (sync)` | `cpu` | all | 90 | `snarkos-node-sync` |
+| `test (router-sync)` | `cpu` | all | 90 | `snarkos-node-router`; then `-node-sync` |
 | `build-snarkos` | `cpu` | all | 60 | release `snarkos` with `test_network`, as an artifact |
 | `devnet (devnet)` | `cpu` | all | 40 | `test_db_backup.sh`, `test_devnet.sh` |
 | `devnet (simple-node)` | `cpu` | all | 60 | `test_simple_node.sh` |
