@@ -261,7 +261,7 @@ impl<K: Copy + Eq + std::hash::Hash, T> SnapshotCache<K, T> {
         if let Some(snapshot) = self.snapshots.lock().get(&key) {
             return Ok(snapshot.clone());
         }
-        let flight = self.in_flight.lock().entry(key).or_default().clone();
+        let flight = self.in_flight.lock().entry(key).or_insert_with(|| Arc::new(Flight::new(None))).clone();
         let mut outcome = flight.lock().await;
         if let Some(result) = &*outcome {
             return result.clone();

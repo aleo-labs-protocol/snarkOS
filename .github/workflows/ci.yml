@@ -152,7 +152,7 @@ jobs:
       # build then has no locktick dependency.
       - name: Check that the build sets cfg(locktick)
         run: cargo locktick-clippy -q -p snarkos-utilities --message-format=json | grep '"name":"locktick"' > /dev/null
-      - run: cargo locktick-clippy --workspace --all-targets -- -D warnings
+      - run: cargo locktick-clippy --workspace --all-targets --all-features -- -D warnings
 
   # Each line of `runs` is one build. `cargo test -p a -p b` unifies the
   # features of a and b, and several crates enable features on their

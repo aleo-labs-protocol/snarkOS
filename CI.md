@@ -38,7 +38,7 @@ a job marked "release" only on the third. The other jobs run on every event.
 | `shellcheck` | hosted | all | | `.ci/*.sh`, `scripts/*.sh` |
 | `source-checks` | hosted | all | | `scripts/check_sources.py`: license headers in `.rs` files |
 | `lint` | `cpu` | all | 90 | clippy, default and `--all-features`; `cargo check --all-features` of `snarkos-node-metrics` and `snarkos-display` |
-| `lint-locktick` | `cpu` | all | 90 | clippy under `--cfg locktick` (`locktick-clippy` alias) |
+| `lint-locktick` | `cpu` | all | 90 | clippy `--all-features` under `--cfg locktick` (`locktick-clippy` alias) |
 | `test (light)` | hosted | all | 90 | `snarkos-account`, `-utilities`, `-node-tcp`, `-node-sync-locators`, `-node-network` |
 | `test (cdn)` | hosted | all | 90 | `snarkos-node-cdn` |
 | `test (messages)` | hosted | all | 90 | `snarkos-node-bft-events`, `-node-router-messages`, `-node-bft-ledger-service` |
