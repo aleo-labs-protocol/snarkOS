@@ -5,7 +5,7 @@
 # runs the network's last release, with the CDN, and the check compares their catch-up rates. The
 # host owns the defaults: this sends only what's filled in.
 #
-# "Run workflow": approval in the sync-test environment, then start the sync host if it's stopped
+# "Run workflow" or release-test.yml: approval in the sync-test environment, then start the sync host if it's stopped
 # and queue the run through its gate, which takes only sync tests. The host reports the run as the
 # "sync-test" check on the commit, through its App, so this job ends once the run is queued.
 # gauntlet-report.yml adds the report when it finishes.
@@ -35,20 +35,39 @@ on:
         type: boolean
         default: false
       ab:
-        description: "A/B: run the network's last release beside it, on the same ledger with the CDN, and compare catch-up rates. Skips --nocdn"
+        description: "A/B: run the last release beside it, on the same ledger with the CDN, and compare catch-up rates. Skips --nocdn"
         type: boolean
         default: false
       params:
         description: "Test parameter overrides, e.g. deadline_hours=12"
         required: false
         default: ""
+      leg:
+        description: "Report as the check sync-test (LEG), beside the commit's other runs. Empty: sync-test."
+        required: false
+        default: ""
+  workflow_call:
+    inputs:
+      commit:
+        type: string
+      leg:
+        type: string
+      network:
+        type: string
+      save:
+        type: boolean
+      ab:
+        type: boolean
+      params:
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   sync:
-    if: github.repository == 'aleo-labs-protocol/snarkOS'
+    # A called workflow sees its caller's event: only a person starts a run.
+    if: github.repository == 'aleo-labs-protocol/snarkOS' && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment: sync-test
     # Past start_host's longest wait, twice: the enqueue may start the host again. Billed only if it waits.
@@ -73,27 +92,38 @@ jobs:
           IN_SAVE: ${{ inputs.save }}
           IN_AB: ${{ inputs.ab }}
           IN_PARAMS: ${{ inputs.params }}
+          IN_LEG: ${{ inputs.leg }}
           ACTOR: ${{ github.triggering_actor }}
         run: |
           commit="${IN_COMMIT:-$GITHUB_SHA}" params="$IN_PARAMS"
           [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::commit must be a full 40-character SHA"; exit 1; }
+          # A leg names the run's check, so one commit holds several runs' verdicts. It goes as a param, and in the run's id.
+          [[ "$IN_LEG" =~ ^([a-z0-9][a-z0-9-]{0,29})?$ ]] || { echo "::error::leg must be lowercase letters, digits and dashes"; exit 1; }
+          [[ ",$params" != *,leg=* ]] || { echo "::error::leg has its own field: drop leg= from params"; exit 1; }
+          [[ -z "$IN_LEG" ]] || params="leg=${IN_LEG}${params:+,$params}"
           # save is a param, so the gate and the host carry it as they are.
           [[ "$IN_SAVE" != true ]] || params="save=true${params:+,$params}"
-          # The A/B's baseline: the network's highest published release, testnet-vX.Y.Z
-          # or vX.Y.Z. Not by date or prerelease flag: neither tells the networks' releases apart.
+          # The A/B's baseline: the highest published vX.Y.Z that isn't the commit under test. Not a
+          # candidate, which may share a regression with the one under test; not by date or prerelease flag.
+          # Until testnet has a candidate, vX.Y.Z-rc.N, its releases are testnet-vX.Y.Z.
           if [[ "$IN_AB" == true ]]; then
             [[ "$IN_SAVE" != true ]] || { echo "::error::ab and save don't go together: an A/B skips --nocdn"; exit 1; }
             [[ ",$IN_PARAMS" != *,baseline=* ]] || { echo "::error::ab fills in baseline itself: drop baseline= from params"; exit 1; }
-            prefix=v
-            [[ "$IN_NETWORK" != testnet ]] || prefix=testnet-v
-            tag="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" | jq -r --arg p "$prefix" '[.[] | select(.draft | not) | .tag_name
-              | select(startswith($p)) | ltrimstr($p) | select(test("^[0-9]+[.][0-9]+[.][0-9]+$"))] | max_by(split(".") | map(tonumber)) // empty
-              | $p + .')"
-            [[ -n "$tag" ]] || { echo "::error::no ${IN_NETWORK} release to compare with"; exit 1; }
-            baseline="$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)" && [[ "$baseline" =~ ^[0-9a-f]{40}$ ]] \
-              || { echo "::error::could not find the commit of ${tag}, ${IN_NETWORK}'s last release"; exit 1; }
+            tags="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" | jq -r --arg network "$IN_NETWORK" '
+              [.[] | select(.draft | not) | .tag_name] as $tags
+              | (if $network == "testnet" and ($tags | any(test("^v[0-9]+[.][0-9]+[.][0-9]+-rc[.][0-9]+$")) | not)
+                 then "testnet-v" else "v" end) as $prefix
+              | [$tags[] | select(test("^" + $prefix + "[0-9]+[.][0-9]+[.][0-9]+$"))]
+              | sort_by(ltrimstr($prefix) | split(".") | map(tonumber)) | reverse | .[]')"
+            baseline=""
+            for tag in $tags; do
+              sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)" && [[ "$sha" =~ ^[0-9a-f]{40}$ ]] \
+                || { echo "::error::could not find the commit of ${tag}, the last release"; exit 1; }
+              [[ "$sha" == "$commit" ]] || { baseline="$sha"; break; }
+            done
+            [[ -n "$baseline" ]] || { echo "::error::no release to compare with"; exit 1; }
             params="baseline=${baseline}${params:+,$params}"
-            echo "A/B against ${IN_NETWORK}'s last release, ${tag} (\`${baseline}\`)" >> "$GITHUB_STEP_SUMMARY"
+            echo "A/B against the last release, ${tag} (\`${baseline}\`)" >> "$GITHUB_STEP_SUMMARY"
           fi
           for value in "$IN_NETWORK" "$params" "$ACTOR"; do
             [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || {
@@ -103,7 +133,7 @@ jobs:
           done
           {
             echo "commit=$commit"; echo "network=$IN_NETWORK"; echo "params=$params"
-            echo "run_id=gh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"; echo "actor=$ACTOR"
+            echo "run_id=gh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}${IN_LEG:+-$IN_LEG}"; echo "actor=$ACTOR"; echo "check=sync-test${IN_LEG:+ ($IN_LEG)}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Connect to the sync host
@@ -182,6 +212,7 @@ jobs:
           PARAMS: ${{ steps.req.outputs.params }}
           RUN_ID: ${{ steps.req.outputs.run_id }}
           ACTOR: ${{ steps.req.outputs.actor }}
+          CHECK: ${{ steps.req.outputs.check }}
         run: |
           source "$RUNNER_TEMP/gate.sh"
           # Only a rejection's message reaches the summary.
@@ -194,7 +225,7 @@ jobs:
             start_host || { : > enqueue.err; exit 1; }
             gate "${request[@]}" 2> enqueue.err
           fi
-          echo "Queued \`$RUN_ID\`. The sync-test check on \`${COMMIT:0:10}\` reports it." >> "$GITHUB_STEP_SUMMARY"
+          echo "Queued \`$RUN_ID\`. The $CHECK check on \`${COMMIT:0:10}\` reports it." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Report a rejection or an orchestration failure
         if: failure() && steps.req.outcome == 'success'

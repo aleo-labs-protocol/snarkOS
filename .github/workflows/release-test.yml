@@ -1,0 +1,136 @@
+# Copy to aleo-labs-protocol/snarkOS as .github/workflows/release-test.yml, on staging.
+#
+# Standard release testing: what every release candidate runs. This file is the list. "Run
+# workflow" from staging, with the release branch, tag or commit to test. Each leg below is a run
+# of another workflow here, which waits for approval in its own environment and queues the run on
+# its host. The hosts report each run as a check of its own on the commit, named after its leg:
+# "stress-test (load-loss)", "sync-test (mainnet)".
+name: "Gauntlet: Release test"
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "What to test: a release branch, a tag or a commit"
+        required: true
+      stockpile:
+        description: "Stockpile the load legs replay: one made for this release's snarkVM, with deployments"
+        default: testnet-V22-h25-p1000x40-d240-f5adbe87
+      save:
+        description: "Keep each sync leg's ledger as this release's when it passes. Off for a commit that isn't a release candidate"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    if: github.repository == 'aleo-labs-protocol/snarkOS'
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.commit.outputs.commit }}
+    steps:
+      - name: Resolve the ref
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.ref }}
+        run: |
+          [[ "$REF" =~ ^[A-Za-z0-9._/-]+$ && "$REF" != *..* ]] || { echo "::error::ref must be a branch, a tag or a commit"; exit 1; }
+          commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/$REF" --jq .sha)" && [[ "$commit" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::no commit for ${REF}"; exit 1; }
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "Testing \`${REF}\` at \`${commit}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # A called workflow sees no secret it isn't passed, its environment's included.
+  network:
+    needs: resolve
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/stress-test.yml
+    secrets: inherit
+    with:
+      commit: ${{ needs.resolve.outputs.commit }}
+      leg: network
+      tests: network
+      validators: "16"
+      network: testnet
+      params: ""
+
+  load:
+    needs: resolve
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/stress-test.yml
+    secrets: inherit
+    with:
+      commit: ${{ needs.resolve.outputs.commit }}
+      leg: load
+      tests: replay_stockpile
+      validators: "16"
+      network: testnet
+      params: ${{ format('stockpile={0},rate=50,duration=120,min_inclusion=1', inputs.stockpile) }}
+
+  load-loss:
+    needs: resolve
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/stress-test.yml
+    secrets: inherit
+    with:
+      commit: ${{ needs.resolve.outputs.commit }}
+      leg: load-loss
+      tests: replay_stockpile
+      validators: "16"
+      network: testnet
+      params: ${{ format('stockpile={0},rate=50,duration=120,min_inclusion=0.999,packet_loss=5', inputs.stockpile) }}
+
+  load-deploy:
+    needs: resolve
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/stress-test.yml
+    secrets: inherit
+    with:
+      commit: ${{ needs.resolve.outputs.commit }}
+      leg: load-deploy
+      tests: replay_stockpile
+      validators: "16"
+      network: testnet
+      params: ${{ format('stockpile={0},rate=50,duration=120,min_inclusion=1,deploy_rate=0.2', inputs.stockpile) }}
+
+  # A saved ledger is this release's, for the next release's sync test. The sync host runs one at a time.
+  sync-testnet:
+    needs: resolve
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/sync-test.yml
+    secrets: inherit
+    with:
+      commit: ${{ needs.resolve.outputs.commit }}
+      leg: testnet
+      network: testnet
+      save: ${{ inputs.save }}
+      ab: false
+      params: ""
+
+  sync-mainnet:
+    needs: resolve
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/sync-test.yml
+    secrets: inherit
+    with:
+      commit: ${{ needs.resolve.outputs.commit }}
+      leg: mainnet
+      network: mainnet
+      save: ${{ inputs.save }}
+      ab: false
+      params: ""
