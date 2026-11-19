@@ -151,7 +151,10 @@ jobs:
         with: { persist-credentials: false }
       # gh-actions is ours; check-shared-refs requires a @vN tag here, not a SHA.
       - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
-      - run: cargo locktick tree -p snarkos-utilities --depth 1 --edges normal | grep -q ' locktick v'
+      # An env RUSTFLAGS replaces `--cfg locktick` without an error, and the
+      # build then has no locktick dependency.
+      - name: Check that the build sets cfg(locktick)
+        run: cargo locktick-clippy -q -p snarkos-utilities --message-format=json | grep '"name":"locktick"' > /dev/null
       - run: cargo locktick-clippy --workspace --all-targets -- -D warnings
 
   # Each line of `runs` is one build. `cargo test -p a -p b` unifies the

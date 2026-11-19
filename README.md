@@ -632,12 +632,12 @@ Every three seconds, the node logs each lock guard that is held or waited for. T
 with it, run:
 
 ```
-cargo locktick build --release
+cargo locktick-build --release
 ```
 
-`cargo locktick` is an alias in `.cargo/config.toml` that adds `--cfg locktick` to the compiler
-flags. It works with the other built-in cargo commands as well. For clippy, run
-`cargo locktick-clippy`. If you set the `RUSTFLAGS` environment variable, it overrides the alias,
+`cargo locktick-build` is an alias in `.cargo/config.toml` that adds `--cfg locktick` to the
+compiler flags. `cargo locktick-check` and `cargo locktick-clippy` do the same for `check` and
+`clippy`. If you set the `RUSTFLAGS` environment variable, it overrides the alias,
 so add `--cfg locktick` to `RUSTFLAGS` instead.
 
 ## 6.5 Local Backups

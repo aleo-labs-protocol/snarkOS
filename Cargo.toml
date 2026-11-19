@@ -349,7 +349,7 @@ workspace = true
 
 # snarkVM instruments its locks under its `locktick` Cargo feature, not under `cfg(locktick)`.
 # This entry turns that feature on in `cfg(locktick)` builds. It applies only to builds that
-# include this package: `cargo locktick build -p snarkos-node`, for example, leaves snarkVM's
+# include this package: `cargo locktick-build -p snarkos-node`, for example, leaves snarkVM's
 # locks uninstrumented.
 [target.'cfg(locktick)'.dependencies.snarkvm]
 workspace = true
