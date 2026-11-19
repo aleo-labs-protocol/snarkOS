@@ -20,10 +20,7 @@ use snarkvm::{
 };
 
 use indexmap::{IndexMap, IndexSet, indexset, map::Entry};
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::RwLock;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::RwLock;
+use snarkos_utilities::locks::parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use tracing::error;
 

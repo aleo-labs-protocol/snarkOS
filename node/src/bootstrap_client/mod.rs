@@ -21,17 +21,16 @@ use crate::tcp::{self, Tcp};
 use snarkos_account::Account;
 use snarkos_node_network::{ConnectionMode, Peer, Resolver};
 use snarkos_node_tcp::{P2P, protocols::*};
-use snarkos_utilities::SignalHandler;
+use snarkos_utilities::{
+    SignalHandler,
+    locks::{parking_lot::RwLock, tokio::Mutex as TMutex},
+};
 use snarkvm::{
     ledger::committee::Committee,
     prelude::{Address, Field, Header, Network, PrivateKey, ViewKey},
     synthesizer::Restrictions,
 };
 
-#[cfg(feature = "locktick")]
-use locktick::{parking_lot::RwLock, tokio::Mutex as TMutex};
-#[cfg(not(feature = "locktick"))]
-use parking_lot::RwLock;
 use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
@@ -40,8 +39,6 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-#[cfg(not(feature = "locktick"))]
-use tokio::sync::Mutex as TMutex;
 
 #[derive(Clone)]
 pub struct BootstrapClient<N: Network>(Arc<InnerBootstrapClient<N>>);

@@ -16,6 +16,7 @@
 use crate::helpers::{check_timestamp_for_liveness, fmt_id};
 use snarkos_node_bft_ledger_service::LedgerService;
 use snarkos_node_bft_storage_service::StorageService;
+use snarkos_utilities::locks::parking_lot::{Mutex, RwLock};
 use snarkvm::{
     ledger::{
         block::{Block, Transaction},
@@ -27,11 +28,7 @@ use snarkvm::{
 
 use anyhow::Context;
 use indexmap::{IndexMap, IndexSet, map::Entry};
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::{Mutex, RwLock};
 use lru::LruCache;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::{Mutex, RwLock};
 #[cfg(not(feature = "serial"))]
 use rayon::prelude::*;
 use std::{

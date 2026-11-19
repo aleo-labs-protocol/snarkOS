@@ -21,6 +21,9 @@ pub use signals::*;
 pub mod node_data;
 pub use node_data::*;
 
+#[allow(clippy::disallowed_types)]
+pub mod locks;
+
 mod callback_handle;
 pub use callback_handle::CallbackHandle;
 

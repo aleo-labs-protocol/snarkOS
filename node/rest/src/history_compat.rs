@@ -217,7 +217,7 @@ impl From<FetchError> for RestError {
 
 /// One fetch in progress, which every request for its key awaits. The outcome is set exactly
 /// once, by the request that performed the fetch.
-type Flight<T> = tokio::sync::Mutex<Option<Result<Arc<T>, FetchError>>>;
+type Flight<T> = snarkos_utilities::locks::tokio::Mutex<Option<Result<Arc<T>, FetchError>>>;
 
 /// A cache of snapshots with single-flight fetching: concurrent requests for one key share one
 /// upstream request, and its outcome -- success or failure.

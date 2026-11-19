@@ -14,12 +14,12 @@
 // limitations under the License.
 
 use snarkos_cli::{commands::CLI, helpers::Updater};
+#[cfg(locktick)]
+use snarkos_utilities::locks::lock_snapshots;
 use snarkvm::utilities::{display_error, flatten_error};
 
 use clap::Parser;
-#[cfg(feature = "locktick")]
-use locktick::lock_snapshots;
-#[cfg(feature = "locktick")]
+#[cfg(locktick)]
 use std::time::Instant;
 use std::{backtrace::Backtrace, env, io, io::IsTerminal, panic::catch_unwind};
 use tracing::{log::logger, subscriber::NoSubscriber};
@@ -75,7 +75,7 @@ fn main() {
     // A hack to avoid having to go through clap to display advanced version information.
     check_for_version();
 
-    #[cfg(feature = "locktick")]
+    #[cfg(locktick)]
     std::thread::spawn(|| {
         loop {
             tracing::info!("[locktick] checking for active lock guards");

@@ -24,9 +24,12 @@ use crate::{
     spawn_blocking,
 };
 
-use snarkos_utilities::Stoppable;
 #[cfg(feature = "test_network")]
 use snarkos_utilities::{DevHotswapConfig, NodeDataDir};
+use snarkos_utilities::{
+    Stoppable,
+    locks::parking_lot::{Mutex, MutexGuard, RwLock},
+};
 
 #[cfg(feature = "test_network")]
 use snarkvm::ledger::DevCommitteeOptions;
@@ -57,14 +60,6 @@ use snarkvm::{
 
 use anyhow::ensure;
 use indexmap::IndexMap;
-#[cfg(feature = "locktick")]
-use locktick::{
-    LockGuard,
-    parking_lot::{Mutex, RwLock},
-};
-use parking_lot::MutexGuard;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::{Mutex, RwLock};
 #[cfg(not(feature = "serial"))]
 use rayon::prelude::*;
 
@@ -82,9 +77,6 @@ pub struct CoreLedgerService<N: Network, C: ConsensusStorage<N>> {
 /// A transactional update to the ledger.
 pub struct LedgerUpdate<'a, N: Network, C: ConsensusStorage<N>> {
     ledger: Ledger<N, C>,
-    #[cfg(feature = "locktick")]
-    _lock: LockGuard<MutexGuard<'a, ()>>,
-    #[cfg(not(feature = "locktick"))]
     _lock: MutexGuard<'a, ()>,
 }
 

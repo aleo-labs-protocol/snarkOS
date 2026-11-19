@@ -81,7 +81,10 @@ use snarkos_node_tcp::{
     connections::DisconnectOrigin,
     protocols::{Disconnect, Handshake, OnConnect, Reading, Writing},
 };
-use snarkos_utilities::NodeDataDir;
+use snarkos_utilities::{
+    NodeDataDir,
+    locks::parking_lot::{Mutex, RwLock},
+};
 use snarkvm::{
     console::prelude::*,
     ledger::{
@@ -94,10 +97,6 @@ use snarkvm::{
 
 use futures::future::join_all;
 use indexmap::IndexMap;
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::{Mutex, RwLock};
-#[cfg(not(feature = "locktick"))]
-use parking_lot::{Mutex, RwLock};
 use rand::seq::{IteratorRandom, SliceRandom};
 use std::{
     collections::{HashMap, HashSet},

@@ -56,7 +56,14 @@ use snarkos_node_bft_ledger_service::{LedgerService, deserialize_transaction_str
 use snarkos_node_network::ConnectionMode;
 use snarkos_node_network::PeerPoolHandling;
 use snarkos_node_sync::{BlockSync, DUMMY_SELF_IP, Ping};
-use snarkos_utilities::{CallbackHandle, NodeDataDir};
+use snarkos_utilities::{
+    CallbackHandle,
+    NodeDataDir,
+    locks::{
+        parking_lot::{Mutex, RwLock},
+        tokio::RwLock as TRwLock,
+    },
+};
 
 use snarkvm::{
     console::{
@@ -75,13 +82,6 @@ use snarkvm::{
 use anyhow::Context;
 use futures::stream::{FuturesUnordered, StreamExt};
 use indexmap::{IndexMap, IndexSet};
-#[cfg(feature = "locktick")]
-use locktick::{
-    parking_lot::{Mutex, RwLock},
-    tokio::RwLock as TRwLock,
-};
-#[cfg(not(feature = "locktick"))]
-use parking_lot::{Mutex, RwLock};
 #[cfg(not(feature = "serial"))]
 use rayon::prelude::*;
 use std::{
@@ -92,8 +92,6 @@ use std::{
     sync::{Arc, OnceLock},
     time::Instant,
 };
-#[cfg(not(feature = "locktick"))]
-use tokio::sync::RwLock as TRwLock;
 use tokio::{sync::Notify, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 

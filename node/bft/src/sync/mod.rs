@@ -24,7 +24,10 @@ use crate::{
 };
 
 use snarkos_node_sync::{BftSyncMode, BlockSync, InsertBlockResponseError, Ping, locators::BlockLocators};
-use snarkos_utilities::CallbackHandle;
+use snarkos_utilities::{
+    CallbackHandle,
+    locks::{parking_lot::Mutex, tokio::Mutex as TMutex},
+};
 
 use snarkvm::{
     console::{
@@ -36,10 +39,6 @@ use snarkvm::{
 };
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-#[cfg(feature = "locktick")]
-use locktick::{parking_lot::Mutex, tokio::Mutex as TMutex};
-#[cfg(not(feature = "locktick"))]
-use parking_lot::Mutex;
 #[cfg(not(feature = "serial"))]
 use rayon::prelude::*;
 use std::{
@@ -50,8 +49,6 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-#[cfg(not(feature = "locktick"))]
-use tokio::sync::Mutex as TMutex;
 use tokio::{sync::oneshot, task::JoinHandle};
 
 /// This callback trait allows listening to synchronization updates, such as discorvering new `BatchCertificate`s.

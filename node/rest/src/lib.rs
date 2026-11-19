@@ -39,6 +39,7 @@ use snarkos_node_router::{
     messages::{Message, UnconfirmedTransaction},
 };
 use snarkos_node_sync::BlockSync;
+use snarkos_utilities::locks::parking_lot::Mutex;
 use snarkvm::{
     console::{program::ProgramID, types::Field},
     ledger::narwhal::Data,
@@ -62,11 +63,7 @@ use axum::{
     routing::{get, post},
 };
 use axum_extra::response::ErasedJson;
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::Mutex;
 use lru::LruCache;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::Mutex;
 use std::{
     net::SocketAddr,
     num::NonZeroUsize,

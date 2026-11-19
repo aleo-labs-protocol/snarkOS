@@ -27,11 +27,8 @@ use std::{
 };
 
 use anyhow::anyhow;
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::Mutex;
 use once_cell::sync::OnceCell;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::Mutex;
+use snarkos_utilities::locks::parking_lot::Mutex;
 use tokio::{
     io::split,
     net::{TcpListener, TcpSocket, TcpStream},

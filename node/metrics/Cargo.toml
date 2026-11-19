@@ -18,17 +18,8 @@ edition = "2024"
 
 [features]
 default = [ "metrics" ]
-locktick = [ 
-  "dep:locktick",
-  "snarkvm/locktick"
-]
 metrics = [ "snarkvm/metrics" ]
 serial = [ "snarkvm/serial" ]
-
-[dependencies.locktick]
-workspace = true
-features = [ "parking_lot" ]
-optional = true
 
 [dependencies.metrics]
 version = "0.22"
@@ -38,10 +29,10 @@ version = "0.13"
 default-features = false
 features = [ "http-listener" ]
 
-[dependencies.parking_lot]
+[dependencies.rayon]
 workspace = true
 
-[dependencies.rayon]
+[dependencies.snarkos-utilities]
 workspace = true
 
 [dependencies.snarkvm]

@@ -35,7 +35,12 @@ use snarkos_node_tcp::{
     P2P,
     protocols::{Disconnect, Handshake, OnConnect, Reading},
 };
-use snarkos_utilities::{NodeDataDir, SignalHandler, Stoppable};
+use snarkos_utilities::{
+    NodeDataDir,
+    SignalHandler,
+    Stoppable,
+    locks::parking_lot::{Mutex, RwLock},
+};
 
 use snarkvm::{
     console::network::consensus_config_value,
@@ -51,10 +56,6 @@ use snarkvm::{
 
 use anyhow::Result;
 use core::{marker::PhantomData, time::Duration};
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::{Mutex, RwLock};
-#[cfg(not(feature = "locktick"))]
-use parking_lot::{Mutex, RwLock};
 use rand::{CryptoRng, Rng, RngExt};
 use snarkos_node_bft::helpers::fmt_id;
 use std::{

@@ -18,14 +18,6 @@ edition = "2024"
 
 [features]
 default = [ ]
-locktick = [
-  "dep:locktick",
-  "snarkos-node-bft/locktick",
-  "snarkos-node-bft-ledger-service/locktick",
-  "snarkos-node-bft-storage-service/locktick",
-  "snarkos-node-metrics/locktick",
-  "snarkvm/locktick"
-]
 metrics = [ "dep:snarkos-node-metrics", "snarkos-node-bft/metrics" ]
 cuda = [ "snarkvm/cuda", "snarkos-account/cuda", "snarkos-node-bft-ledger-service/cuda" ]
 serial = [ 
@@ -46,20 +38,12 @@ workspace = true
 workspace = true
 features = [ "serde", "rayon" ]
 
-[dependencies.locktick]
-workspace = true
-features = [ "parking_lot" ]
-optional = true
-
 [dependencies.lru]
 workspace = true
 
 [dependencies.snarkos-node-metrics]
 workspace = true
 optional = true
-
-[dependencies.parking_lot]
-workspace = true
 
 [dependencies.snarkos-account]
 workspace = true

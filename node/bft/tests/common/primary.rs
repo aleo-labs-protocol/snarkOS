@@ -30,7 +30,7 @@ use snarkos_node_bft::{
 use snarkos_node_bft_storage_service::BFTMemoryService;
 use snarkos_node_network::{ConnectionMode, PeerPoolHandling};
 use snarkos_node_sync::BlockSync;
-use snarkos_utilities::{NodeDataDir, SimpleStoppable, test_fixture::cached_fixture};
+use snarkos_utilities::{NodeDataDir, SimpleStoppable, locks::parking_lot::Mutex, test_fixture::cached_fixture};
 
 use snarkvm::{
     console::{
@@ -50,10 +50,6 @@ use snarkvm::{
 
 use indexmap::IndexMap;
 use itertools::Itertools;
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::Mutex;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::Mutex;
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
