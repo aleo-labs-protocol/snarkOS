@@ -72,7 +72,7 @@ use anyhow::Result;
 use locktick::parking_lot::{Mutex, RwLock};
 #[cfg(not(feature = "locktick"))]
 use parking_lot::{Mutex, RwLock};
-use std::{collections::HashMap, future::Future, io, net::SocketAddr, ops::Deref, sync::Arc};
+use std::{collections::HashMap, future::Future, io, net::SocketAddr, ops::Deref, sync::Arc, time::Duration};
 use tokio::task::JoinHandle;
 
 /// The default port used by the router.
@@ -304,6 +304,11 @@ impl<N: Network> CommunicationService for Router<N> {
     fn prepare_block_request(start_height: u32, end_height: u32) -> Self::Message {
         debug_assert!(start_height < end_height, "Invalid block request format");
         Message::BlockRequest(BlockRequest { start_height, end_height })
+    }
+
+    /// Returns the block request limit that `Inbound` enforces.
+    fn block_request_limit(&self) -> (usize, Duration) {
+        (MAXIMUM_BLOCK_REQUESTS_PER_INTERVAL, Duration::from_secs(BLOCK_REQUEST_INTERVAL_IN_SECS as u64))
     }
 
     /// Sends the given message to specified peer.
