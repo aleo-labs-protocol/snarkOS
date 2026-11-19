@@ -25,16 +25,14 @@ use crate::StorageService;
 use crate::memory::BFTMemoryService;
 #[cfg(feature = "persistent")]
 use crate::persistent::BFTPersistentStorage;
+#[cfg(feature = "persistent")]
+use snarkvm::ledger::store::StorageMode;
 use snarkvm::{
     console::network::MainnetV0,
-    ledger::{
-        narwhal::{BatchHeader, Data, Transmission, TransmissionID},
-        store::StorageMode,
-    },
+    ledger::narwhal::{BatchHeader, Data, Transmission, TransmissionID},
     prelude::{Field, Network, PrivateKey, Rng, TestRng, Uniform},
 };
 
-#[cfg(feature = "persistent")]
 use bytes::Bytes;
 use indexmap::indexset;
 
