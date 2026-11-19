@@ -249,10 +249,12 @@ jobs:
             runs: |
               nextest run -p snarkos-node-bft --features metrics
               nextest run -p snarkos-node-bft --features metrics --example simple_node --no-tests=fail
-          - name: router
-            runs: nextest run -p snarkos-node-router
-          - name: sync
-            runs: nextest run -p snarkos-node-sync
+          # One line for both would turn on `test` in `snarkos-node-sync` for
+          # its own tests. The two lines build the same snarkvm crates.
+          - name: router-sync
+            runs: |
+              nextest run -p snarkos-node-router
+              nextest run -p snarkos-node-sync
           # Builds RocksDB, whose bindings need libclang, which hosted runners lack.
           - name: ledger-distribution
             runs: nextest run -p snarkos-ledger-distribution
