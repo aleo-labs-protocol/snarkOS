@@ -114,7 +114,17 @@ async fn finish_cdn_sync<N: Network, C: ConsensusStorage<N>>(
         None => CdnFallback::Disabled,
         // A failed sync was logged by the CDN sync task.
         Some(cdn_sync) => match cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN")? {
-            Ok(_) => CdnFallback::Available,
+            Ok(_) => {
+                // Block sync still holds the height from before CDN sync.
+                let height = ledger.latest_height();
+                if height == sync.get_sync_height()
+                    && let Ok(cdn_height) = cdn_sync.get_cdn_height().await
+                    && cdn_height <= height
+                {
+                    info!("This node is at block {height}, already at or past the CDN height ({cdn_height})");
+                }
+                CdnFallback::Available
+            }
             Err(_) => CdnFallback::Failed,
         },
     };

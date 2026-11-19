@@ -3399,24 +3399,30 @@ mod tests {
         }
     }
 
-    /// Tests that the stuck duration runs while the height stays, restarts when it advances, and
-    /// clears when sync is no longer stuck.
+    /// Tests that block sync stuck below the floors of every peer ahead reaches the shutdown
+    /// threshold although a peer leaves and returns on every sample, and that a peer serving the
+    /// next block restarts the clock.
     #[test]
-    fn test_stuck_for() {
+    fn test_stuck_shutdown_threshold_survives_peer_churn() {
         let sync = sample_sync_at_height(1_000);
-        assert_eq!(sync.stuck_for(), None);
         add_peers(&sync, 1, 3, 1_100, 1_050);
-        assert_eq!(sync.stuck_for(), Some(Duration::ZERO));
-        let since = sync.stuck_since.lock().unwrap().at;
-        assert!(sync.stuck_for().is_some());
-        assert_eq!(sync.stuck_since.lock().unwrap().at, since);
-
-        sync.set_sync_height(1_001);
-        assert_eq!(sync.stuck_for(), Some(Duration::ZERO));
-        assert_eq!(sync.stuck_since.lock().unwrap().height, 1_001);
+        let sample = STUCK_SYNC_SHUTDOWN_THRESHOLD / 10;
+        let start = Instant::now();
+        let mut now = start;
+        assert_eq!(sync.stuck_for_at(now), Some(Duration::ZERO));
+        while now < start + STUCK_SYNC_SHUTDOWN_THRESHOLD {
+            now += sample;
+            sync.remove_peer(&sample_peer_ip(3));
+            assert_eq!(sync.stuck_for_at(now), None);
+            now += sample;
+            add_peers(&sync, 3, 1, 1_100, 1_050);
+            assert_eq!(sync.stuck_for_at(now), Some(now - start));
+        }
+        assert!(sync.stuck_for_at(now).unwrap() >= STUCK_SYNC_SHUTDOWN_THRESHOLD);
 
         add_peers(&sync, 4, 1, 1_100, 0);
-        assert_eq!(sync.stuck_for(), None);
-        assert!(sync.stuck_since.lock().is_none());
+        assert_eq!(sync.stuck_for_at(now), None);
+        sync.remove_peer(&sample_peer_ip(4));
+        assert_eq!(sync.stuck_for_at(now + sample), Some(Duration::ZERO));
     }
 }
