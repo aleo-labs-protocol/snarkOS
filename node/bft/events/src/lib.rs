@@ -172,9 +172,9 @@ macro_rules! with_data_payload {
 
 impl<N: Network> Event<N> {
     /// The oldest event protocol version this node accepts from a peer; it can be incremented in
-    /// order to force users to update.
+    /// order to force users to update. Minor releases can change this value.
     pub const MINIMUM_VERSION: u32 = 10;
-    /// The version of the event protocol this node speaks.
+    /// The version of the event protocol this node speaks. Minor releases can change this value.
     pub const VERSION: u32 = 12;
 
     /// Serializes the event's [`Data`] payload, if it holds one that is not already serialized.
