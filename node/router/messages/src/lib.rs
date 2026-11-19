@@ -149,11 +149,10 @@ impl<N: Network> From<DisconnectReason> for Message<N> {
 
 impl<N: Network> Message<N> {
     /// The oldest message version that receives `BlockResponse` status replies and `Ping` floors.
-    // TODO: add `(ConsensusVersion::V23, 34)` to `VERSIONS` once snarkVM has `ConsensusVersion::V23`.
     pub const STATUS_MESSAGE_VERSION: u32 = 34;
     /// The version of the network protocol; this is incremented for breaking changes between migration versions.
     // Note. This should be incremented for each new `ConsensusVersion` that is added.
-    pub const VERSIONS: [(ConsensusVersion, u32); 17] = [
+    pub const VERSIONS: [(ConsensusVersion, u32); 18] = [
         (ConsensusVersion::V5, 17),
         (ConsensusVersion::V7, 18),
         (ConsensusVersion::V8, 19),
@@ -171,6 +170,7 @@ impl<N: Network> Message<N> {
         (ConsensusVersion::V20, 31),
         (ConsensusVersion::V21, 32),
         (ConsensusVersion::V22, 33),
+        (ConsensusVersion::V23, 34),
     ];
 
     /// Returns the latest message version whose consensus upgrade has a scheduled block height.
@@ -406,6 +406,22 @@ mod tests {
         latest_message_version_has_scheduled_height::<MainnetV0>();
         latest_message_version_has_scheduled_height::<TestnetV0>();
         latest_message_version_has_scheduled_height::<CanaryV0>();
+    }
+
+    /// Tests that the status message version takes effect with `ConsensusVersion::V23`: a node
+    /// advertises it once V23 is scheduled, and requires it from the V23 height on.
+    #[test]
+    fn test_status_message_version_follows_v23() {
+        let status_version = Message::<MainnetV0>::STATUS_MESSAGE_VERSION;
+        assert_eq!(Message::<MainnetV0>::VERSIONS.last(), Some(&(ConsensusVersion::V23, status_version)));
+        match MainnetV0::CONSENSUS_HEIGHT(ConsensusVersion::V23).unwrap() {
+            u32::MAX => assert_eq!(Message::<MainnetV0>::latest_message_version(), status_version - 1),
+            height => {
+                assert_eq!(Message::<MainnetV0>::latest_message_version(), status_version);
+                assert_eq!(Message::<MainnetV0>::lowest_accepted_message_version(height - 1), status_version - 1);
+                assert_eq!(Message::<MainnetV0>::lowest_accepted_message_version(height), status_version);
+            }
+        }
     }
 
     #[test]
