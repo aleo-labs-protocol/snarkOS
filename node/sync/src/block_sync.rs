@@ -97,6 +97,10 @@ pub const MAX_BLOCKS_BEHIND: u32 = 1; // blocks
 /// How often to warn while block sync cannot progress (see [`BlockSync::is_stuck_below_peer_floors`]).
 const STUCK_SYNC_WARNING_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
+/// How long block sync may be stuck (see [`BlockSync::stuck_for`]) before a node that can recover
+/// from the CDN shuts down.
+pub const STUCK_SYNC_SHUTDOWN_THRESHOLD: Duration = Duration::from_secs(5 * 60);
+
 /// This is a dummy IP address that is used to represent the local node.
 /// Note: This here does not need to be a real IP address, but it must be unique/distinct from all other connections.
 pub const DUMMY_SELF_IP: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
@@ -286,6 +290,9 @@ pub struct BlockSync<N: Network> {
 
     /// When the node last warned that block sync cannot progress, and at which height.
     last_stuck_warning: Mutex<Option<(Instant, u32)>>,
+
+    /// Since when, and at which height, block sync has been stuck (see [`Self::stuck_for`]).
+    stuck_since: Mutex<Option<(Instant, u32)>>,
 }
 
 impl<N: Network> BlockSync<N> {
@@ -310,6 +317,7 @@ impl<N: Network> BlockSync<N> {
             last_response_at: Default::default(),
             trusted_peers_only: false,
             last_stuck_warning: Default::default(),
+            stuck_since: Default::default(),
         }
     }
 
@@ -1316,8 +1324,31 @@ impl<N: Network> BlockSync<N> {
     /// locators. Unless the node only connects to trusted peers, at least `MINIMUM_NUMBER_OF_PEERS`
     /// peers must have sent locators, so that a lone peer cannot claim a far-ahead tip.
     pub fn is_stuck_below_peer_floors(&self) -> bool {
-        let height = self.retention_height();
+        self.is_stuck_at(self.retention_height())
+    }
+
+    /// Returns `true` if block sync cannot progress from `height` (see
+    /// [`Self::is_stuck_below_peer_floors`]).
+    fn is_stuck_at(&self, height: u32) -> bool {
         !self.can_progress(height) && self.peers_ahead_serve_from_above(height)
+    }
+
+    /// Returns how long block sync has been stuck (see [`Self::is_stuck_below_peer_floors`]) at the
+    /// node's current height, or `None` if it is not stuck.
+    pub fn stuck_for(&self) -> Option<Duration> {
+        let height = self.retention_height();
+        let mut stuck_since = self.stuck_since.lock();
+        if !self.is_stuck_at(height) {
+            *stuck_since = None;
+            return None;
+        }
+        match *stuck_since {
+            Some((since, at_height)) if at_height == height => Some(since.elapsed()),
+            _ => {
+                *stuck_since = Some((Instant::now(), height));
+                Some(Duration::ZERO)
+            }
+        }
     }
 
     /// Returns `true` if a request can still progress from `height`: one for the next block, or
@@ -1356,7 +1387,7 @@ impl<N: Network> BlockSync<N> {
         {
             return;
         }
-        if self.is_stuck_below_peer_floors() {
+        if self.is_stuck_at(height) {
             *last_warning = Some((Instant::now(), height));
             warn!(
                 "Block sync cannot progress: the peers ahead of this node no longer serve block {}. \
@@ -2046,6 +2077,7 @@ mod tests {
             last_response_at: Default::default(),
             trusted_peers_only: sync.trusted_peers_only,
             last_stuck_warning: Default::default(),
+            stuck_since: Default::default(),
         }
     }
 
@@ -3182,5 +3214,26 @@ mod tests {
         sync.set_sync_height(1_001);
         sync.warn_if_stuck();
         assert_eq!(sync.last_stuck_warning.lock().unwrap().1, 1_001);
+    }
+
+    /// Tests that the stuck duration runs while the height stays, restarts when it advances, and
+    /// clears when sync is no longer stuck.
+    #[test]
+    fn test_stuck_for() {
+        let sync = sample_sync_at_height(1_000);
+        assert_eq!(sync.stuck_for(), None);
+        add_peers(&sync, 1, 3, 1_100, 1_050);
+        assert_eq!(sync.stuck_for(), Some(Duration::ZERO));
+        let since = sync.stuck_since.lock().unwrap().0;
+        assert!(sync.stuck_for().is_some());
+        assert_eq!(sync.stuck_since.lock().unwrap().0, since);
+
+        sync.set_sync_height(1_001);
+        assert_eq!(sync.stuck_for(), Some(Duration::ZERO));
+        assert_eq!(sync.stuck_since.lock().unwrap().1, 1_001);
+
+        add_peers(&sync, 4, 1, 1_100, 0);
+        assert_eq!(sync.stuck_for(), None);
+        assert!(sync.stuck_since.lock().is_none());
     }
 }
