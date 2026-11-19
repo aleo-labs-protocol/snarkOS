@@ -213,7 +213,6 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
         };
 
         // Perform sync with CDN (if enabled).
-        let height_before_cdn = ledger.latest_height();
         let cdn_sync = cdn.map(|base_url| {
             trace!("CDN sync is enabled");
             Arc::new(CdnBlockSync::new(base_url, ledger.clone(), signal_handler))
@@ -238,15 +237,14 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
         }
 
         // Set up everything else after CDN sync is done.
-        let cdn_fallback =
-            match crate::finish_cdn_sync(cdn_sync, height_before_cdn, &ledger, &node.sync, &node.ping).await {
-                Ok(cdn_fallback) => cdn_fallback,
-                Err(error) => {
-                    crate::log_clean_error(&storage_mode);
-                    node.shut_down().await;
-                    return Err(error);
-                }
-            };
+        let cdn_fallback = match crate::finish_cdn_sync(cdn_sync, &ledger, &node.sync, &node.ping).await {
+            Ok(cdn_fallback) => cdn_fallback,
+            Err(error) => {
+                crate::log_clean_error(&storage_mode);
+                node.shut_down().await;
+                return Err(error);
+            }
+        };
 
         // Initialize the routing.
         node.initialize_routing().await;
