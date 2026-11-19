@@ -123,7 +123,7 @@ struct PeerLocators<N: Network> {
     locators_at: Instant,
     /// The oldest block the peer serves, as it reported in a `Ping` or a `Pruned` reply.
     floor: u32,
-    /// The highest latest height the peer reported in a `NotYet` reply to a request sent since its
+    /// The lowest latest height the peer reported in a `NotYet` reply to a request sent since its
     /// locators last changed.
     tip_cap: Option<u32>,
 }
@@ -284,8 +284,8 @@ pub struct BlockSync<N: Network> {
     /// Whether the node only connects to trusted peers (see [`Self::is_stuck_below_peer_floors`]).
     trusted_peers_only: bool,
 
-    /// When the node last warned that block sync cannot progress.
-    last_stuck_warning: Mutex<Option<Instant>>,
+    /// When the node last warned that block sync cannot progress, and at which height.
+    last_stuck_warning: Mutex<Option<(Instant, u32)>>,
 }
 
 impl<N: Network> BlockSync<N> {
@@ -654,6 +654,7 @@ impl<N: Network> BlockSync<N> {
                  new block requests to send"
                 );
             }
+            self.warn_if_stuck();
         } else {
             let chunk_size = DataBlocks::<N>::MAXIMUM_NUMBER_OF_BLOCKS as usize;
             for (block_requests, sync_peers) in batches {
@@ -668,8 +669,6 @@ impl<N: Network> BlockSync<N> {
                 }
             }
         }
-
-        self.warn_if_stuck();
     }
 
     /// Inserts a new block response from the given peer IP.
@@ -741,7 +740,7 @@ impl<N: Network> BlockSync<N> {
     /// Handles the peer's reply that it cannot serve `request`, and releases the peer's requests
     /// in the range for re-issue.
     ///
-    /// A `Pruned` reply raises the peer's floor. A `NotYet` reply raises the peer's tip cap, if the
+    /// A `Pruned` reply raises the peer's floor. A `NotYet` reply lowers the peer's tip cap, if the
     /// request was sent after the peer's locators last changed; otherwise the reply may predate
     /// them. Replies carry no request ID, so a late reply to a request that was issued again is
     /// judged by when the new request was sent.
@@ -761,7 +760,7 @@ impl<N: Network> BlockSync<N> {
                 BlockResponseStatus::Pruned { oldest_retained } => peer.floor = peer.floor.max(oldest_retained),
                 BlockResponseStatus::NotYet { latest_height } => {
                     if sent_at.is_some_and(|sent_at| peer.locators_at <= sent_at) {
-                        peer.tip_cap = Some(peer.tip_cap.map_or(latest_height, |cap| cap.max(latest_height)));
+                        peer.tip_cap = Some(peer.tip_cap.map_or(latest_height, |cap| cap.min(latest_height)));
                     }
                 }
             }
@@ -1348,17 +1347,17 @@ impl<N: Network> BlockSync<N> {
         num_ahead * 2 > num_peers && (self.trusted_peers_only || num_peers >= MINIMUM_NUMBER_OF_PEERS)
     }
 
-    /// Warns, at most every `STUCK_SYNC_WARNING_INTERVAL`, that block sync cannot progress. Once a
-    /// request can progress again, the next stall is reported at once.
+    /// Warns that block sync cannot progress, at most every `STUCK_SYNC_WARNING_INTERVAL` while the
+    /// node's height does not advance.
     fn warn_if_stuck(&self) {
         let height = self.retention_height();
         let mut last_warning = self.last_stuck_warning.lock();
-        if self.can_progress(height) {
-            *last_warning = None;
-        } else if last_warning.is_none_or(|at| at.elapsed() >= STUCK_SYNC_WARNING_INTERVAL)
-            && self.peers_ahead_serve_from_above(height)
+        if last_warning.is_some_and(|(at, at_height)| at_height == height && at.elapsed() < STUCK_SYNC_WARNING_INTERVAL)
         {
-            *last_warning = Some(Instant::now());
+            return;
+        }
+        if self.is_stuck_below_peer_floors() {
+            *last_warning = Some((Instant::now(), height));
             warn!(
                 "Block sync cannot progress: the peers ahead of this node no longer serve block {}. \
                 Connect to a peer that serves it with `--peers`, or restore a ledger snapshot.",
@@ -1747,42 +1746,24 @@ impl<N: Network> BlockSync<N> {
         // Breaks the loop when the first threshold number of peers are found, biasing for the peer with the highest height
         // and a cohort of peers who share a common ancestor above this node's latest ledger height.
         for (idx, (peer_ip, (peer_locators, peer_height))) in candidate_locators.iter().enumerate() {
-            // The height of the common ancestor shared by all selected peers.
-            let mut min_common_ancestor = *peer_height;
-
-            // The other peers consistent with this one, and their heights.
+            // The other peers consistent with this one, with their heights and common ancestors.
             let mut others = vec![];
             for (other_ip, (other_locators, other_height)) in candidate_locators.iter().skip(idx + 1) {
                 // Check if these two peers have a common ancestor above the latest ledger height.
                 if let Some(common_ancestor) = self.common_ancestors.read().get(&PeerPair(*peer_ip, *other_ip)) {
                     // If so, then check that their block locators are consistent.
                     if *common_ancestor > latest_ledger_height && peer_locators.is_consistent_with(other_locators) {
-                        // If their common ancestor is less than the minimum common ancestor, then update it.
-                        min_common_ancestor = min_common_ancestor.min(*common_ancestor);
-                        others.push((*other_ip, other_locators, *other_height));
+                        others.push((*other_ip, other_locators, *other_height, *common_ancestor));
                     }
                 }
             }
 
-            // If fewer than `threshold_to_request` peers, counting this one, serve up to the minimum
-            // common ancestor, lower it to the height that many peers serve.
-            if others.iter().filter(|(_, _, height)| *height >= min_common_ancestor).count() + 1 < threshold_to_request
-            {
-                let mut heights: Vec<u32> = others.iter().map(|(_, _, height)| *height).collect();
-                heights.sort_unstable_by(|a, b| b.cmp(a));
-                if let Some(height) = heights.get(threshold_to_request.saturating_sub(2)) {
-                    min_common_ancestor = min_common_ancestor.min(*height);
-                }
-            }
+            let heights: Vec<_> = others.iter().map(|(_, _, height, ancestor)| (*height, *ancestor)).collect();
+            let (min_common_ancestor, kept) = sync_range(*peer_height, &heights, threshold_to_request);
 
             // The peers we will synchronize from: this one, and the others that serve the whole range.
             let mut sync_peers = vec![(*peer_ip, peer_locators.clone())];
-            sync_peers.extend(
-                others
-                    .into_iter()
-                    .filter(|(_, _, height)| *height >= min_common_ancestor)
-                    .map(|(other_ip, other_locators, _)| (other_ip, other_locators.clone())),
-            );
+            sync_peers.extend(kept.into_iter().map(|i| (others[i].0, others[i].1.clone())));
 
             // If we have enough sync peers above the latest ledger height, finish and return them.
             if min_common_ancestor > latest_ledger_height && sync_peers.len() >= threshold_to_request {
@@ -1877,6 +1858,36 @@ impl<N: Network> BlockSync<N> {
             .map(|(height, (hash, previous_hash))| (height, (hash, previous_hash, max_num_sync_ips)))
             .collect()
     }
+}
+
+/// Returns the end of the range to request from a peer at `height`, and which of the `others` serve
+/// all of it. Each of the others is given as its height and its common ancestor with the peer.
+///
+/// The end is the lowest common ancestor among the peers kept, and every peer kept has reached it.
+/// If that leaves fewer than `threshold` peers, counting the first, the end is lowered to the
+/// highest one that enough peers serve.
+fn sync_range(height: u32, others: &[(u32, u32)], threshold: usize) -> (u32, Vec<usize>) {
+    // Drop the peers below the end, which raises the end, until every peer kept has reached it.
+    let mut kept: Vec<usize> = (0..others.len()).collect();
+    let mut end = loop {
+        let end = kept.iter().map(|&i| others[i].1).fold(height, u32::min);
+        let num_kept = kept.len();
+        kept.retain(|&i| others[i].0 >= end);
+        if kept.len() == num_kept {
+            break end;
+        }
+    };
+
+    if kept.len() + 1 < threshold {
+        // A peer serves up to the lower of its height and its common ancestor with the first.
+        let mut reach: Vec<u32> = others.iter().map(|(height, ancestor)| (*height).min(*ancestor)).collect();
+        reach.sort_unstable_by(|a, b| b.cmp(a));
+        if let Some(&lowered) = reach.get(threshold - 2) {
+            end = height.min(lowered);
+            kept = (0..others.len()).filter(|&i| others[i].0.min(others[i].1) >= end).collect();
+        }
+    }
+    (end, kept)
 }
 
 /// If any peer is detected to be dishonest in this function, it will not set the hash or previous hash,
@@ -2812,11 +2823,6 @@ mod tests {
         insert_requests_to(&sync, peer_ip, 6..8);
         assert!(sync.prepare_block_requests().is_empty());
         assert_eq!(sync.failed_requests.lock().keys().copied().collect::<Vec<_>>(), vec![8, 9, 10]);
-
-        // A lower cap from another reply since the same locators does not lower it.
-        insert_requests_to(&sync, peer_ip, 8..9);
-        sync.insert_block_unavailable(peer_ip, BlockRequest::new(8, 9).unwrap(), not_yet(6));
-        assert_eq!(tip_cap_of(&sync, peer_ip), Some(7));
     }
 
     /// Tests that a prepared chunk is sent only to peers that serve all of it.
@@ -3124,5 +3130,57 @@ mod tests {
         insert_requests_to(&sync, sample_peer_ip(2), 1_001..1_006);
         let (requests, _) = sync.prepare_block_requests().pop().unwrap();
         assert!(requests.last().unwrap().0 > 1_050);
+    }
+
+    /// Tests that a lower `NotYet` since the same locators lowers the cap, so that the released
+    /// chunk does not go back to the peer.
+    #[test]
+    fn test_lower_not_yet_lowers_cap() {
+        let sync = sample_sync_at_height(1_000);
+        let peer_ip = sample_peer_ip(1);
+        add_peers(&sync, 1, 1, 1_100, 0);
+        insert_requests_to(&sync, peer_ip, 1_096..1_101);
+        sync.insert_block_unavailable(peer_ip, BlockRequest::new(1_096, 1_101).unwrap(), not_yet(1_099));
+        insert_requests_to(&sync, peer_ip, 1_001..1_006);
+        sync.insert_block_unavailable(peer_ip, BlockRequest::new(1_001, 1_006).unwrap(), not_yet(1_000));
+        assert_eq!(tip_cap_of(&sync, peer_ip), Some(1_000));
+
+        let batches = sync.prepare_block_requests();
+        assert!(batches.iter().all(|(_, sync_peers)| !sync_peers.contains_key(&peer_ip)));
+    }
+
+    /// Tests the range end and the peers kept, for the threshold used outside tests and for one
+    /// above it. Each other peer is given as its height and its common ancestor with the first.
+    #[test]
+    fn test_sync_range() {
+        const H: u32 = 1_100;
+        // A capped peer is dropped, and its common ancestor does not lower the end.
+        assert_eq!(sync_range(H, &[(1_003, 1_050)], 1), (H, vec![]));
+        // A peer below the first peer's height lowers the end to their common ancestor.
+        assert_eq!(sync_range(H, &[(1_050, 1_050), (H, H)], 1), (1_050, vec![0, 1]));
+        // Enough peers serve the whole range, so the capped one is dropped.
+        assert_eq!(sync_range(H, &[(H, H), (H, H), (1_003, H)], 3), (H, vec![0, 1]));
+        // Too few do, so the end is lowered to the capped peer's height.
+        assert_eq!(sync_range(H, &[(1_003, H)], 2), (1_003, vec![0]));
+        // Too few peers at all: the end is not lowered.
+        assert_eq!(sync_range(H, &[(1_003, H)], 3), (H, vec![]));
+    }
+
+    /// Tests that the stall warning repeats at most every interval while the height stays, and
+    /// at once after the height advances.
+    #[test]
+    fn test_stall_warning_interval() {
+        let sync = sample_sync_at_height(1_000);
+        add_peers(&sync, 1, 3, 1_100, 1_050);
+        sync.warn_if_stuck();
+        let (warned_at, height) = sync.last_stuck_warning.lock().unwrap();
+        assert_eq!(height, 1_000);
+
+        sync.warn_if_stuck();
+        assert_eq!(sync.last_stuck_warning.lock().unwrap().0, warned_at);
+
+        sync.set_sync_height(1_001);
+        sync.warn_if_stuck();
+        assert_eq!(sync.last_stuck_warning.lock().unwrap().1, 1_001);
     }
 }
