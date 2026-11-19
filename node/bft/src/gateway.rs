@@ -2440,6 +2440,44 @@ mod prop_tests {
         assert_eq!(gateway.num_workers(), workers.len() as u8);
     }
 
+    /// Tests that only peers connected at `STATUS_EVENT_VERSION` or above receive status replies.
+    #[test]
+    fn test_status_replies_need_the_status_event_version() {
+        use snarkos_node_bft_events::Event;
+        use snarkos_node_network::{ConnectionMode, NodeType, Peer};
+
+        let rng = &mut TestRng::default();
+        let committee = snarkvm::ledger::committee::test_helpers::sample_committee(rng);
+        let ledger = Arc::new(MockLedgerService::new(committee));
+        let storage = Storage::new(ledger.clone(), Arc::new(BFTMemoryService::new()), 10).unwrap();
+        let account = Account::new(rng).unwrap();
+        let gateway =
+            Gateway::new(account.clone(), storage, ledger, None, &[], false, NodeDataDir::new_test(None), Some(0))
+                .unwrap();
+
+        let connect = |port: u16, version: u32| {
+            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+            let mut peer = Peer::new_connecting(addr, false);
+            peer.upgrade_to_connected(
+                addr,
+                port,
+                account.address(),
+                NodeType::Validator,
+                version,
+                None,
+                ConnectionMode::Gateway,
+            );
+            gateway.peer_pool().write().insert(addr, peer);
+            addr
+        };
+        let status_version = Event::<CurrentNetwork>::STATUS_EVENT_VERSION;
+        let old_peer = connect(5001, status_version - 1);
+        let new_peer = connect(5002, status_version);
+
+        assert!(!gateway.supports_status_replies(old_peer));
+        assert!(gateway.supports_status_replies(new_peer));
+    }
+
     #[proptest]
     fn test_is_authorized_validator(#[strategy(any_valid_dev_gateway())] input: GatewayInput) {
         let rng = &mut TestRng::default();
