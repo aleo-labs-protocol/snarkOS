@@ -18,7 +18,7 @@ edition = "2024"
 
 [features]
 default = [ ]
-ledger = [ "parking_lot", "rand", "rayon", "tokio", "tracing" ]
+ledger = [ "ledger-write", "parking_lot", "rand", "rayon", "tokio", "tracing" ]
 ledger-write = [ ]
 locktick = [
   "dep:locktick",
@@ -26,7 +26,7 @@ locktick = [
   "snarkos-utilities/locktick"
 ]
 metrics = [ "dep:snarkos-node-metrics", "snarkvm/metrics" ]
-mock = [ "parking_lot", "tracing" ]
+mock = [ "ledger-write", "parking_lot", "tracing" ]
 prover = [ ]
 cuda = [ "snarkvm/cuda" ]
 serial = [
