@@ -160,5 +160,8 @@ harness = false
 [dev-dependencies.criterion]
 workspace = true
 
+[dev-dependencies.tempfile]
+workspace = true
+
 [build-dependencies.built]
 workspace = true

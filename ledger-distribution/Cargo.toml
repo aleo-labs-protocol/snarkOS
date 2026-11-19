@@ -97,7 +97,7 @@ workspace = true
 features = [ "synthesizer" ]
 
 [dev-dependencies.tempfile]
-version = "3"
+workspace = true
 
 [package.metadata.cargo-machete]
 ignored = ["serde"]

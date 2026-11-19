@@ -518,7 +518,7 @@ mod tests {
     };
 
     use rand::RngExt;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tempfile::TempDir;
 
     type CurrentNetwork = MainnetV0;
 
@@ -535,19 +535,15 @@ mod tests {
     }
 
     /// A directory for the record of a required upgrade, removed on drop.
-    struct RecordDir(PathBuf);
+    struct RecordDir(TempDir);
 
     impl RecordDir {
         fn new() -> Self {
-            static COUNT: AtomicUsize = AtomicUsize::new(0);
-            let count = COUNT.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!("snarkos-upgrade-monitor-{}-{count}", std::process::id()));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
+            Self(tempfile::tempdir().unwrap())
         }
 
         fn record_path(&self) -> PathBuf {
-            self.0.join("required-consensus-upgrade")
+            self.0.path().join("required-consensus-upgrade")
         }
 
         fn write(&self, bytes: &[u8]) {
@@ -556,12 +552,6 @@ mod tests {
 
         fn read(&self) -> Option<RequiredUpgrade> {
             fs::read(self.record_path()).ok().map(|bytes| RequiredUpgrade::from_bytes_le(&bytes).unwrap())
-        }
-    }
-
-    impl Drop for RecordDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
         }
     }
 

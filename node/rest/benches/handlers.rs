@@ -427,17 +427,12 @@ fn bench_db_backup(c: &mut Criterion) {
     group.bench_function("backup_database", |b| {
         b.iter_batched(
             || {
+                let dir = tempfile::tempdir().unwrap();
                 // The checkpoint path must not exist yet -- `backup_database` creates it.
-                let suffix = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("system clock is before the epoch")
-                    .as_nanos();
-                std::env::temp_dir().join(format!("snarkos-rest-bench-backup-{}-{suffix}", std::process::id()))
+                let path = dir.path().join("backup");
+                (dir, path)
             },
-            |dir| {
-                ledger.backup_database(&dir).unwrap();
-                std::fs::remove_dir_all(&dir).ok();
-            },
+            |(_dir, path)| ledger.backup_database(&path).unwrap(),
             criterion::BatchSize::LargeInput,
         )
     });
