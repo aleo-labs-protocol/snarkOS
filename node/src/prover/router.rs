@@ -18,6 +18,7 @@ use super::*;
 use snarkos_node_network::harden_socket;
 use snarkos_node_router::messages::{
     BlockRequest,
+    BlockResponseStatus,
     DisconnectReason,
     Message,
     MessageCodec,
@@ -191,6 +192,12 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Prover<N, C> {
         _blocks: Vec<Block<N>>,
         _latest_consensus_version: Option<ConsensusVersion>,
     ) -> bool {
+        debug!("Disconnecting '{peer_ip}' for the following reason - {}", DisconnectReason::ProtocolViolation);
+        false
+    }
+
+    /// Handles a `BlockResponse` that says the peer cannot serve `request`.
+    fn block_unavailable(&self, peer_ip: SocketAddr, _request: BlockRequest, _status: BlockResponseStatus) -> bool {
         debug!("Disconnecting '{peer_ip}' for the following reason - {}", DisconnectReason::ProtocolViolation);
         false
     }

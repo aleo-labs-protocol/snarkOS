@@ -38,9 +38,7 @@ pub enum BlockResponseStatus {
 }
 
 impl BlockResponseStatus {
-    /// The wire tag of `NotYet`.
     const NOT_YET_TAG: u8 = 1;
-    /// The wire tag of `Pruned`.
     const PRUNED_TAG: u8 = 0;
 
     /// Ensures that a reply of this status does not contradict the request it answers.
@@ -54,7 +52,7 @@ impl BlockResponseStatus {
             Self::NotYet { latest_height } if end_height - 1 <= latest_height => bail!(
                 "Peer '{peer_ip}' sent a contradictory block response ({start_height}..{end_height} not yet at {latest_height})"
             ),
-            Self::Pruned { .. } | Self::NotYet { .. } => Ok(()),
+            _ => Ok(()),
         }
     }
 }
@@ -106,12 +104,12 @@ impl<N: Network> BlockResponse<N> {
 impl<N: Network> ToBytes for BlockResponse<N> {
     fn write_le<W: io::Write>(&self, mut writer: W) -> io::Result<()> {
         // A status reply starts with `u32::MAX`, which is never a valid start height.
-        let (tag, value) = match self.status {
-            BlockResponseStatus::Blocks => (None, 0),
-            BlockResponseStatus::Pruned { oldest_retained } => (Some(BlockResponseStatus::PRUNED_TAG), oldest_retained),
-            BlockResponseStatus::NotYet { latest_height } => (Some(BlockResponseStatus::NOT_YET_TAG), latest_height),
+        let status = match self.status {
+            BlockResponseStatus::Blocks => None,
+            BlockResponseStatus::Pruned { oldest_retained } => Some((BlockResponseStatus::PRUNED_TAG, oldest_retained)),
+            BlockResponseStatus::NotYet { latest_height } => Some((BlockResponseStatus::NOT_YET_TAG, latest_height)),
         };
-        if let Some(tag) = tag {
+        if let Some((tag, value)) = status {
             u32::MAX.write_le(&mut writer)?;
             self.request.write_le(&mut writer)?;
             tag.write_le(&mut writer)?;

@@ -18,6 +18,7 @@ use snarkos_node_router::messages::{BlockRequest, BlockResponse, BlockResponseSt
 use snarkvm::{console::network::Network, ledger::Block};
 
 use anyhow::{Result, bail};
+use std::ops::Range;
 
 /// Returns the response to `request`: the blocks, or `NotYet` if the range reaches past
 /// `latest_height`.
@@ -28,7 +29,7 @@ pub fn serve_block_request<N: Network>(
     request: BlockRequest,
     supports_status: bool,
     latest_height: impl Fn() -> u32,
-    get_blocks: impl FnOnce() -> Result<Vec<Block<N>>>,
+    get_blocks: impl FnOnce(Range<u32>) -> Result<Vec<Block<N>>>,
 ) -> Result<BlockResponse<N>> {
     let BlockRequest { start_height, end_height } = request;
     let not_yet = || {
@@ -38,17 +39,13 @@ pub fn serve_block_request<N: Network>(
 
     let status = match not_yet() {
         Some(status) => status,
-        None => match get_blocks() {
+        None => match get_blocks(start_height..end_height) {
             Ok(blocks) => {
                 let latest_consensus_version = N::CONSENSUS_VERSION(end_height - 1)?;
                 return Ok(BlockResponse::new(request, DataBlocks(blocks), latest_consensus_version));
             }
-            Err(error) => match not_yet() {
-                Some(status) => status,
-                None => {
-                    return Err(error.context(format!("Failed to retrieve blocks {start_height} to {end_height}")));
-                }
-            },
+            Err(error) => not_yet()
+                .ok_or_else(|| error.context(format!("Failed to retrieve blocks {start_height} to {end_height}")))?,
         },
     };
 
@@ -72,7 +69,7 @@ mod tests {
         end_height: u32,
         supports_status: bool,
         latest: impl Fn() -> u32,
-        get_blocks: impl FnOnce() -> Result<Vec<Block<CurrentNetwork>>>,
+        get_blocks: impl FnOnce(Range<u32>) -> Result<Vec<Block<CurrentNetwork>>>,
     ) -> Result<BlockResponse<CurrentNetwork>> {
         serve_block_request(BlockRequest::new(start_height, end_height).unwrap(), supports_status, latest, get_blocks)
     }
@@ -81,7 +78,7 @@ mod tests {
     fn test_serve_block_request() {
         const LATEST: u32 = 100;
         let read = Cell::new(false);
-        let get_blocks = || {
+        let get_blocks = |_| {
             read.set(true);
             Ok(vec![])
         };
@@ -100,7 +97,7 @@ mod tests {
         assert!(serve(96, 102, false, || LATEST, get_blocks).is_err());
 
         // A read error below the tip is returned.
-        assert!(serve(96, 101, true, || LATEST, || Err(anyhow!("storage error"))).is_err());
+        assert!(serve(96, 101, true, || LATEST, |_| Err(anyhow!("storage error"))).is_err());
 
         // A read error after the tip moved below the range is `NotYet`.
         let latest = Cell::new(LATEST);
@@ -109,7 +106,7 @@ mod tests {
             101,
             true,
             || latest.get(),
-            || {
+            |_| {
                 latest.set(98);
                 Err(anyhow!("missing block"))
             },

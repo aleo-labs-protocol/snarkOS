@@ -64,9 +64,6 @@ pub fn sample_genesis_block() -> Block<CurrentNetwork> {
     Block::<CurrentNetwork>::from_bytes_le(CurrentNetwork::genesis_bytes()).unwrap()
 }
 
-/// Produces the reply to a message received from a node, if any.
-type Responder = Box<dyn Fn(&Message<CurrentNetwork>) -> Option<Message<CurrentNetwork>> + Send + Sync>;
-
 #[derive(Clone)]
 pub struct TestPeer {
     node: Node,
@@ -75,7 +72,6 @@ pub struct TestPeer {
     /// The message version the peer advertises in the handshake.
     version: u32,
     received_messages: Arc<Mutex<Vec<Message<CurrentNetwork>>>>,
-    responder: Arc<Mutex<Option<Responder>>>,
 }
 
 impl Pea2Pea for TestPeer {
@@ -116,7 +112,6 @@ impl TestPeer {
             account,
             version,
             received_messages: Default::default(),
-            responder: Default::default(),
         };
 
         peer.enable_handshake().await;
@@ -149,14 +144,6 @@ impl TestPeer {
     /// Returns a copy of the messages received from connected nodes so far.
     pub fn received_messages(&self) -> Vec<Message<CurrentNetwork>> {
         self.received_messages.lock().unwrap().clone()
-    }
-
-    /// Replies to every received message with what `respond` returns for it.
-    pub fn set_responder(
-        &self,
-        respond: impl Fn(&Message<CurrentNetwork>) -> Option<Message<CurrentNetwork>> + Send + Sync + 'static,
-    ) {
-        *self.responder.lock().unwrap() = Some(Box::new(respond));
     }
 
     /// Returns a challenge request at this peer's message version.
@@ -262,15 +249,8 @@ impl Reading for TestPeer {
         Default::default()
     }
 
-    async fn process_message(&self, peer_ip: SocketAddr, message: Self::Message) {
-        let reply = self.responder.lock().unwrap().as_ref().and_then(|respond| respond(&message));
+    async fn process_message(&self, _peer_ip: SocketAddr, message: Self::Message) {
         self.received_messages.lock().unwrap().push(message);
-        if let Some(reply) = reply {
-            // A panic here would die with the reading task, unseen by the test.
-            if let Err(error) = self.unicast(peer_ip, reply) {
-                eprintln!("failed to reply to {peer_ip}: {error}");
-            }
-        }
     }
 }
 

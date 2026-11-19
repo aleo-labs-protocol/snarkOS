@@ -29,7 +29,6 @@ use snarkos_node_router::{
         UnconfirmedTransaction,
     },
 };
-use snarkos_node_sync::serve_block_request;
 use snarkos_node_tcp::{ConnectError, Connection, ConnectionSide, Tcp, connections::DisconnectOrigin};
 use snarkvm::{
     console::network::{ConsensusVersion, Network},
@@ -193,23 +192,7 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Client<N, C> {
 
     /// Handles a `BlockRequest` message.
     fn block_request(&self, peer_ip: SocketAddr, message: BlockRequest) -> bool {
-        let BlockRequest { start_height, end_height } = message;
-        let response = serve_block_request(
-            message,
-            self.router().supports_status_replies(peer_ip),
-            || self.ledger.latest_height(),
-            || self.ledger.get_blocks(start_height..end_height),
-        );
-        match response {
-            Ok(response) => {
-                self.router().send(peer_ip, Message::BlockResponse(response));
-                true
-            }
-            Err(error) => {
-                error!("{}", flatten_error(&error));
-                false
-            }
-        }
+        crate::send_block_response(self.router(), &self.ledger, peer_ip, message)
     }
 
     /// Handles a `BlockResponse` message.

@@ -354,9 +354,7 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
     ) -> bool;
 
     /// Handles a `BlockResponse` that says the peer cannot serve `request`.
-    fn block_unavailable(&self, _peer_ip: SocketAddr, _request: BlockRequest, _status: BlockResponseStatus) -> bool {
-        false
-    }
+    fn block_unavailable(&self, peer_ip: SocketAddr, request: BlockRequest, status: BlockResponseStatus) -> bool;
 
     /// Handles a `PeerRequest` message.
     fn peer_request(&self, peer_ip: SocketAddr) -> bool {

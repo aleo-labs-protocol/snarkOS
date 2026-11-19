@@ -39,10 +39,21 @@ use std::{net::SocketAddr, time::Duration};
 /// The first message version that receives status replies and `Ping` floors.
 const STATUS_VERSION: u32 = Message::<CurrentNetwork>::STATUS_MESSAGE_VERSION;
 
-/// Returns a test peer that advertises message version `version`.
-async fn peer_at(version: u32) -> TestPeer {
-    let account = common::sample_account(&mut TestRng::default());
+/// Returns a test peer that advertises message version `version`, with an account from `seed`.
+async fn peer_at(version: u32, seed: u64) -> TestPeer {
+    let account = common::sample_account(&mut TestRng::from_seed(seed));
     TestPeer::with_version(NodeType::Client, account, version).await
+}
+
+/// Returns the `Ping`s the peer received.
+fn pings(peer: &TestPeer) -> Vec<Ping<CurrentNetwork>> {
+    peer.received_messages()
+        .into_iter()
+        .filter_map(|message| match message {
+            Message::Ping(ping) => Some(ping),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Has the node's router send the peer a `Ping` with block locators, and returns it as received.
@@ -50,25 +61,11 @@ async fn peer_at(version: u32) -> TestPeer {
 /// The `Ping` the node sends on connect can arrive within the test peer's handshake reads and be
 /// dropped with them, so the test sends its own.
 async fn ping_peer(router: &Router<CurrentNetwork>, peer: &TestPeer) -> Ping<CurrentNetwork> {
-    let pings = || -> Vec<_> {
-        peer.received_messages()
-            .into_iter()
-            .filter_map(|message| match message {
-                Message::Ping(ping) => Some(ping),
-                _ => None,
-            })
-            .collect()
-    };
-    let num_pings = pings().len();
+    let num_pings = pings(peer).len();
     assert!(router.send_ping(peer.listening_addr().await, Some(locators(0))));
     let peer_clone = peer.clone();
-    deadline!(Duration::from_secs(5), move || peer_clone
-        .received_messages()
-        .iter()
-        .filter(|message| matches!(message, Message::Ping(_)))
-        .count()
-        > num_pings);
-    pings().pop().unwrap()
+    deadline!(Duration::from_secs(5), move || pings(&peer_clone).len() > num_pings);
+    pings(peer).pop().unwrap()
 }
 
 /// Returns the first `BlockResponse` the peer received.
@@ -104,7 +101,7 @@ macro_rules! test_block_status_gating {
                 #[tokio::test]
                 async fn [<$node_type _sends_legacy_replies_to_old_peer>]() {
                     let node = node::$node_type().await;
-                    let peer = peer_at(STATUS_VERSION - 1).await;
+                    let peer = peer_at(STATUS_VERSION - 1, 1).await;
                     let node_addr = connect_peer(node.router(), &peer).await;
 
                     let ping = ping_peer(node.router(), &peer).await;
@@ -123,7 +120,7 @@ macro_rules! test_block_status_gating {
                 #[tokio::test]
                 async fn [<$node_type _sends_status_replies_to_new_peer>]() {
                     let node = node::$node_type().await;
-                    let peer = peer_at(STATUS_VERSION).await;
+                    let peer = peer_at(STATUS_VERSION, 1).await;
                     let node_addr = connect_peer(node.router(), &peer).await;
 
                     assert_eq!(ping_peer(node.router(), &peer).await.oldest_retained, Some(0));
@@ -153,8 +150,7 @@ async fn connect_serving_peer(
     node: &Client<CurrentNetwork, ConsensusMemory<CurrentNetwork>>,
     seed: u64,
 ) -> (TestPeer, SocketAddr) {
-    let account = common::sample_account(&mut TestRng::from_seed(seed));
-    let peer = TestPeer::with_version(NodeType::Client, account, STATUS_VERSION).await;
+    let peer = peer_at(STATUS_VERSION, seed).await;
     let node_addr = connect_peer(node.router(), &peer).await;
     let ping = Ping::new(NodeType::Client, Some(locators(TIP)), Some(0));
     peer.unicast(node_addr, Message::Ping(ping)).unwrap();

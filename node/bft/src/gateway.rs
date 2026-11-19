@@ -504,6 +504,12 @@ impl<N: Network> Gateway<N> {
         self.primary_sender.get().expect("Primary sender not set in gateway")
     }
 
+    /// Returns `true` if the peer is connected at an event version that receives `BlockResponse`
+    /// status replies.
+    fn supports_status_replies(&self, peer_ip: SocketAddr) -> bool {
+        self.get_connected_peer(peer_ip).is_some_and(|peer| peer.version >= Event::<N>::STATUS_EVENT_VERSION)
+    }
+
     /// Returns the number of workers.
     pub fn num_workers(&self) -> u8 {
         u8::try_from(self.worker_senders.get().expect("Missing worker senders in gateway").len())
@@ -731,16 +737,14 @@ impl<N: Network> Gateway<N> {
                     bail!("Block request from '{peer_ip}' has an excessive range ({start_height}..{end_height})")
                 }
 
-                let supports_status = self
-                    .get_connected_peer(peer_ip)
-                    .is_some_and(|peer| peer.version >= Event::<N>::STATUS_EVENT_VERSION);
+                let supports_status = self.supports_status_replies(peer_ip);
                 let self_ = self.clone();
                 let response = match task::spawn_blocking(move || {
                     serve_block_request(
                         block_request,
                         supports_status,
                         || self_.ledger.latest_block_height(),
-                        || self_.ledger.get_blocks(start_height..end_height),
+                        |heights| self_.ledger.get_blocks(heights),
                     )
                 })
                 .await

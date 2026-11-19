@@ -493,6 +493,18 @@ impl<N: Network> BlockSync<N> {
         (sync_ips.len() >= max_num_sync_ips.min(num_connected).max(1)).then_some(sync_ips)
     }
 
+    /// Removes the `inserted` requests of a chunk that will not be sent, and queues the chunk's
+    /// `requests` for re-issue.
+    fn abandon_chunk(&self, inserted: &[(u32, PrepareSyncRequest<N>)], requests: &[(u32, PrepareSyncRequest<N>)]) {
+        {
+            let mut outstanding = self.requests.write();
+            for (height, _) in inserted {
+                outstanding.remove(height);
+            }
+        }
+        self.requeue_requests(requests);
+    }
+
     /// Queues prepared block requests that were not sent for re-issue, except heights that are
     /// already requested.
     fn requeue_requests(&self, requests: &[(u32, PrepareSyncRequest<N>)]) {
@@ -545,13 +557,7 @@ impl<N: Network> BlockSync<N> {
                 if let Err(err) = self.insert_block_request(*height, (*hash, *previous_hash, sync_ips.clone())) {
                     let err = err.context(format!("Failed to insert block request for height {height}"));
                     warn!("{}", flatten_error(&err));
-                    // Undo the requests inserted for this chunk, which will not be sent.
-                    let mut outstanding = self.requests.write();
-                    for (height, _) in &requests[..i] {
-                        outstanding.remove(height);
-                    }
-                    drop(outstanding);
-                    self.requeue_requests(requests);
+                    self.abandon_chunk(&requests[..i], requests);
                     return false;
                 }
             }
@@ -602,15 +608,7 @@ impl<N: Network> BlockSync<N> {
 
             // If sending fails for any peer, remove the block request from the sync pool.
             if !success {
-                // Remove the entire block request from the sync pool.
-                {
-                    let mut outstanding = self.requests.write();
-                    for height in start_height..end_height {
-                        outstanding.remove(&height);
-                    }
-                }
-                self.requeue_requests(requests);
-                // Break out of the loop.
+                self.abandon_chunk(requests, requests);
                 return false;
             }
         }
@@ -1295,7 +1293,7 @@ impl<N: Network> BlockSync<N> {
     /// floor above that block, and these peers are a strict majority of the peers that sent
     /// locators. Unless the node only connects to trusted peers, at least `MINIMUM_NUMBER_OF_PEERS`
     /// peers must have sent locators, so that a lone peer cannot claim a far-ahead tip.
-    pub fn is_stuck_below_peer_floors(&self) -> bool {
+    fn is_stuck_below_peer_floors(&self) -> bool {
         let height = self.retention_height();
         let next_height = height.saturating_add(1);
         // A request for the next block, or one still awaiting a response, can still progress.
@@ -1321,7 +1319,6 @@ impl<N: Network> BlockSync<N> {
             num_ahead += 1;
         }
         let num_peers = locators.len();
-        // A strict majority, written without division so it is exact.
         num_ahead * 2 > num_peers && (self.trusted_peers_only || num_peers >= MINIMUM_NUMBER_OF_PEERS)
     }
 
@@ -1694,15 +1691,14 @@ impl<N: Network> BlockSync<N> {
             .read()
             .iter()
             .filter_map(|(peer_ip, peer)| match first_needed {
-                None => Some((*peer_ip, (peer.locators.clone(), peer.locators.latest_locator_height()))),
-                Some(height) if peer.can_serve(height..height + 1) => {
-                    Some((*peer_ip, (peer.locators.clone(), peer.serving_tip())))
-                }
+                None => Some((peer_ip, peer, peer.locators.latest_locator_height())),
+                Some(height) if peer.can_serve(height..height + 1) => Some((peer_ip, peer, peer.serving_tip())),
                 Some(_) => None,
             })
-            .filter(|(_, (_, peer_height))| *peer_height > current_height)
-            .sorted_by(|(_, (_, a)), (_, (_, b))| b.cmp(a))
+            .filter(|(_, _, peer_height)| *peer_height > current_height)
+            .sorted_by(|(_, _, a), (_, _, b)| b.cmp(a))
             .take(NUM_SYNC_CANDIDATE_PEERS)
+            .map(|(peer_ip, peer, peer_height)| (*peer_ip, (peer.locators.clone(), peer_height)))
             .collect();
 
         // Case 0: If there are no candidate peers, return `None`.

@@ -17,6 +17,7 @@ use super::*;
 use snarkos_node_network::{PeerPoolHandling, harden_socket};
 use snarkos_node_router::messages::{
     BlockRequest,
+    BlockResponseStatus,
     DisconnectReason,
     Message,
     MessageCodec,
@@ -25,12 +26,10 @@ use snarkos_node_router::messages::{
     Pong,
     UnconfirmedTransaction,
 };
-use snarkos_node_sync::serve_block_request;
 use snarkos_node_tcp::{ConnectError, Connection, ConnectionSide, Tcp, connections::DisconnectOrigin};
 use snarkvm::{
     console::network::{ConsensusVersion, Network},
     ledger::{block::Transaction, narwhal::Data},
-    utilities::flatten_error,
 };
 
 use std::{io, net::SocketAddr};
@@ -190,23 +189,7 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Validator<N, C> {
 
     /// Retrieves the blocks within the block request range, and returns the block response to the peer.
     fn block_request(&self, peer_ip: SocketAddr, message: BlockRequest) -> bool {
-        let BlockRequest { start_height, end_height } = message;
-        let response = serve_block_request(
-            message,
-            self.router().supports_status_replies(peer_ip),
-            || self.ledger.latest_height(),
-            || self.ledger.get_blocks(start_height..end_height),
-        );
-        match response {
-            Ok(response) => {
-                self.router().send(peer_ip, Message::BlockResponse(response));
-                true
-            }
-            Err(error) => {
-                error!("{}", flatten_error(&error));
-                false
-            }
-        }
+        crate::send_block_response(self.router(), &self.ledger, peer_ip, message)
     }
 
     /// Handles a `BlockResponse` message.
@@ -216,6 +199,12 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Validator<N, C> {
         _blocks: Vec<Block<N>>,
         _latest_consensus_version: Option<ConsensusVersion>,
     ) -> bool {
+        warn!("Received a block response through P2P, not BFT, from {peer_ip}");
+        false
+    }
+
+    /// Handles a `BlockResponse` that says the peer cannot serve `request`.
+    fn block_unavailable(&self, peer_ip: SocketAddr, _request: BlockRequest, _status: BlockResponseStatus) -> bool {
         warn!("Received a block response through P2P, not BFT, from {peer_ip}");
         false
     }

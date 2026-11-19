@@ -50,7 +50,47 @@ pub use node::*;
 mod traits;
 pub use traits::*;
 
-use snarkvm::ledger::store::StorageMode;
+use snarkos_node_router::{
+    Router,
+    messages::{BlockRequest, Message},
+};
+use snarkos_node_sync::serve_block_request;
+use snarkvm::{
+    ledger::{
+        Ledger,
+        store::{ConsensusStorage, StorageMode},
+    },
+    prelude::Network,
+    utilities::flatten_error,
+};
+
+use std::net::SocketAddr;
+
+/// Answers a `BlockRequest` from a router peer with blocks from `ledger`. Returns `false` if the
+/// request cannot be served.
+fn send_block_response<N: Network, C: ConsensusStorage<N>>(
+    router: &Router<N>,
+    ledger: &Ledger<N, C>,
+    peer_ip: SocketAddr,
+    request: BlockRequest,
+) -> bool {
+    let response = serve_block_request(
+        request,
+        router.supports_status_replies(peer_ip),
+        || ledger.latest_height(),
+        |heights| ledger.get_blocks(heights),
+    );
+    match response {
+        Ok(response) => {
+            router.send(peer_ip, Message::BlockResponse(response));
+            true
+        }
+        Err(error) => {
+            error!("{}", flatten_error(&error));
+            false
+        }
+    }
+}
 
 /// A helper to log instructions to recover.
 pub fn log_clean_error(storage_mode: &StorageMode) {
