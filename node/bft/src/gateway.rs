@@ -1980,14 +1980,14 @@ impl<N: Network> Gateway<N> {
             != (peer_info.version, peer_info.listener_port, peer_info.address)
         {
             warn!("{CONTEXT} Handshake with '{peer_addr}' failed (the handshake hint was contradicted)");
-            return self.reject_noise_handshake(peer_addr, noise, DisconnectReason::ProtocolViolation).await;
+            return Err(self.reject_noise_handshake(peer_addr, noise, DisconnectReason::ProtocolViolation).await);
         }
 
         // Everything below is a lookup or a comparison; only once all of it passes is the peer
         // worth the cost of a signature verification.
         if let Some(reason) = self.verify_peer_info(peer_addr, &peer_info, &peer_trailer, restrictions_id, genesis_hash)
         {
-            return self.reject_noise_handshake(peer_addr, noise, reason).await;
+            return Err(self.reject_noise_handshake(peer_addr, noise, reason).await);
         }
 
         /* Message 4: having checked the peer over, verify its proof and produce our own. */
@@ -1995,7 +1995,7 @@ impl<N: Network> Gateway<N> {
         if let Some(reason) =
             verify_binding_signature(peer_addr, peer_signature, peer_info.address, &peer_binding).await
         {
-            return self.reject_noise_handshake(peer_addr, noise, reason).await;
+            return Err(self.reject_noise_handshake(peer_addr, noise, reason).await);
         }
 
         let Ok(our_signature) = self.account.sign_bytes(&binding, &mut rand::rng()) else {
@@ -2008,16 +2008,21 @@ impl<N: Network> Gateway<N> {
         Ok((peer_info, peer_trailer.schedule, connecting))
     }
 
-    /// Tells the initiator why it was turned away, and fails the handshake with that reason.
-    async fn reject_noise_handshake<T>(
+    /// Tells the initiator why it was turned away. Returns the error that ends the handshake: the
+    /// reason, or the error that kept the initiator from hearing it.
+    async fn reject_noise_handshake(
         &self,
         peer_addr: SocketAddr,
         mut noise: NoiseSession<&mut TcpStream>,
         reason: DisconnectReason,
-    ) -> Result<T, ConnectError> {
-        noise.send(&encode_payload(&ResponderProof::<N>::Rejected { reason })?).await?;
+    ) -> ConnectError {
+        let sent: Result<(), ConnectError> = async {
+            noise.send(&encode_payload(&ResponderProof::<N>::Rejected { reason })?).await?;
+            Ok(())
+        }
+        .await;
 
-        Err(reason.into_connect_error(peer_addr))
+        sent.err().unwrap_or_else(|| reason.into_connect_error(peer_addr))
     }
 
     /// Verifies the metadata a peer disclosed during the Noise handshake. Returns a disconnect

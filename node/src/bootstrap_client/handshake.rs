@@ -231,16 +231,18 @@ impl<N: Network> BootstrapClient<N> {
             != (peer_info.version, peer_info.listener_port, peer_info.address)
         {
             warn!("{} Handshake with '{peer_addr}' failed (the handshake hint was contradicted)", Self::OWNER);
-            return self.reject_noise_handshake(peer_addr, noise, DisconnectReason::ProtocolViolation).await;
+            return Err(self.reject_noise_handshake(peer_addr, noise, DisconnectReason::ProtocolViolation).await);
         }
         log_repo_sha_comparison(peer_addr, &peer_info.snarkos_sha, Self::OWNER);
 
         if peer_info.restrictions_id != self.restrictions_id {
             warn!("{} Handshake with '{peer_addr}' failed (incorrect restrictions ID)", Self::OWNER);
-            return self.reject_noise_handshake(peer_addr, noise, DisconnectReason::InvalidChallengeResponse).await;
+            return Err(self
+                .reject_noise_handshake(peer_addr, noise, DisconnectReason::InvalidChallengeResponse)
+                .await);
         }
         if let Some(reason) = self.verify_peer_claims(peer_addr, peer_info.version, peer_info.address).await? {
-            return self.reject_noise_handshake(peer_addr, noise, reason).await;
+            return Err(self.reject_noise_handshake(peer_addr, noise, reason).await);
         }
 
         /* Message 4: verify the peer's proof, then produce our own. */
@@ -248,11 +250,15 @@ impl<N: Network> BootstrapClient<N> {
         // Perform the deferred non-blocking deserialization of the signature.
         let Ok(signature) = peer_signature.deserialize().await else {
             warn!("{} Handshake with '{peer_addr}' failed (cannot deserialize the signature)", Self::OWNER);
-            return self.reject_noise_handshake(peer_addr, noise, DisconnectReason::InvalidChallengeResponse).await;
+            return Err(self
+                .reject_noise_handshake(peer_addr, noise, DisconnectReason::InvalidChallengeResponse)
+                .await);
         };
         if !signature.verify_bytes(&peer_info.address, &peer_binding) {
             warn!("{} Handshake with '{peer_addr}' failed (invalid signature)", Self::OWNER);
-            return self.reject_noise_handshake(peer_addr, noise, DisconnectReason::InvalidChallengeResponse).await;
+            return Err(self
+                .reject_noise_handshake(peer_addr, noise, DisconnectReason::InvalidChallengeResponse)
+                .await);
         }
 
         let Ok(our_signature) = self.account.sign_bytes(&binding, &mut rand::rng()) else {
@@ -271,16 +277,21 @@ impl<N: Network> BootstrapClient<N> {
         ))
     }
 
-    /// Tells the initiator why it was turned away, and fails the handshake with that reason.
-    async fn reject_noise_handshake<T>(
+    /// Tells the initiator why it was turned away. Returns the error that ends the handshake: the
+    /// reason, or the error that kept the initiator from hearing it.
+    async fn reject_noise_handshake(
         &self,
         peer_addr: SocketAddr,
         mut noise: NoiseSession<&mut TcpStream>,
         reason: DisconnectReason,
-    ) -> Result<T, ConnectError> {
-        noise.send(&encode_payload(&ResponderProof::<N>::Rejected { reason })?).await?;
+    ) -> ConnectError {
+        let sent: Result<(), ConnectError> = async {
+            noise.send(&encode_payload(&ResponderProof::<N>::Rejected { reason })?).await?;
+            Ok(())
+        }
+        .await;
 
-        Err(reason.into_connect_error(peer_addr))
+        sent.err().unwrap_or_else(|| reason.into_connect_error(peer_addr))
     }
 
     /// The checks a peer's claimed identity can be held to without any cryptography, run first
