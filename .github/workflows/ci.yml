@@ -138,6 +138,22 @@ jobs:
       - run: cargo check -p snarkos-node-router-messages --features test-helpers
       - run: cargo check -p snarkos-node-bft-events --features test-helpers
 
+  # Clippy with `--cfg locktick`, which swaps in the `locktick` lock types. The
+  # first step fails if the alias stops applying the cfg, for example because
+  # RUSTFLAGS is set.
+  lint-locktick:
+    needs: [check-shared-refs, start-cpu-runners]
+    runs-on: [self-hosted, linux, x64, cpu]
+    timeout-minutes: 90
+    if: *fleet-if
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      # gh-actions is ours; check-shared-refs requires a @vN tag here, not a SHA.
+      - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
+      - run: cargo locktick tree -p snarkos-utilities --depth 1 --edges normal | grep -q ' locktick v'
+      - run: cargo locktick-clippy --workspace --all-targets -- -D warnings
+
   # Each line of `runs` is one build. `cargo test -p a -p b` unifies the
   # features of a and b, and several crates enable features on their
   # dependencies that change what those dependencies do:
@@ -498,7 +514,7 @@ jobs:
   # to run.
   ci-ok:
     if: always()
-    needs: [check-shared-refs, fmt, deny, shellcheck, source-checks, merge-fixup, machete, release-graph, lint, test-hosted, test, build-snarkos, devnet, devnet-merge, devnet-release, windows]
+    needs: [check-shared-refs, fmt, deny, shellcheck, source-checks, merge-fixup, machete, release-graph, lint, lint-locktick, test-hosted, test, build-snarkos, devnet, devnet-merge, devnet-release, windows]
     runs-on: ubuntu-latest
     steps:
       - env:
