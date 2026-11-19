@@ -16,17 +16,18 @@
 use crate::{
     BootstrapClient,
     bft::events::{
+        ConsensusSchedule,
         DisconnectReason,
         Event,
         HANDSHAKE_DOMAIN,
         HandshakeHint,
-        HandshakeTrailer,
         InitiatorInfo,
         PeerInfo,
-        ResponderInfo,
         ResponderProof,
+        decode_initiator_info,
         decode_payload,
         encode_payload,
+        encode_responder_info,
     },
     bootstrap_client::{codec::BootstrapClientCodec, network::MessageOrEvent},
     network::{ConnectionMode, NodeType, PeerPoolHandling, log_repo_sha_comparison},
@@ -47,7 +48,7 @@ use snarkos_node_network::{
 };
 use snarkvm::{
     ledger::narwhal::Data,
-    prelude::{Address, Network, ToBytes, io_error},
+    prelude::{Address, Network, io_error},
 };
 
 use futures_util::sink::SinkExt;
@@ -224,19 +225,26 @@ impl<N: Network> BootstrapClient<N> {
         let mut noise = pending.into_session()?;
         // The bootstrap client does not track the block height, so it discloses no commit hash.
         let our_info = PeerInfo::new(self.local_ip().port(), self.account.address(), self.restrictions_id, None);
-        let genesis_hash = self.genesis_hash.to_bytes_le().map_err(ConnectError::other)?;
-        let trailer = HandshakeTrailer { genesis_hash: Some(genesis_hash), ..HandshakeTrailer::of::<N>() };
-        noise.send(&encode_payload(&ResponderInfo { info: our_info, trailer })?).await?;
+        let schedule = ConsensusSchedule::of::<N>();
+        noise.send(&encode_responder_info(hint.version, our_info, schedule, self.genesis_hash)?).await?;
 
         let peer_binding = binding_message(HANDSHAKE_DOMAIN, Role::Initiator, &noise.handshake_hash()?);
 
         /* Message 3: the peer's authenticated metadata and its proof of identity. */
 
-        let InitiatorInfo { info: peer_info, signature: peer_signature, .. } =
-            decode_payload::<InitiatorInfo<N>>(peer_addr, &noise.recv().await?)?;
+        let message_3 = noise.recv().await?;
 
         let binding = binding_message(HANDSHAKE_DOMAIN, Role::Responder, &noise.handshake_hash()?);
         let mut noise = noise.into_transport_mode()?;
+
+        let InitiatorInfo { info: peer_info, signature: peer_signature, .. } =
+            match decode_initiator_info(our_info.version, peer_addr, &message_3) {
+                Ok(initiator_info) => initiator_info,
+                Err(error) => {
+                    warn!("{} Handshake with '{peer_addr}' failed ({error})", Self::OWNER);
+                    return self.reject_noise_handshake(peer_addr, noise, DisconnectReason::ProtocolViolation).await;
+                }
+            };
 
         // The hint is a claim: reject the peer if it contradicts what it has now authenticated,
         // as otherwise it could be checked as one validator and admitted as another.

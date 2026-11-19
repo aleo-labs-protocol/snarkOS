@@ -45,6 +45,9 @@ optional = true
 [dependencies.bytes]
 workspace = true
 
+[dependencies.ciborium]
+workspace = true
+
 [dependencies.indexmap]
 workspace = true
 features = [ "serde", "rayon" ]

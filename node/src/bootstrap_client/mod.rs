@@ -24,7 +24,7 @@ use snarkos_node_tcp::{P2P, protocols::*};
 use snarkos_utilities::SignalHandler;
 use snarkvm::{
     ledger::committee::Committee,
-    prelude::{Address, Field, Header, Network, PrivateKey, ViewKey},
+    prelude::{Address, Field, Header, Network, PrivateKey, ToBytes, ViewKey},
     synthesizer::Restrictions,
 };
 
@@ -64,7 +64,8 @@ pub struct InnerBootstrapClient<N: Network> {
     resolver: RwLock<Resolver<N>>,
     account: Account<N>,
     genesis_header: Header<N>,
-    genesis_hash: N::BlockHash,
+    /// The little-endian bytes of the hash of the genesis block.
+    genesis_hash: [u8; 32],
     restrictions_id: Field<N>,
     http_client: reqwest::Client,
     latest_committee: TMutex<(HashSet<Address<N>>, Instant)>,
@@ -92,6 +93,8 @@ impl<N: Network> BootstrapClient<N> {
         let peer_pool = Default::default();
         // Initialize a collection of validators.
         let known_validators = Default::default();
+        let genesis_hash = <[u8; 32]>::try_from(genesis_hash.to_bytes_le()?)
+            .map_err(|bytes| anyhow::anyhow!("a genesis hash of {} bytes", bytes.len()))?;
         // Load the restrictions ID.
         let restrictions_id = Restrictions::load()?.restrictions_id();
         // Create a resolver.

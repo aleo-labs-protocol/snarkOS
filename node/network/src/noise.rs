@@ -76,9 +76,9 @@ pub const HANDSHAKE_HASH_LEN: usize = 32;
 
 /// The maximum length of a message exchanged during the handshake itself.
 ///
-/// The pattern's largest message is the third, at 307 bytes with the payloads this crate's callers
-/// put in it, so this leaves room for a field or two to be added without a change to what peers
-/// accept from one another. It is far below [`MAX_NOISE_MSG_LEN`], and deliberately so: until a peer
+/// The pattern's largest message is the third, at about 490 bytes with the payloads this crate's
+/// callers put in it, so this leaves room for a field or two to be added without a change to what
+/// peers accept from one another. It is far below [`MAX_NOISE_MSG_LEN`], and deliberately so: until a peer
 /// has been checked over, the length it declares is the size of a buffer it gets to make the
 /// responder allocate, and there is no reason for that to be 64 KiB when the protocol needs a
 /// fraction of it. The transport phase keeps the specification's limit, which is what a chunked
@@ -91,6 +91,9 @@ const MAX_HANDSHAKE_MSG_LEN: usize = 1024;
 // The handshake limit only means anything if it is the tighter of the two; a change that inverted
 // them would otherwise widen what an unchecked peer can ask for, silently.
 const _: () = assert!(MAX_HANDSHAKE_MSG_LEN < MAX_NOISE_MSG_LEN);
+
+/// The largest payload [`NoiseSession::send`] accepts for a handshake message.
+pub const MAX_HANDSHAKE_PAYLOAD_LEN: usize = MAX_HANDSHAKE_MSG_LEN - NOISE_OVERHEAD;
 
 /// The length of a public or private key of the Diffie-Hellman function in [`NOISE_PARAMS`].
 const DH_LEN: usize = 32;
