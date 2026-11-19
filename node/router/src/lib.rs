@@ -307,8 +307,8 @@ impl<N: Network> CommunicationService for Router<N> {
     }
 
     /// Returns the block request limit that `Inbound` enforces.
-    fn block_request_limit(&self) -> (usize, Duration) {
-        (MAXIMUM_BLOCK_REQUESTS_PER_INTERVAL, Duration::from_secs(BLOCK_REQUEST_INTERVAL_IN_SECS as u64))
+    fn block_request_limit(&self) -> Option<(usize, Duration)> {
+        Some((MAXIMUM_BLOCK_REQUESTS_PER_INTERVAL, Duration::from_secs(BLOCK_REQUEST_INTERVAL_IN_SECS as u64)))
     }
 
     /// Sends the given message to specified peer.
