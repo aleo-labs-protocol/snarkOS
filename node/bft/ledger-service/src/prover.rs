@@ -13,7 +13,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{BeginLedgerUpdateError, LedgerService, LedgerUpdateService};
+use crate::LedgerService;
+#[cfg(feature = "ledger-write")]
+use crate::{BeginLedgerUpdateError, LedgerUpdateService};
 use snarkvm::{
     ledger::{
         Block,
