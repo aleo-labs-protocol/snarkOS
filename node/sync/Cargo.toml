@@ -43,7 +43,7 @@ workspace = true
 
 [dependencies.locktick]
 workspace = true
-features = [ "parking_lot" ]
+features = [ "parking_lot", "tokio" ]
 optional = true
 
 [dependencies.parking_lot]

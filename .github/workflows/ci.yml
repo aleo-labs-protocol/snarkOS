@@ -455,6 +455,29 @@ jobs:
       - run: cargo check --examples --benches --tests
         working-directory: ${{ matrix.dir }}
 
+  # Each crate alone, with no features and with each feature on its own. The
+  # builds above unify features across crates, so they miss a feature that is
+  # not forwarded to a dependency, and code gated on the wrong feature. `cuda`
+  # needs nvcc. Each feature set checks snarkVM again. On every push to a
+  # release branch, and on demand.
+  each-feature:
+    needs: [check-shared-refs, start-cpu-runners]
+    runs-on: [self-hosted, linux, x64, cpu]
+    timeout-minutes: 120
+    if: >-
+      github.event_name != 'pull_request' && !cancelled() &&
+      needs.check-shared-refs.result == 'success' &&
+      contains(fromJSON('["success", "skipped"]'), needs.start-cpu-runners.result) &&
+      github.repository == 'aleo-labs-protocol/snarkOS'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      # gh-actions is ours; check-shared-refs requires a @vN tag here, not a SHA.
+      - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with: { tool: cargo-hack@0.6.46 }
+      - run: cargo hack clippy --workspace --each-feature --exclude-features cuda --locked -- -D warnings
+
   # The one job to require on protected branches. A skipped job counts as passed
   # for a required check, so each job a pull request runs must succeed here.
   ci-ok:

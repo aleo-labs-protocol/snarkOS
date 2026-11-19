@@ -34,7 +34,7 @@ serial = [
   "snarkos-node-metrics/serial",
   "snarkvm/serial"
 ]
-test_network = [ ]
+test_network = [ "snarkos-node-bft-ledger-service/test_network" ]
 
 [dependencies.anyhow]
 workspace = true
