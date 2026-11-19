@@ -252,6 +252,11 @@ impl<N: Network, C: ConsensusStorage<N>> LedgerService<N> for CoreLedgerService<
         self.ledger.latest_height()
     }
 
+    /// Returns the authority-pruning watermark of the block store.
+    fn authority_pruned_below(&self) -> Result<Option<u32>> {
+        self.ledger.vm().block_store().authority_pruned_below()
+    }
+
     /// Returns the latest block in the ledger.
     fn latest_block(&self) -> Block<N> {
         self.ledger.latest_block()

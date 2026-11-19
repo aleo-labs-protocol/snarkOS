@@ -15,36 +15,45 @@
 
 use snarkos_node_router::messages::{BlockRequest, BlockResponse, BlockResponseStatus, DataBlocks};
 
-use snarkvm::{console::network::Network, ledger::Block};
+use snarkvm::{console::network::Network, ledger::Block, utilities::flatten_error};
 
 use anyhow::{Result, bail};
 use std::ops::Range;
 
-/// Returns the response to `request`: the blocks, or `NotYet` if the range reaches past
-/// `latest_height`.
+/// Returns the response to `request`: the blocks, `Pruned` if the range starts below the store's
+/// authority-pruning watermark (`pruned_below`), or `NotYet` if it reaches past `latest_height`.
 ///
 /// A peer that does not support status replies (`supports_status`) gets an error instead of a
-/// status reply. A failed read is an error, unless the range then reaches past the tip.
+/// status reply. A failed read is an error, unless the range is then pruned or past the tip. A
+/// watermark that cannot be read counts as none.
 pub fn serve_block_request<N: Network>(
     request: BlockRequest,
     supports_status: bool,
     latest_height: impl Fn() -> u32,
+    pruned_below: impl Fn() -> Result<Option<u32>>,
     get_blocks: impl FnOnce(Range<u32>) -> Result<Vec<Block<N>>>,
 ) -> Result<BlockResponse<N>> {
     let BlockRequest { start_height, end_height } = request;
-    let not_yet = || {
+    let unavailable = || {
+        let pruned_below = pruned_below().unwrap_or_else(|error| {
+            warn!("{}", flatten_error(error.context("Failed to read the authority-pruning watermark")));
+            None
+        });
+        if let Some(oldest_retained) = pruned_below.filter(|pruned_below| start_height < *pruned_below) {
+            return Some(BlockResponseStatus::Pruned { oldest_retained });
+        }
         let latest_height = latest_height();
         (end_height - 1 > latest_height).then_some(BlockResponseStatus::NotYet { latest_height })
     };
 
-    let status = match not_yet() {
+    let status = match unavailable() {
         Some(status) => status,
         None => match get_blocks(start_height..end_height) {
             Ok(blocks) => {
                 let latest_consensus_version = N::CONSENSUS_VERSION(end_height - 1)?;
                 return Ok(BlockResponse::new(request, DataBlocks(blocks), latest_consensus_version));
             }
-            Err(error) => not_yet()
+            Err(error) => unavailable()
                 .ok_or_else(|| error.context(format!("Failed to retrieve blocks {start_height} to {end_height}")))?,
         },
     };
@@ -71,9 +80,20 @@ mod tests {
         latest: impl Fn() -> u32,
         get_blocks: impl FnOnce(Range<u32>) -> Result<Vec<Block<CurrentNetwork>>>,
     ) -> Result<BlockResponse<CurrentNetwork>> {
-        serve_block_request(BlockRequest::new(start_height, end_height).unwrap(), supports_status, latest, get_blocks)
+        serve_pruned(start_height, end_height, supports_status, latest, || Ok(None), get_blocks)
     }
 
+    fn serve_pruned(
+        start_height: u32,
+        end_height: u32,
+        supports_status: bool,
+        latest: impl Fn() -> u32,
+        pruned_below: impl Fn() -> Result<Option<u32>>,
+        get_blocks: impl FnOnce(Range<u32>) -> Result<Vec<Block<CurrentNetwork>>>,
+    ) -> Result<BlockResponse<CurrentNetwork>> {
+        let request = BlockRequest::new(start_height, end_height).unwrap();
+        serve_block_request(request, supports_status, latest, pruned_below, get_blocks)
+    }
     #[test]
     fn test_serve_block_request() {
         const LATEST: u32 = 100;
@@ -113,5 +133,50 @@ mod tests {
         )
         .unwrap();
         assert_eq!(response.status, BlockResponseStatus::NotYet { latest_height: 98 });
+    }
+
+    /// Tests the serving table with a watermark `W`: a range that starts below `W`, also one that
+    /// crosses it, is `Pruned { W }` without a read, before `NotYet` applies.
+    #[test]
+    fn test_serve_pruned_block_request() {
+        const LATEST: u32 = 1_000;
+        const W: u32 = 500;
+        let read = Cell::new(false);
+        let get_blocks = |_| {
+            read.set(true);
+            Ok(vec![])
+        };
+        let status = |start, end| serve_pruned(start, end, true, || LATEST, || Ok(Some(W)), get_blocks).unwrap().status;
+
+        assert_eq!(status(1, 6), BlockResponseStatus::Pruned { oldest_retained: W });
+        assert_eq!(status(W - 2, W + 3), BlockResponseStatus::Pruned { oldest_retained: W });
+        assert!(!read.get());
+        assert_eq!(status(W, W + 5), BlockResponseStatus::Blocks);
+        assert!(read.replace(false));
+        assert_eq!(status(LATEST, LATEST + 2), BlockResponseStatus::NotYet { latest_height: LATEST });
+
+        // A peer without status replies gets an error.
+        assert!(serve_pruned(1, 6, false, || LATEST, || Ok(Some(W)), get_blocks).is_err());
+
+        // A range pruned between the check and the read is `Pruned`.
+        let watermark = Cell::new(None);
+        let pruned_below = || Ok(watermark.get());
+        let response = serve_pruned(
+            W,
+            W + 5,
+            true,
+            || LATEST,
+            pruned_below,
+            |_| {
+                watermark.set(Some(W + 10));
+                Err(anyhow!("pruned"))
+            },
+        );
+        assert_eq!(response.unwrap().status, BlockResponseStatus::Pruned { oldest_retained: W + 10 });
+
+        // A watermark that cannot be read counts as none.
+        let status =
+            serve_pruned(1, 6, true, || LATEST, || Err(anyhow!("watermark error")), get_blocks).unwrap().status;
+        assert_eq!(status, BlockResponseStatus::Blocks);
     }
 }

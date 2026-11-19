@@ -15,7 +15,7 @@
 
 mod router;
 
-use crate::traits::NodeInterface;
+use crate::{AuthorityRetention, CdnFallback, traits::NodeInterface};
 
 use snarkos_account::Account;
 #[cfg(feature = "test_network")]
@@ -33,12 +33,12 @@ use snarkos_node_router::{
     Routing,
     messages::{PuzzleResponse, UnconfirmedSolution, UnconfirmedTransaction},
 };
-use snarkos_node_sync::{BlockSync, Ping};
+use snarkos_node_sync::{BlockSync, Ping, STUCK_SYNC_SHUTDOWN_THRESHOLD};
 use snarkos_node_tcp::{
     P2P,
     protocols::{Disconnect, Handshake, OnConnect, Reading},
 };
-use snarkos_utilities::{DevHotswapConfig, NodeDataDir, SignalHandler};
+use snarkos_utilities::{DevHotswapConfig, NodeDataDir, SignalHandler, Stoppable};
 
 use snarkvm::prelude::{
     Ledger,
@@ -49,7 +49,6 @@ use snarkvm::prelude::{
 };
 
 use anyhow::{Context, Result};
-use cfg_if::cfg_if;
 use core::future::Future;
 #[cfg(feature = "locktick")]
 use locktick::parking_lot::Mutex;
@@ -87,6 +86,7 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         rest_verification_limits: RestVerificationLimits,
         history_api_url: Option<String>,
         history_json: bool,
+        authority_retention: AuthorityRetention,
         account: Account<N>,
         trusted_peers: &[SocketAddr],
         trusted_validators: &[SocketAddr],
@@ -108,18 +108,13 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
             let storage_mode = storage_mode.clone();
             let genesis = genesis.clone();
 
-            cfg_if! {
-                if #[cfg(feature = "test_network")] {
-                    if let Some(config) = dev_hotswap_config
-                        .map(|cfg| prepare_dev_committee_options(&node_data_dir, cfg)) {
-                            spawn_blocking!(Ledger::<N, C>::load_with_dev_committee(genesis, storage_mode, config?))
-                    } else {
-                         spawn_blocking!(Ledger::<N, C>::load(genesis, storage_mode))
-                    }
-                }  else {
-                    spawn_blocking!(Ledger::<N, C>::load(genesis, storage_mode))
-                }
-            }
+            #[cfg(feature = "test_network")]
+            let options = authority_retention.load_options_with_dev_committee(
+                dev_hotswap_config.map(|cfg| prepare_dev_committee_options(&node_data_dir, cfg)).transpose()?,
+            );
+            #[cfg(not(feature = "test_network"))]
+            let options = authority_retention.load_options();
+            spawn_blocking!(Ledger::<N, C>::load_with_options(genesis, storage_mode, options))
         }
         .with_context(|| "Failed to initialize the ledger")?;
 
@@ -190,6 +185,7 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         node.initialize_upgrade_check(signal_handler.clone());
 
         // Perform sync with CDN (if enabled).
+        let stuck_signal_handler = signal_handler.clone();
         let cdn_sync = cdn.map(|base_url| Arc::new(CdnBlockSync::new(base_url, ledger.clone(), signal_handler)));
 
         // Initialize the transaction pool.
@@ -214,12 +210,22 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         }
 
         // Set up everything else after CDN sync is done.
-        if let Some(cdn_sync) = cdn_sync
-            && let Err(error) = cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN")
-        {
-            crate::log_clean_error(&storage_mode);
-            node.shut_down().await;
-            return Err(error);
+        let cdn_fallback = match crate::wait_for_cdn(cdn_sync).await {
+            Ok(cdn_fallback) => cdn_fallback,
+            Err(error) => {
+                crate::log_clean_error(&storage_mode);
+                node.shut_down().await;
+                return Err(error);
+            }
+        };
+        // Blocks added by CDN sync do not pass through block sync, so record and advertise them.
+        node.sync.set_sync_height(ledger.latest_height());
+        match node.sync.get_block_locators() {
+            Ok(locators) => node.ping.update_block_locators(locators),
+            Err(error) => {
+                node.shut_down().await;
+                return Err(error);
+            }
         }
 
         // Start the BFT and consensus handlers now that CDN sync is complete. This ensures that
@@ -227,6 +233,8 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         node.start_consensus_handlers().await?;
         // Initialize the routing.
         node.initialize_routing().await;
+        // Shut down if the peers have long stopped serving the blocks this node needs.
+        node.initialize_stuck_sync_monitor(stuck_signal_handler, cdn_fallback);
         // Initialize the notification message loop.
         node.handles.lock().push(crate::start_notification_message_loop());
 
@@ -541,6 +549,20 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         Ok(())
     }
 
+    /// Spawns a task that shuts the node down if its block sync stays stuck (see
+    /// [`crate::shut_down_if_stuck_sync`]).
+    fn initialize_stuck_sync_monitor(&self, signal_handler: Arc<SignalHandler>, cdn_fallback: CdnFallback) {
+        let sync = self.sync.clone();
+        self.spawn(async move {
+            while !signal_handler.is_stopped() {
+                tokio::time::sleep(STUCK_SYNC_SHUTDOWN_THRESHOLD / 10).await;
+                if crate::shut_down_if_stuck_sync(&sync, &signal_handler, cdn_fallback) {
+                    break;
+                }
+            }
+        });
+    }
+
     /// Spawns a task with the given future; it should only be used for long-running tasks.
     pub fn spawn<T: Future<Output = ()> + Send + 'static>(&self, future: T) {
         self.handles.lock().push(tokio::spawn(future));
@@ -625,6 +647,7 @@ mod tests {
             RestVerificationLimits::max::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>(),
             None,
             false,
+            Default::default(),
             account,
             &[],
             &[],

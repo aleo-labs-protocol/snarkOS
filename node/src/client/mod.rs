@@ -16,6 +16,8 @@
 mod router;
 
 use crate::{
+    AuthorityRetention,
+    CdnFallback,
     bft::{helpers::fmt_id, ledger_service::CoreLedgerService, spawn_blocking},
     cdn::CdnBlockSync,
     traits::NodeInterface,
@@ -138,6 +140,7 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
         rest_verification_limits: RestVerificationLimits,
         history_api_url: Option<String>,
         history_json: bool,
+        authority_retention: AuthorityRetention,
         account: Account<N>,
         trusted_peers: &[SocketAddr],
         genesis: Block<N>,
@@ -153,7 +156,11 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
             let storage_mode = storage_mode.clone();
             let genesis = genesis.clone();
 
-            spawn_blocking!(Ledger::<N, C>::load(genesis, storage_mode))
+            spawn_blocking!(Ledger::<N, C>::load_with_options(
+                genesis,
+                storage_mode,
+                authority_retention.load_options()
+            ))
         }
         .with_context(|| "Failed to initialize the ledger")?;
 
@@ -231,18 +238,28 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
         }
 
         // Set up everything else after CDN sync is done.
-        if let Some(cdn_sync) = cdn_sync
-            && let Err(error) = cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN")
-        {
-            crate::log_clean_error(&storage_mode);
-            node.shut_down().await;
-            return Err(error);
+        let cdn_fallback = match crate::wait_for_cdn(cdn_sync).await {
+            Ok(cdn_fallback) => cdn_fallback,
+            Err(error) => {
+                crate::log_clean_error(&storage_mode);
+                node.shut_down().await;
+                return Err(error);
+            }
+        };
+        // Blocks added by CDN sync do not pass through block sync, so record and advertise them.
+        node.sync.set_sync_height(ledger.latest_height());
+        match node.sync.get_block_locators() {
+            Ok(locators) => node.ping.update_block_locators(locators),
+            Err(error) => {
+                node.shut_down().await;
+                return Err(error);
+            }
         }
 
         // Initialize the routing.
         node.initialize_routing().await;
         // Initialize the sync module.
-        node.initialize_sync();
+        node.initialize_sync(cdn_fallback);
         // Initialize solution verification.
         node.initialize_solution_verification();
         // Initialize deployment verification.
@@ -278,7 +295,7 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
     const MAX_SYNC_INTERVAL: Duration = Duration::from_secs(30);
 
     /// Spawns the tasks that performs the syncing logic for this client.
-    fn initialize_sync(&self) {
+    fn initialize_sync(&self, cdn_fallback: CdnFallback) {
         // Start the block request generation loop (outgoing).
         let self_ = self.clone();
         self.spawn(async move {
@@ -288,6 +305,11 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
 
                 // Perform the sync routine.
                 self_.try_issuing_block_requests().await;
+
+                // Shut down if the peers have long stopped serving the blocks this node needs.
+                if crate::shut_down_if_stuck_sync(&self_.sync, &self_.signal_handler, cdn_fallback) {
+                    break;
+                }
             }
 
             info!("Stopped block request generation");

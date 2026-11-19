@@ -21,24 +21,34 @@ use snarkos_utilities::{NodeDataDir, SignalHandler};
 
 use snarkvm::prelude::{
     MainnetV0 as CurrentNetwork,
-    store::{StorageMode, helpers::memory::ConsensusMemory},
+    block::Block,
+    store::{ConsensusStorage, StorageMode, helpers::memory::ConsensusMemory},
 };
 
 use std::str::FromStr;
 
 pub async fn client() -> Client<CurrentNetwork, ConsensusMemory<CurrentNetwork>> {
+    client_with(sample_genesis_block(), StorageMode::new_test(None)).await
+}
+
+/// Returns a client that loads its ledger from `genesis` and `storage_mode`.
+pub async fn client_with<C: ConsensusStorage<CurrentNetwork>>(
+    genesis: Block<CurrentNetwork>,
+    storage_mode: StorageMode,
+) -> Client<CurrentNetwork, C> {
     Client::new(
         "127.0.0.1:0".parse().unwrap(),
         None,
         10,
-        RestVerificationLimits::max::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>(),
+        RestVerificationLimits::max::<CurrentNetwork, C>(),
         None,  // No history compatibility mode.
         false, // Do not write JSON history.
+        Default::default(),
         Account::<CurrentNetwork>::from_str("APrivateKey1zkp2oVPTci9kKcUprnbzMwq95Di1MQERpYBhEeqvkrDirK1").unwrap(),
         &[],
-        sample_genesis_block(),
+        genesis,
         None, // No CDN.
-        StorageMode::new_test(None),
+        storage_mode,
         NodeDataDir::new_test(None),
         false, // Connect to untrusted peers.
         None,
@@ -72,6 +82,7 @@ pub async fn validator() -> Validator<CurrentNetwork, ConsensusMemory<CurrentNet
         RestVerificationLimits::max::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>(),
         None,  // No history compatibility mode.
         false, // Do not write JSON history.
+        Default::default(),
         Account::<CurrentNetwork>::from_str("APrivateKey1zkp2oVPTci9kKcUprnbzMwq95Di1MQERpYBhEeqvkrDirK1").unwrap(),
         &[],
         &[],

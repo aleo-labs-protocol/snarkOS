@@ -27,10 +27,16 @@ impl<N: Network> Router<N> {
     /// Returns false if the peer does not exist or disconnected.
     #[must_use]
     pub fn send_ping(&self, peer_ip: SocketAddr, block_locators: Option<BlockLocators<N>>) -> bool {
-        // This node serves every block it has.
-        let oldest_retained = self.supports_status_replies(peer_ip).then_some(0);
+        // This node serves the blocks from its authority-pruning watermark on.
+        let oldest_retained = self.supports_status_replies(peer_ip).then(|| self.oldest_retained_height());
         let ping = messages::Ping::new(self.node_type(), block_locators, oldest_retained);
         self.send(peer_ip, Message::Ping(ping)).is_some()
+    }
+
+    /// Returns the oldest block height this node serves: its authority-pruning watermark, or 0. A
+    /// watermark that cannot be read counts as 0.
+    fn oldest_retained_height(&self) -> u32 {
+        self.ledger().authority_pruned_below().ok().flatten().unwrap_or(0)
     }
 
     /// Returns `true` if the peer is connected at a message version that receives `BlockResponse`

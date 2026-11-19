@@ -744,6 +744,7 @@ impl<N: Network> Gateway<N> {
                         block_request,
                         supports_status,
                         || self_.ledger.latest_block_height(),
+                        || self_.ledger.authority_pruned_below(),
                         |heights| self_.ledger.get_blocks(heights),
                     )
                 })
