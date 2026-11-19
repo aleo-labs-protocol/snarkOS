@@ -179,7 +179,9 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
         .await?;
 
         // Initialize the sync module.
-        let sync = Arc::new(BlockSync::new(ledger_service.clone(), ConnectionMode::Router));
+        let sync = Arc::new(
+            BlockSync::new(ledger_service.clone(), ConnectionMode::Router).with_trusted_peers_only(trusted_peers_only),
+        );
 
         // Set up the ping logic.
         let locators = sync.get_block_locators()?;

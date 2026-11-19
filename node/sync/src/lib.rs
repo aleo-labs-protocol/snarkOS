@@ -32,3 +32,6 @@ pub use block_sync::*;
 
 mod helpers;
 pub use helpers::*;
+
+mod serving;
+pub use serving::serve_block_request;

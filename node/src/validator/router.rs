@@ -17,8 +17,7 @@ use super::*;
 use snarkos_node_network::{PeerPoolHandling, harden_socket};
 use snarkos_node_router::messages::{
     BlockRequest,
-    BlockResponse,
-    DataBlocks,
+    BlockResponseStatus,
     DisconnectReason,
     Message,
     MessageCodec,
@@ -31,7 +30,6 @@ use snarkos_node_tcp::{ConnectError, Connection, ConnectionSide, Tcp, connection
 use snarkvm::{
     console::network::{ConsensusVersion, Network},
     ledger::{block::Transaction, narwhal::Data},
-    utilities::flatten_error,
 };
 
 use std::{io, net::SocketAddr};
@@ -191,31 +189,7 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Validator<N, C> {
 
     /// Retrieves the blocks within the block request range, and returns the block response to the peer.
     fn block_request(&self, peer_ip: SocketAddr, message: BlockRequest) -> bool {
-        let BlockRequest { start_height, end_height } = &message;
-
-        // Get the latest consensus version, i.e., the one for the last block's height.
-        let latest_consensus_version = match N::CONSENSUS_VERSION(end_height.saturating_sub(1)) {
-            Ok(version) => version,
-            Err(err) => {
-                error!("{}", flatten_error(err.context("Failed to retrieve consensus version")));
-                return false;
-            }
-        };
-
-        // Retrieve the blocks within the requested range.
-        let blocks = match self.ledger.get_blocks(*start_height..*end_height) {
-            Ok(blocks) => DataBlocks(blocks),
-            Err(err) => {
-                let err =
-                    err.context(format!("Failed to retrieve blocks {start_height} to {end_height} from the ledger"));
-                error!("{}", flatten_error(err));
-                return false;
-            }
-        };
-        // Send the `BlockResponse` message to the peer.
-        self.router()
-            .send(peer_ip, Message::BlockResponse(BlockResponse::new(message, blocks, latest_consensus_version)));
-        true
+        crate::send_block_response(self.router(), &self.ledger, peer_ip, message)
     }
 
     /// Handles a `BlockResponse` message.
@@ -225,6 +199,12 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Validator<N, C> {
         _blocks: Vec<Block<N>>,
         _latest_consensus_version: Option<ConsensusVersion>,
     ) -> bool {
+        warn!("Received a block response through P2P, not BFT, from {peer_ip}");
+        false
+    }
+
+    /// Handles a `BlockResponse` that says the peer cannot serve `request`.
+    fn block_unavailable(&self, peer_ip: SocketAddr, _request: BlockRequest, _status: BlockResponseStatus) -> bool {
         warn!("Received a block response through P2P, not BFT, from {peer_ip}");
         false
     }

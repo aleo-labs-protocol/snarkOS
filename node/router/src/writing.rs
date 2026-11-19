@@ -27,8 +27,16 @@ impl<N: Network> Router<N> {
     /// Returns false if the peer does not exist or disconnected.
     #[must_use]
     pub fn send_ping(&self, peer_ip: SocketAddr, block_locators: Option<BlockLocators<N>>) -> bool {
-        let result = self.send(peer_ip, Message::Ping(messages::Ping::new(self.node_type(), block_locators)));
-        result.is_some()
+        // This node serves every block it has.
+        let oldest_retained = self.supports_status_replies(peer_ip).then_some(0);
+        let ping = messages::Ping::new(self.node_type(), block_locators, oldest_retained);
+        self.send(peer_ip, Message::Ping(ping)).is_some()
+    }
+
+    /// Returns `true` if the peer is connected at a message version that receives `BlockResponse`
+    /// status replies and `Ping` floors.
+    pub fn supports_status_replies(&self, peer_ip: SocketAddr) -> bool {
+        self.get_connected_peer(peer_ip).is_some_and(|peer| peer.version >= Message::<N>::STATUS_MESSAGE_VERSION)
     }
 
     /// Sends the given message to specified peer.

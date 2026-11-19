@@ -220,6 +220,7 @@ impl<N: Network> Sync<N> {
         // Retrieve the sync receiver.
         let SyncReceiver {
             mut rx_block_sync_insert_block_response,
+            mut rx_block_sync_block_unavailable,
             mut rx_block_sync_remove_peer,
             mut rx_block_sync_update_peer_locators,
             mut rx_certificate_request,
@@ -249,6 +250,14 @@ impl<N: Network> Sync<N> {
                 }
 
                 callback.send(result).ok();
+            }
+        });
+
+        // Process each block response that says the peer cannot serve the request.
+        let self_ = self.clone();
+        self.spawn(async move {
+            while let Some((peer_ip, request, status)) = rx_block_sync_block_unavailable.recv().await {
+                self_.block_sync.insert_block_unavailable(peer_ip, request, status);
             }
         });
 
@@ -330,7 +339,7 @@ impl<N: Network> Sync<N> {
 
     /// We received new peer locators during a Ping.
     fn update_peer_locators(&self, peer_ip: SocketAddr, locators: BlockLocators<N>) -> Result<()> {
-        self.block_sync.update_peer_locators(peer_ip, &locators)
+        self.block_sync.update_peer_locators(peer_ip, &locators, None)
     }
 
     /// A peer disconnected.
