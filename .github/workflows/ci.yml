@@ -173,6 +173,11 @@ jobs:
       # gh-actions is ours; check-shared-refs requires a @vN tag here, not a SHA.
       - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
       - uses: ./.github/actions/job-home
+      # rust-cache hashes every installed toolchain into its key, and the
+      # image's `stable` differs between the runner images GitHub rolls out.
+      # Hosted only: on a box, other jobs use these toolchains.
+      - if: runner.environment == 'github-hosted'
+        run: rustup toolchain uninstall stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: runner.environment == 'github-hosted'
         with:
