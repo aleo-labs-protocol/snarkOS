@@ -34,4 +34,4 @@ mod helpers;
 pub use helpers::*;
 
 mod serving;
-pub use serving::serve_block_request;
+pub use serving::{BlockRequestOutcome, serve_block_request};

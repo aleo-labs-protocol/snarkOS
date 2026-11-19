@@ -100,6 +100,10 @@ const STUCK_SYNC_WARNING_GRACE: Duration = Duration::from_secs(60);
 /// How often to warn while block sync stays stuck.
 const STUCK_SYNC_WARNING_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
+/// How long block sync may be stuck (see [`BlockSync::stuck_for`]) before a node that can recover
+/// from the CDN shuts down.
+pub const STUCK_SYNC_SHUTDOWN_THRESHOLD: Duration = Duration::from_secs(5 * 60);
+
 /// This is a dummy IP address that is used to represent the local node.
 /// Note: This here does not need to be a real IP address, but it must be unique/distinct from all other connections.
 pub const DUMMY_SELF_IP: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
@@ -3393,5 +3397,26 @@ mod tests {
         for id in 1..=3 {
             assert_eq!(service.num_sent_to(sample_peer_ip(id)), max_requests);
         }
+    }
+
+    /// Tests that the stuck duration runs while the height stays, restarts when it advances, and
+    /// clears when sync is no longer stuck.
+    #[test]
+    fn test_stuck_for() {
+        let sync = sample_sync_at_height(1_000);
+        assert_eq!(sync.stuck_for(), None);
+        add_peers(&sync, 1, 3, 1_100, 1_050);
+        assert_eq!(sync.stuck_for(), Some(Duration::ZERO));
+        let since = sync.stuck_since.lock().unwrap().at;
+        assert!(sync.stuck_for().is_some());
+        assert_eq!(sync.stuck_since.lock().unwrap().at, since);
+
+        sync.set_sync_height(1_001);
+        assert_eq!(sync.stuck_for(), Some(Duration::ZERO));
+        assert_eq!(sync.stuck_since.lock().unwrap().height, 1_001);
+
+        add_peers(&sync, 4, 1, 1_100, 0);
+        assert_eq!(sync.stuck_for(), None);
+        assert!(sync.stuck_since.lock().is_none());
     }
 }
