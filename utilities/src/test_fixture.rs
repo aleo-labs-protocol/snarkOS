@@ -16,7 +16,7 @@
 //! An on-disk cache for test fixtures that are expensive to build.
 //!
 //! `cargo nextest` runs every test in a process of its own, so a `static` shares a fixture with no
-//! other test. A file does.
+//! other test. A file does. The files are kept beside the test binary, so `cargo clean` removes them.
 
 use std::{
     fs::{self, File},
@@ -76,7 +76,7 @@ pub struct Fixture {
 impl Fixture {
     /// Opens the entry for `name` and `inputs`, once no other test holds it.
     pub fn open(name: &str, inputs: &[u8]) -> Self {
-        let dir = std::env::temp_dir().join("snarkos-test-fixtures");
+        let dir = cache_dir();
         if fs::create_dir_all(&dir).is_err() {
             return Self { path: None, _lock: None };
         }
@@ -129,6 +129,11 @@ fn executable_identity() -> &'static (PathBuf, u64, Option<SystemTime>) {
     })
 }
 
+/// The directory of the cache. [`remove_old_files`] empties it, so it must hold nothing else.
+fn cache_dir() -> PathBuf {
+    executable_identity().0.with_file_name("snarkos-test-fixtures")
+}
+
 /// Returns `true` if the file was last written more than [`MAX_ENTRY_AGE`] ago.
 fn is_old(metadata: &fs::Metadata) -> bool {
     metadata.modified().ok().and_then(|at| at.elapsed().ok()).is_some_and(|age| age > MAX_ENTRY_AGE)
@@ -171,8 +176,7 @@ mod tests {
 
     impl Drop for Name {
         fn drop(&mut self) {
-            let dir = std::env::temp_dir().join("snarkos-test-fixtures");
-            for entry in fs::read_dir(dir).unwrap().flatten() {
+            for entry in fs::read_dir(cache_dir()).unwrap().flatten() {
                 if entry.file_name().to_string_lossy().starts_with(&self.0) {
                     let _ = fs::remove_file(entry.path());
                 }
