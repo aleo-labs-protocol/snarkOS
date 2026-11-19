@@ -29,6 +29,8 @@ pub enum RestError {
     BadRequest(AnyhowError),
     /// 404 Not Found - Resource not found
     NotFound(AnyhowError),
+    /// 410 Gone - Resource existed but this node no longer serves it (pruned)
+    Gone(AnyhowError),
     /// 422 Unprocessable Entity - Business logic validation errors
     UnprocessableEntity(AnyhowError),
     /// 429 Too Many Requests - Rate limiting
@@ -58,6 +60,11 @@ impl RestError {
     /// Create a NotFound error
     pub fn not_found(inner: anyhow::Error) -> Self {
         Self::NotFound(inner)
+    }
+
+    /// Create a Gone error
+    pub fn gone(inner: anyhow::Error) -> Self {
+        Self::Gone(inner)
     }
 
     /// Create an UnprocessableEntity error
@@ -98,6 +105,7 @@ impl IntoResponse for RestError {
         let (status, error_type, error) = match self {
             RestError::BadRequest(err) => (StatusCode::BAD_REQUEST, "bad_request", err),
             RestError::NotFound(err) => (StatusCode::NOT_FOUND, "not_found", err),
+            RestError::Gone(err) => (StatusCode::GONE, "gone", err),
             RestError::UnprocessableEntity(err) => (StatusCode::UNPROCESSABLE_ENTITY, "unprocessable_entity", err),
             RestError::TooManyRequests(err) => (StatusCode::TOO_MANY_REQUESTS, "too_many_requests", err),
             RestError::ServiceUnavailable(err) => (StatusCode::SERVICE_UNAVAILABLE, "service_unavailable", err),
@@ -126,6 +134,7 @@ impl fmt::Display for RestError {
         match self {
             RestError::BadRequest(err) => write!(f, "{err}"),
             RestError::NotFound(err) => write!(f, "{err}"),
+            RestError::Gone(err) => write!(f, "{err}"),
             RestError::UnprocessableEntity(err) => write!(f, "{err}"),
             RestError::TooManyRequests(err) => write!(f, "{err}"),
             RestError::ServiceUnavailable(err) => write!(f, "{err}"),
@@ -139,6 +148,7 @@ impl PartialEq<StatusCode> for RestError {
         let status = match self {
             RestError::BadRequest(_) => StatusCode::BAD_REQUEST,
             RestError::NotFound(_) => StatusCode::NOT_FOUND,
+            RestError::Gone(_) => StatusCode::GONE,
             RestError::UnprocessableEntity(_) => StatusCode::UNPROCESSABLE_ENTITY,
             RestError::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
             RestError::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
