@@ -49,7 +49,7 @@ The example below makes the `v5.0` release.
    git push origin origin/staging:refs/heads/release/v5.0
    ```
 
-2. **Bump the version and pin snarkVM.** Open a pull request against `release/v5.0` that sets every crate version to `5.0.0` and pins snarkVM to its release candidate. The pin is moved by hand. Push fixes to the same pull request until CI passes. Work on `staging` continues as usual.
+2. **Bump the version and pin snarkVM.** Open a pull request against `release/v5.0` that sets every crate version and `.cargo/release-version` to `5.0.0` and pins snarkVM to its release candidate. The pin is moved by hand. Push fixes to the same pull request until CI passes. Work on `staging` continues as usual.
 
 3. **Tag a release candidate.** When no more changes are planned, tag the head of `release/v5.0` as `v5.0.0-rc.1` and make a GitHub pre-release from the tag. Operators take it to testnet. If testnet finds a problem, fix it with a pull request against `release/v5.0`, and tag `v5.0.0-rc.2`. Repeat until a release candidate is accepted.
 

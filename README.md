@@ -86,7 +86,7 @@ Next, move into the `snarkOS` directory and check out the latest release for you
 cd snarkOS
 ./scripts/checkout-latest-release.sh mainnet
 ```
-Rerun the script to update to a new release. See [Branching and Releasing](BRANCHING_AND_RELEASING.md).
+The script needs `curl` and `jq`. Rerun it to update to a new release. See [Branching and Releasing](BRANCHING_AND_RELEASING.md).
 
 A release older than `v5.0.0` does not contain the script. From such a checkout, run it from `staging`:
 ```

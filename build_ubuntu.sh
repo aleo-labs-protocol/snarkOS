@@ -13,6 +13,7 @@ sudo apt-get install -y \
 	curl \
 	clang \
 	gcc \
+	jq \
 	libssl-dev \
 	llvm \
 	lld \

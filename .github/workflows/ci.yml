@@ -353,7 +353,11 @@ jobs:
     needs: [start-cpu-runners, build-snarkos]
     runs-on: [self-hosted, linux, x64, cpu]
     timeout-minutes: ${{ matrix.timeout }}
-    if: github.event_name != 'pull_request' || startsWith(github.base_ref, 'release/')
+    if: >-
+      !cancelled() && needs.build-snarkos.result == 'success' &&
+      contains(fromJSON('["success", "skipped"]'), needs.start-cpu-runners.result) &&
+      github.repository == 'aleo-labs-protocol/snarkOS' &&
+      (github.event_name != 'pull_request' || startsWith(github.base_ref, 'release/'))
     strategy:
       fail-fast: false
       matrix:
@@ -388,9 +392,12 @@ jobs:
     runs-on: [self-hosted, linux, x64, cpu]
     timeout-minutes: ${{ matrix.timeout }}
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      !cancelled() && needs.build-snarkos.result == 'success' &&
+      contains(fromJSON('["success", "skipped"]'), needs.start-cpu-runners.result) &&
+      github.repository == 'aleo-labs-protocol/snarkOS' &&
+      (github.event_name == 'workflow_dispatch' ||
       startsWith(github.ref, 'refs/heads/release/') ||
-      startsWith(github.base_ref, 'release/')
+      startsWith(github.base_ref, 'release/'))
     strategy:
       fail-fast: false
       matrix:
