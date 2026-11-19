@@ -16,7 +16,7 @@
 use crate::common::test_peer::sample_genesis_block;
 
 use snarkos_account::Account;
-use snarkos_node::{Client, Prover, Validator, rest::RestVerificationLimits};
+use snarkos_node::{AuthorityRetention, Client, Prover, Validator, rest::RestVerificationLimits};
 use snarkos_utilities::{NodeDataDir, SignalHandler};
 
 use snarkvm::prelude::{
@@ -28,13 +28,15 @@ use snarkvm::prelude::{
 use std::str::FromStr;
 
 pub async fn client() -> Client<CurrentNetwork, ConsensusMemory<CurrentNetwork>> {
-    client_with(sample_genesis_block(), StorageMode::new_test(None)).await
+    client_with(sample_genesis_block(), StorageMode::new_test(None), Default::default()).await
 }
 
-/// Returns a client that loads its ledger from `genesis` and `storage_mode`.
+/// Returns a client that loads its ledger from `genesis` and `storage_mode`, keeping the authority
+/// data `authority_retention` sets.
 pub async fn client_with<C: ConsensusStorage<CurrentNetwork>>(
     genesis: Block<CurrentNetwork>,
     storage_mode: StorageMode,
+    authority_retention: AuthorityRetention,
 ) -> Client<CurrentNetwork, C> {
     Client::new(
         "127.0.0.1:0".parse().unwrap(),
@@ -43,7 +45,7 @@ pub async fn client_with<C: ConsensusStorage<CurrentNetwork>>(
         RestVerificationLimits::max::<CurrentNetwork, C>(),
         None,  // No history compatibility mode.
         false, // Do not write JSON history.
-        Default::default(),
+        authority_retention,
         Account::<CurrentNetwork>::from_str("APrivateKey1zkp2oVPTci9kKcUprnbzMwq95Di1MQERpYBhEeqvkrDirK1").unwrap(),
         &[],
         genesis,

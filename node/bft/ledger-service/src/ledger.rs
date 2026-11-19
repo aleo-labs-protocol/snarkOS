@@ -205,7 +205,7 @@ pub fn prepare_dev_committee_options(
 }
 
 /// Persists the given `start_round` to `<node_data_dir>/dev-committee-state` if the file
-/// doesn't already exist. Called after [`Ledger::load_with_dev_committee`] so that the
+/// doesn't already exist. Called after the ledger loads with a dev committee, so that the
 /// round chosen by snarkVM (its `latest_round()` default) survives restarts.
 #[cfg(feature = "test_network")]
 pub fn persist_dev_committee_start_round_if_unwritten(node_data_dir: &NodeDataDir, start_round: u64) -> Result<()> {

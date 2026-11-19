@@ -1324,7 +1324,12 @@ impl<N: Network> BlockSync<N> {
     /// locators. Unless the node only connects to trusted peers, at least `MINIMUM_NUMBER_OF_PEERS`
     /// peers must have sent locators, so that a lone peer cannot claim a far-ahead tip.
     pub fn is_stuck_below_peer_floors(&self) -> bool {
-        let height = self.retention_height();
+        self.is_stuck_at(self.retention_height())
+    }
+
+    /// Returns `true` if block sync cannot progress from `height` (see
+    /// [`Self::is_stuck_below_peer_floors`]).
+    fn is_stuck_at(&self, height: u32) -> bool {
         !self.can_progress(height) && self.peers_ahead_serve_from_above(height)
     }
 
@@ -1333,7 +1338,7 @@ impl<N: Network> BlockSync<N> {
     pub fn stuck_for(&self) -> Option<Duration> {
         let height = self.retention_height();
         let mut stuck_since = self.stuck_since.lock();
-        if !self.is_stuck_below_peer_floors() {
+        if !self.is_stuck_at(height) {
             *stuck_since = None;
             return None;
         }
@@ -1382,7 +1387,7 @@ impl<N: Network> BlockSync<N> {
         {
             return;
         }
-        if self.is_stuck_below_peer_floors() {
+        if self.is_stuck_at(height) {
             *last_warning = Some((Instant::now(), height));
             warn!(
                 "Block sync cannot progress: the peers ahead of this node no longer serve block {}. \

@@ -412,12 +412,24 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             return Err(RestError::bad_request(anyhow!("invalid input: neither a block height nor a block hash")));
         };
 
-        // Serve from the cache unless the block may have been pruned since it was cached.
+        // Serve from the cache unless the block has been pruned since it was cached. A recent block
+        // is served without reading storage; for an older one, the watermark decides.
         let cached = rest.block_cache.lock().get(&hash).cloned();
-        if let Some((height, json_block)) = cached
-            && !range_may_be_pruned::<N>(height, height.saturating_add(1), rest.ledger.latest_height())
-        {
-            return Ok(json_block);
+        if let Some((height, json_block)) = cached {
+            let end = height.saturating_add(1);
+            if !range_may_be_pruned::<N>(height, end, rest.ledger.latest_height()) {
+                return Ok(json_block);
+            }
+            let rest = rest.clone();
+            let pruning = tokio::task::spawn_blocking(move || rest.range_pruning(height, end))
+                .await
+                .map_err(|e| RestError::internal_server_error(anyhow!("tokio error: {e}")))?;
+            match pruning {
+                RangePruning::Retained => return Ok(json_block),
+                RangePruning::Pruned { pruned_below } => return Err(pruned_error(height, pruned_below)),
+                // Read the block from storage instead.
+                RangePruning::Unknown => {}
+            }
         }
 
         // Retrieve and serialize the block from the database. A block whose authority has been pruned

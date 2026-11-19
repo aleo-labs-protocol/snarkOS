@@ -51,11 +51,12 @@ mod traits;
 pub use traits::*;
 
 use snarkos_node_cdn::CdnBlockSync;
+use snarkos_node_network::PeerPoolHandling;
 use snarkos_node_router::{
     Router,
-    messages::{BlockRequest, Message},
+    messages::{BlockRequest, DisconnectReason, Message},
 };
-use snarkos_node_sync::{BlockSync, Ping, STUCK_SYNC_SHUTDOWN_THRESHOLD, serve_block_request};
+use snarkos_node_sync::{BlockRequestOutcome, BlockSync, Ping, STUCK_SYNC_SHUTDOWN_THRESHOLD, serve_block_request};
 use snarkos_utilities::{SignalHandler, Stoppable};
 use snarkvm::{
     ledger::{
@@ -119,20 +120,19 @@ async fn finish_cdn_sync<N: Network, C: ConsensusStorage<N>>(
     };
     // Blocks added by CDN sync do not pass through block sync.
     sync.set_sync_height(ledger.latest_height());
-    ping.update_block_locators(sync.get_block_locators()?);
+    match sync.get_block_locators() {
+        Ok(locators) => ping.update_block_locators(locators),
+        Err(error) => warn!("{}", flatten_error(error.context("Failed to advertise the blocks added by CDN sync"))),
+    }
     Ok(cdn_fallback)
 }
 
-/// Shuts the node down if its block sync stays stuck (see [`shut_down_if_stuck_sync`]). Returns at
-/// once if CDN sync is disabled.
+/// Shuts the node down if its block sync stays stuck (see [`shut_down_if_stuck_sync`]).
 async fn monitor_stuck_sync<N: Network>(
     sync: Arc<BlockSync<N>>,
     signal_handler: Arc<SignalHandler>,
     cdn_fallback: CdnFallback,
 ) {
-    if cdn_fallback == CdnFallback::Disabled {
-        return;
-    }
     while !signal_handler.is_stopped() {
         tokio::time::sleep(STUCK_SYNC_SHUTDOWN_THRESHOLD / 10).await;
         if shut_down_if_stuck_sync(&sync, &signal_handler, cdn_fallback) {
@@ -186,8 +186,19 @@ fn send_block_response<N: Network, C: ConsensusStorage<N>>(
         |heights| ledger.get_blocks(heights),
     );
     match response {
-        Ok(response) => {
+        Ok(BlockRequestOutcome::Reply(response)) => {
             router.send(peer_ip, Message::BlockResponse(response));
+            true
+        }
+        Ok(BlockRequestOutcome::Drop) => true,
+        Ok(BlockRequestOutcome::OutdatedPeer(status)) => {
+            let BlockRequest { start_height, end_height } = request;
+            debug!(
+                "Disconnecting '{peer_ip}': the peer is on an older version and requested blocks {start_height} to \
+                {end_height}, which this node does not serve ({status:?})"
+            );
+            router.send(peer_ip, Message::Disconnect(DisconnectReason::ProtocolViolation.into()));
+            router.disconnect(peer_ip);
             true
         }
         Err(error) => {

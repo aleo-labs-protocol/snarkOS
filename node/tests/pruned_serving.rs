@@ -22,6 +22,7 @@ use common::{
     test_peer::{TestPeer, connect_peer},
 };
 
+use snarkos_node::{AuthorityRetention, Client};
 use snarkos_node_network::{ConnectionMode, NodeType, PeerPoolHandling};
 use snarkos_node_router::messages::{BlockRequest, BlockResponse, BlockResponseStatus, Message, Ping};
 use snarkos_node_sync::BlockSync;
@@ -45,6 +46,9 @@ use snarkvm::{
 use deadline::deadline;
 use pea2pea::protocols::Writing;
 use std::time::Duration;
+
+/// A client on a RocksDB ledger.
+type PrunedClient = Client<CurrentNetwork, ConsensusDB<CurrentNetwork>>;
 
 /// The tip of the pruned ledger.
 const TIP: u32 = 110;
@@ -86,26 +90,37 @@ fn response_to(peer: &TestPeer, request: BlockRequest) -> Option<BlockResponse<C
     })
 }
 
-/// Tests that a client whose ledger was pruned, and that now runs without
-/// `--prune-authority-data`, advertises its watermark `W` as its floor, answers a request below `W`
-/// with `Pruned { W }`, and serves the blocks from `W` on.
-#[tokio::test]
-async fn pruned_client_serves_from_its_watermark() {
+/// Builds a ledger pruned to its watermark `W`, and starts a client on it that keeps the authority
+/// data `authority_retention` sets. Returns the client, the genesis block and `W`.
+async fn pruned_client(authority_retention: AuthorityRetention) -> (PrunedClient, Block<CurrentNetwork>, u32) {
     let storage_mode = StorageMode::new_test(None);
     let storage_mode_ = storage_mode.clone();
     let (genesis, w) = tokio::task::spawn_blocking(move || sample_pruned_ledger(storage_mode_)).await.unwrap();
     assert_eq!(w, TIP - (min_authority_retention_blocks::<CurrentNetwork>() - 1));
-
-    let node = client_with::<ConsensusDB<CurrentNetwork>>(genesis.clone(), storage_mode).await;
+    let node = client_with(genesis.clone(), storage_mode, authority_retention).await;
     assert_eq!(node.ledger().latest_height(), TIP);
+    (node, genesis, w)
+}
+
+/// Returns a test peer at message version `version` that shares `genesis`.
+async fn peer_at(version: u32, genesis: &Block<CurrentNetwork>) -> TestPeer {
     let account = common::sample_account(&mut TestRng::default());
-    let version = Message::<CurrentNetwork>::STATUS_MESSAGE_VERSION;
-    let peer = TestPeer::with_genesis(NodeType::Client, account, version, *genesis.header()).await;
+    TestPeer::with_genesis(NodeType::Client, account, version, *genesis.header()).await
+}
+
+/// Tests that a client on a pruned ledger advertises its watermark `W` as its floor, answers a
+/// request below `W`, or one that crosses it, with `Pruned { W }`, and serves the blocks from `W`
+/// on. `authority_retention` is that of the client, which runs with or without
+/// `--prune-authority-data`.
+async fn check_serves_from_watermark(authority_retention: AuthorityRetention) {
+    let (node, genesis, w) = pruned_client(authority_retention).await;
+    let peer = peer_at(Message::<CurrentNetwork>::STATUS_MESSAGE_VERSION, &genesis).await;
     let node_addr = connect_peer(node.router(), &peer).await;
 
     // The `Ping` carries the watermark as the floor.
     let locators = BlockSync::new(node.router().ledger().clone(), ConnectionMode::Router).get_block_locators().unwrap();
-    assert!(node.router().send_ping(peer.listening_addr().await, Some(locators)));
+    let oldest_retained = node.router().oldest_retained_height();
+    assert!(node.router().send_ping(peer.listening_addr().await, Some(locators), oldest_retained));
     let peer_clone = peer.clone();
     deadline!(Duration::from_secs(10), move || !pings(&peer_clone).is_empty());
     assert_eq!(pings(&peer).last().unwrap().oldest_retained, Some(w));
@@ -129,4 +144,30 @@ async fn pruned_client_serves_from_its_watermark() {
     assert_eq!(response.status, BlockResponseStatus::Blocks);
     assert_eq!(response.blocks.deserialize_blocking().unwrap().len(), 5);
     assert_eq!(node.router().number_of_connected_peers(), 1);
+}
+
+#[tokio::test]
+async fn pruned_client_without_the_flag_serves_from_its_watermark() {
+    check_serves_from_watermark(AuthorityRetention::default()).await;
+}
+
+#[tokio::test]
+async fn pruning_client_serves_from_its_watermark() {
+    let window = min_authority_retention_blocks::<CurrentNetwork>();
+    check_serves_from_watermark(AuthorityRetention::prune::<CurrentNetwork>(window).unwrap()).await;
+}
+
+/// Tests that a peer below the status version that asks for blocks below the watermark gets no
+/// reply, and is disconnected.
+#[tokio::test]
+async fn old_peer_asking_below_the_watermark_is_disconnected() {
+    let (node, genesis, _) = pruned_client(AuthorityRetention::default()).await;
+    let peer = peer_at(Message::<CurrentNetwork>::STATUS_MESSAGE_VERSION - 1, &genesis).await;
+    let node_addr = connect_peer(node.router(), &peer).await;
+
+    let request = BlockRequest { start_height: 1, end_height: 6 };
+    peer.unicast(node_addr, Message::BlockRequest(request)).unwrap();
+    let node_clone = node.clone();
+    deadline!(Duration::from_secs(10), move || node_clone.router().number_of_connected_peers() == 0);
+    assert!(response_to(&peer, request).is_none());
 }
