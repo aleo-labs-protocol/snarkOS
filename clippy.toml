@@ -1,0 +1,12 @@
+# Locks come from `snarkos_utilities::locks`, so that building with `--cfg locktick` instruments
+# all of them. `std::sync` locks are not covered.
+disallowed-types = [
+  { path = "parking_lot::Mutex", reason = "use snarkos_utilities::locks::parking_lot::Mutex" },
+  { path = "parking_lot::RwLock", reason = "use snarkos_utilities::locks::parking_lot::RwLock" },
+  { path = "tokio::sync::Mutex", reason = "use snarkos_utilities::locks::tokio::Mutex" },
+  { path = "tokio::sync::RwLock", reason = "use snarkos_utilities::locks::tokio::RwLock" },
+  { path = "locktick::parking_lot::Mutex", reason = "use snarkos_utilities::locks::parking_lot::Mutex" },
+  { path = "locktick::parking_lot::RwLock", reason = "use snarkos_utilities::locks::parking_lot::RwLock" },
+  { path = "locktick::tokio::Mutex", reason = "use snarkos_utilities::locks::tokio::Mutex" },
+  { path = "locktick::tokio::RwLock", reason = "use snarkos_utilities::locks::tokio::RwLock" },
+]
