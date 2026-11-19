@@ -41,7 +41,7 @@ marked "release" only on the third. The other jobs run on every event.
 | `test (messages)` | hosted | all | 90 | `snarkos-node-bft-events`, `-node-router-messages`, `-node-bft-ledger-service` |
 | `test (services)` | `cpu` | all | 90 | `snarkos-node-consensus`, `-node-rest`, `-cli` |
 | `test (node)` | `cpu` | all | 90 | `snarkos-node` with `snarkos-node-bft-storage-service` (features `memory,persistent`) |
-| `test (bft)` | `cpu` | all | 90 | `snarkos-node-bft`; its `helpers::telemetry` tests with `metrics`, as a second build |
+| `test (bft)` | `cpu` | all | 90 | `snarkos-node-bft` with `metrics` |
 | `test (router)` | `cpu` | all | 90 | `snarkos-node-router` |
 | `test (sync)` | `cpu` | all | 90 | `snarkos-node-sync` |
 | `build-snarkos` | `cpu` | all | 60 | release `snarkos` with `test_network`, as an artifact |
@@ -81,8 +81,9 @@ compile in its line that would not under `cargo test -p <crate>` alone. Check
 this before moving a crate between lines, for example by comparing
 `cargo tree -e features` for the line against each crate alone.
 
-`test (bft)` has a second line for the tests in `helpers::telemetry`, which
-compile only under `metrics`. That line builds the library alone. It passes
+`test (bft)` runs with `metrics`, which the `snarkos` binary enables by
+default, so the tests in `helpers::telemetry` compile. The `each-feature` job
+checks the crate without `metrics`. The `simple_node` line passes
 `--no-tests=fail`, because the step otherwise lets a command match no tests.
 
 [`.config/nextest.toml`](.config/nextest.toml) sets two test threads. Each
