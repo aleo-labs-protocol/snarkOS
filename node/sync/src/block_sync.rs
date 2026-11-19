@@ -3299,9 +3299,9 @@ mod tests {
         assert_eq!(warned_at(&sync), Some(advanced_at + STUCK_SYNC_WARNING_GRACE));
     }
 
-    /// Tests that the stuck clock keeps running while a peer leaves and returns on every sample, and
-    /// stops when a peer ahead serves the next block, when a request can progress, or when the
-    /// height changes.
+    /// Tests that the stuck clock reaches the shutdown threshold while a peer leaves and returns on
+    /// every sample, and stops when a peer ahead serves the next block, when a request can progress,
+    /// or when the height changes.
     #[test]
     fn test_stuck_clock_survives_peer_churn() {
         let sync = sample_sync_at_height(1_000);
@@ -3310,14 +3310,15 @@ mod tests {
         assert_eq!(sync.stuck_for_at(start), Some(Duration::ZERO));
 
         let mut now = start;
-        for _ in 0..3 {
-            now += Duration::from_secs(30);
+        while now < start + STUCK_SYNC_SHUTDOWN_THRESHOLD {
+            now += STUCK_SYNC_SHUTDOWN_THRESHOLD / 10;
             sync.remove_peer(&sample_peer_ip(3));
             assert_eq!(sync.stuck_for_at(now), None);
-            now += Duration::from_secs(30);
+            now += STUCK_SYNC_SHUTDOWN_THRESHOLD / 10;
             add_peers(&sync, 3, 1, 1_100, 1_050);
             assert_eq!(sync.stuck_for_at(now), Some(now - start));
         }
+        assert!(sync.stuck_for_at(now).unwrap() >= STUCK_SYNC_SHUTDOWN_THRESHOLD);
         sync.warn_if_stuck(now);
         assert_eq!(sync.stuck_since.lock().unwrap().warned_at, Some(now));
 
@@ -3397,32 +3398,5 @@ mod tests {
         for id in 1..=3 {
             assert_eq!(service.num_sent_to(sample_peer_ip(id)), max_requests);
         }
-    }
-
-    /// Tests that block sync stuck below the floors of every peer ahead reaches the shutdown
-    /// threshold although a peer leaves and returns on every sample, and that a peer serving the
-    /// next block restarts the clock.
-    #[test]
-    fn test_stuck_shutdown_threshold_survives_peer_churn() {
-        let sync = sample_sync_at_height(1_000);
-        add_peers(&sync, 1, 3, 1_100, 1_050);
-        let sample = STUCK_SYNC_SHUTDOWN_THRESHOLD / 10;
-        let start = Instant::now();
-        let mut now = start;
-        assert_eq!(sync.stuck_for_at(now), Some(Duration::ZERO));
-        while now < start + STUCK_SYNC_SHUTDOWN_THRESHOLD {
-            now += sample;
-            sync.remove_peer(&sample_peer_ip(3));
-            assert_eq!(sync.stuck_for_at(now), None);
-            now += sample;
-            add_peers(&sync, 3, 1, 1_100, 1_050);
-            assert_eq!(sync.stuck_for_at(now), Some(now - start));
-        }
-        assert!(sync.stuck_for_at(now).unwrap() >= STUCK_SYNC_SHUTDOWN_THRESHOLD);
-
-        add_peers(&sync, 4, 1, 1_100, 0);
-        assert_eq!(sync.stuck_for_at(now), None);
-        sync.remove_peer(&sample_peer_ip(4));
-        assert_eq!(sync.stuck_for_at(now + sample), Some(Duration::ZERO));
     }
 }

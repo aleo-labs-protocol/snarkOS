@@ -102,10 +102,12 @@ pub enum CdnFallback {
     Failed,
 }
 
-/// Waits for the startup CDN sync, if any, then records the ledger height in `sync` and advertises
-/// it through `ping`. Returns whether a restart could repeat the CDN sync.
+/// Waits for the startup CDN sync, if any, which started at `height_before_cdn`, then records the
+/// ledger height in `sync` and advertises it through `ping`. Returns whether a restart could repeat
+/// the CDN sync.
 async fn finish_cdn_sync<N: Network, C: ConsensusStorage<N>>(
     cdn_sync: Option<Arc<CdnBlockSync>>,
+    height_before_cdn: u32,
     ledger: &Ledger<N, C>,
     sync: &BlockSync<N>,
     ping: &Ping<N>,
@@ -115,13 +117,16 @@ async fn finish_cdn_sync<N: Network, C: ConsensusStorage<N>>(
         // A failed sync was logged by the CDN sync task.
         Some(cdn_sync) => match cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN")? {
             Ok(_) => {
-                // Block sync still holds the height from before CDN sync.
-                let height = ledger.latest_height();
-                if height == sync.get_sync_height()
-                    && let Ok(cdn_height) = cdn_sync.get_cdn_height().await
-                    && cdn_height <= height
-                {
-                    info!("This node is at block {height}, already at or past the CDN height ({cdn_height})");
+                if ledger.latest_height() == height_before_cdn {
+                    tokio::spawn(async move {
+                        if let Ok(cdn_height) = cdn_sync.get_cdn_height().await
+                            && cdn_height <= height_before_cdn
+                        {
+                            info!(
+                                "This node is at block {height_before_cdn}, already at or past the CDN height ({cdn_height})"
+                            );
+                        }
+                    });
                 }
                 CdnFallback::Available
             }
