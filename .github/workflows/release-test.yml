@@ -15,7 +15,7 @@ on:
         required: true
       stockpile:
         description: "Stockpile the load legs replay: one made for this release's snarkVM, with deployments"
-        default: testnet-V22-h25-p1000x20-stockpile-1
+        default: testnet-V22-h25-p1000x40-d240-f5adbe87
       save:
         description: "Keep each sync leg's ledger as this release's when it passes. Off for a commit that isn't a release candidate"
         type: boolean
