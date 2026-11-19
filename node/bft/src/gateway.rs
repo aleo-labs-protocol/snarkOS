@@ -30,6 +30,7 @@ use snarkos_account::Account;
 use snarkos_node_bft_events::{
     BlockRequest,
     BlockResponse,
+    BlockResponseStatus,
     CertificateRequest,
     CertificateResponse,
     ConsensusSchedule,
@@ -69,7 +70,7 @@ use snarkos_node_network::{
     },
     shorten_snarkos_sha,
 };
-use snarkos_node_sync::{MAX_BLOCKS_BEHIND, communication_service::CommunicationService};
+use snarkos_node_sync::{MAX_BLOCKS_BEHIND, communication_service::CommunicationService, serve_block_request};
 use snarkos_node_tcp::{
     Config,
     ConnectError,
@@ -730,20 +731,21 @@ impl<N: Network> Gateway<N> {
                     bail!("Block request from '{peer_ip}' has an excessive range ({start_height}..{end_height})")
                 }
 
-                // End height is exclusive.
-                let latest_consensus_version = N::CONSENSUS_VERSION(end_height - 1)?;
-
+                let supports_status = self
+                    .get_connected_peer(peer_ip)
+                    .is_some_and(|peer| peer.version >= Event::<N>::STATUS_EVENT_VERSION);
                 let self_ = self.clone();
-                let blocks = match task::spawn_blocking(move || {
-                    // Retrieve the blocks within the requested range.
-                    match self_.ledger.get_blocks(start_height..end_height) {
-                        Ok(blocks) => Ok(DataBlocks(blocks)),
-                        Err(error) => bail!("Missing blocks {start_height} to {end_height} from ledger - {error}"),
-                    }
+                let response = match task::spawn_blocking(move || {
+                    serve_block_request(
+                        block_request,
+                        supports_status,
+                        || self_.ledger.latest_block_height(),
+                        || self_.ledger.get_blocks(start_height..end_height),
+                    )
                 })
                 .await
                 {
-                    Ok(Ok(blocks)) => blocks,
+                    Ok(Ok(response)) => response,
                     Ok(Err(error)) => return Err(error),
                     Err(error) => return Err(anyhow!("[BlockRequest] {error}")),
                 };
@@ -751,18 +753,22 @@ impl<N: Network> Gateway<N> {
                 let self_ = self.clone();
                 self.spawn(async move {
                     // Send the `BlockResponse` message to the peer.
-                    let event =
-                        Event::BlockResponse(BlockResponse::new(block_request, blocks, latest_consensus_version));
-                    Transport::send(&self_, peer_ip, event).await;
+                    Transport::send(&self_, peer_ip, Event::BlockResponse(response)).await;
                 });
                 Ok(true)
             }
-            Event::BlockResponse(BlockResponse { request, latest_consensus_version, blocks, .. }) => {
+            Event::BlockResponse(BlockResponse { request, status, latest_consensus_version, blocks }) => {
                 // Process the block response. Except for some tests, there is always a sync sender.
                 if let Some(sync_sender) = self.sync_sender.get() {
                     // Check the response corresponds to a request.
                     if !self.cache.remove_outbound_block_request(peer_ip, &request) {
                         bail!("Unsolicited block response from '{peer_ip}'")
+                    }
+
+                    if status != BlockResponseStatus::Blocks {
+                        status.ensure_consistent_with(peer_ip, &request)?;
+                        let _ = sync_sender.tx_block_sync_block_unavailable.send((peer_ip, request, status)).await;
+                        return Ok(true);
                     }
 
                     // Perform the deferred non-blocking deserialization of the blocks.

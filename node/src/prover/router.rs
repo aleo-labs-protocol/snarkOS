@@ -200,7 +200,7 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Prover<N, C> {
         // If block locators were provided, then update the peer in the sync pool.
         if let Some(block_locators) = message.block_locators {
             // Check the block locators are valid, and update the peer in the sync pool.
-            if let Err(error) = self.sync.update_peer_locators(peer_ip, &block_locators) {
+            if let Err(error) = self.sync.update_peer_locators(peer_ip, &block_locators, message.oldest_retained) {
                 warn!("Peer '{peer_ip}' sent invalid block locators: {error}");
                 return false;
             }

@@ -16,6 +16,8 @@
 use crate::events::{
     BatchPropose,
     BatchSignature,
+    BlockRequest,
+    BlockResponseStatus,
     CertificateRequest,
     CertificateResponse,
     TransmissionRequest,
@@ -185,6 +187,7 @@ pub struct SyncSender<N: Network> {
         Option<ConsensusVersion>,
         oneshot::Sender<Result<(), InsertBlockResponseError<N>>>,
     )>,
+    pub tx_block_sync_block_unavailable: mpsc::Sender<(SocketAddr, BlockRequest, BlockResponseStatus)>,
     pub tx_block_sync_remove_peer: mpsc::Sender<(SocketAddr, oneshot::Sender<()>)>,
     pub tx_block_sync_update_peer_locators: mpsc::Sender<(SocketAddr, BlockLocators<N>, oneshot::Sender<Result<()>>)>,
     pub tx_certificate_request: mpsc::Sender<(SocketAddr, CertificateRequest<N>)>,
@@ -242,6 +245,7 @@ pub struct SyncReceiver<N: Network> {
         Option<ConsensusVersion>,
         oneshot::Sender<Result<(), InsertBlockResponseError<N>>>,
     )>,
+    pub rx_block_sync_block_unavailable: mpsc::Receiver<(SocketAddr, BlockRequest, BlockResponseStatus)>,
     pub rx_block_sync_remove_peer: mpsc::Receiver<(SocketAddr, oneshot::Sender<()>)>,
     pub rx_block_sync_update_peer_locators: mpsc::Receiver<(SocketAddr, BlockLocators<N>, oneshot::Sender<Result<()>>)>,
     pub rx_certificate_request: mpsc::Receiver<(SocketAddr, CertificateRequest<N>)>,
@@ -251,6 +255,7 @@ pub struct SyncReceiver<N: Network> {
 /// Initializes the sync channels.
 pub fn init_sync_channels<N: Network>() -> (SyncSender<N>, SyncReceiver<N>) {
     let (tx_block_sync_insert_block_response, rx_block_sync_insert_block_response) = mpsc::channel(MAX_CHANNEL_SIZE);
+    let (tx_block_sync_block_unavailable, rx_block_sync_block_unavailable) = mpsc::channel(MAX_CHANNEL_SIZE);
     let (tx_block_sync_remove_peer, rx_block_sync_remove_peer) = mpsc::channel(MAX_CHANNEL_SIZE);
     let (tx_block_sync_update_peer_locators, rx_block_sync_update_peer_locators) = mpsc::channel(MAX_CHANNEL_SIZE);
     let (tx_certificate_request, rx_certificate_request) = mpsc::channel(MAX_CHANNEL_SIZE);
@@ -258,6 +263,7 @@ pub fn init_sync_channels<N: Network>() -> (SyncSender<N>, SyncReceiver<N>) {
 
     let sender = SyncSender {
         tx_block_sync_insert_block_response,
+        tx_block_sync_block_unavailable,
         tx_block_sync_remove_peer,
         tx_block_sync_update_peer_locators,
         tx_certificate_request,
@@ -265,6 +271,7 @@ pub fn init_sync_channels<N: Network>() -> (SyncSender<N>, SyncReceiver<N>) {
     };
     let receiver = SyncReceiver {
         rx_block_sync_insert_block_response,
+        rx_block_sync_block_unavailable,
         rx_block_sync_remove_peer,
         rx_block_sync_update_peer_locators,
         rx_certificate_request,

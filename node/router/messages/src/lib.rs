@@ -66,7 +66,7 @@ pub use unconfirmed_solution::UnconfirmedSolution;
 mod unconfirmed_transaction;
 pub use unconfirmed_transaction::UnconfirmedTransaction;
 
-pub use snarkos_node_bft_events::DataBlocks;
+pub use snarkos_node_bft_events::{BlockResponseStatus, DataBlocks};
 
 /// Proptest strategies for every message type, re-exported so callers outside
 /// this crate can reach them.
@@ -148,6 +148,9 @@ impl<N: Network> From<DisconnectReason> for Message<N> {
 }
 
 impl<N: Network> Message<N> {
+    /// The oldest message version that receives `BlockResponse` status replies and `Ping` floors.
+    // TODO: add `(ConsensusVersion::V23, 34)` to `VERSIONS` once snarkVM has `ConsensusVersion::V23`.
+    pub const STATUS_MESSAGE_VERSION: u32 = 34;
     /// The version of the network protocol; this is incremented for breaking changes between migration versions.
     // Note. This should be incremented for each new `ConsensusVersion` that is added.
     pub const VERSIONS: [(ConsensusVersion, u32); 17] = [
