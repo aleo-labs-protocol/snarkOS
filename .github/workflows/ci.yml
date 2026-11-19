@@ -433,9 +433,10 @@ jobs:
         with: { tool: cargo-machete@0.7.0 }
       - run: cargo machete
 
+  # Builds cold: the four caches would take about half of the repository's
+  # 10 GB and evict the entries the hosted test jobs restore from.
   windows:
     runs-on: windows-latest
-    permissions: { contents: read, actions: write }
     if: github.event_name != 'pull_request'
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
@@ -446,13 +447,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          key: ${{ matrix.dir }}
-          save-if: ${{ github.ref == 'refs/heads/staging' }}
-      - uses: ./.github/actions/rust-cache-prune
-        if: github.ref == 'refs/heads/staging'
-        with: { key: '${{ matrix.dir }}' }
       - run: cargo check --examples --benches --tests
         working-directory: ${{ matrix.dir }}
 
