@@ -124,6 +124,9 @@ version = "1.6"
 [workspace.dependencies.rayon]
 version = "1"
 
+[workspace.dependencies.tempfile]
+version = "3"
+
 [workspace.dependencies.thiserror]
 version = "2"
 

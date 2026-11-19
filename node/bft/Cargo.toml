@@ -210,6 +210,9 @@ features = [ "test-helpers" ]
 workspace = true
 features = [ "prop-tests" ]
 
+[dev-dependencies.tempfile]
+workspace = true
+
 [dev-dependencies.test-strategy]
 workspace = true
 

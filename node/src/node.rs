@@ -515,35 +515,24 @@ impl<N: Network> Node<N> {
 #[cfg(test)]
 mod tests {
     use super::existing_startup_checkpoint_height;
-    use std::{
-        fs,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::fs;
 
     #[test]
     fn seeds_last_checkpoint_height_when_startup_checkpoint_directory_exists() {
         let startup_height = 42;
-        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let base_path = std::env::temp_dir().join(format!("snarkos_checkpoint_seed_test_{unique}"));
-        let checkpoint_path = base_path.join(format!("checkpoint_{startup_height}"));
-        fs::create_dir_all(&checkpoint_path).unwrap();
+        let base_dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(base_dir.path().join(format!("checkpoint_{startup_height}"))).unwrap();
 
-        let seeded_height = existing_startup_checkpoint_height(base_path.as_path(), startup_height);
+        let seeded_height = existing_startup_checkpoint_height(base_dir.path(), startup_height);
         assert_eq!(seeded_height, Some(startup_height));
-
-        fs::remove_dir_all(base_path).unwrap();
     }
 
     #[test]
     fn does_not_seed_last_checkpoint_height_when_startup_checkpoint_directory_missing() {
         let startup_height = 42;
-        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let base_path = std::env::temp_dir().join(format!("snarkos_checkpoint_seed_test_{unique}"));
-        fs::create_dir_all(&base_path).unwrap();
+        let base_dir = tempfile::tempdir().unwrap();
 
-        let seeded_height = existing_startup_checkpoint_height(base_path.as_path(), startup_height);
+        let seeded_height = existing_startup_checkpoint_height(base_dir.path(), startup_height);
         assert_eq!(seeded_height, None);
-
-        fs::remove_dir_all(base_path).unwrap();
     }
 }

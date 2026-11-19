@@ -189,6 +189,9 @@ features = [ "env-filter", "fmt" ]
 [dev-dependencies.rand_chacha]
 workspace = true
 
+[dev-dependencies.tempfile]
+workspace = true
+
 [package.metadata.cargo-machete]
 ignored = [
   "aleo-std", # Only the timer feature uses it
