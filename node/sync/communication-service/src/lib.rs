@@ -18,7 +18,7 @@
 #[macro_use]
 extern crate async_trait;
 
-use std::{io, net::SocketAddr};
+use std::{io, net::SocketAddr, time::Duration};
 use tokio::sync::oneshot;
 
 /// Abstract communication service.
@@ -31,6 +31,10 @@ pub trait CommunicationService: Send + Sync {
 
     /// Generates the service-specific message for a block request.
     fn prepare_block_request(start: u32, end: u32) -> Self::Message;
+
+    /// Returns how many block requests a peer accepts from this node within the returned interval,
+    /// or `None` if this node does not limit the block requests it sends.
+    fn block_request_limit(&self) -> Option<(usize, Duration)>;
 
     /// Sends the given message to specified peer.
     ///
