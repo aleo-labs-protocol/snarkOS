@@ -24,7 +24,8 @@
 //! the plain guard type, such as `parking_lot::MutexGuard::map`, compiles only without the cfg.
 //!
 //! `clippy.toml` disallows the lock types of `parking_lot`, `tokio` and `locktick` everywhere
-//! else. These are type aliases rather than re-exports, so that lint does not flag their users.
+//! else. Turning these type aliases into `pub use` re-exports would make that lint flag every
+//! user of them.
 
 /// Synchronous locks from `parking_lot`.
 pub mod parking_lot {
