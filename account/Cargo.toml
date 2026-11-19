@@ -26,3 +26,7 @@ workspace = true
 [dependencies.snarkvm]
 workspace = true
 features = [ "console" ]
+
+[dev-dependencies.snarkvm]
+workspace = true
+features = [ "test-helpers" ]
