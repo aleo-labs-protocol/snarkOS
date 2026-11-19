@@ -162,12 +162,15 @@ impl<N: Network> Sync<N> {
         // Start the block request generation loop (outgoing).
         let self_ = self.clone();
         self.spawn(async move {
+            let mut next_request_slot = None;
             loop {
-                // Wait for peer updates or timeout
-                let _ = tokio::time::timeout(Self::MAX_SYNC_INTERVAL, self_.block_sync.wait_for_peer_update()).await;
+                // Wait for peer updates, a peer's block request limit to allow a request, or timeout.
+                let deadline = Instant::now() + Self::MAX_SYNC_INTERVAL;
+                let deadline = next_request_slot.map_or(deadline, |slot: Instant| slot.min(deadline));
+                let _ = tokio::time::timeout_at(deadline.into(), self_.block_sync.wait_for_peer_update()).await;
 
                 // Issue block requests to peers.
-                self_.try_issuing_block_requests().await;
+                next_request_slot = self_.try_issuing_block_requests().await;
 
                 // Rate limiting happens in [`BlockSync::try_issuing_block_requests`] and no additional sleeps are needed here.
             }
@@ -317,8 +320,8 @@ impl<N: Network> Sync<N> {
     ///
     /// This method handles timeout removal, checks if block sync is possible,
     /// and issues block requests to peers.
-    async fn try_issuing_block_requests(&self) {
-        self.block_sync.try_issuing_block_requests(&self.gateway).await;
+    async fn try_issuing_block_requests(&self) -> Option<Instant> {
+        self.block_sync.try_issuing_block_requests(&self.gateway).await
     }
 }
 
