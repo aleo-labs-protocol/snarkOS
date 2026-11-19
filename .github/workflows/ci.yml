@@ -458,14 +458,17 @@ jobs:
   # Each crate alone, with no features and with each feature on its own. The
   # builds above unify features across crates, so they miss a feature that is
   # not forwarded to a dependency, and code gated on the wrong feature. `cuda`
-  # needs nvcc. Each feature set checks snarkVM again: about 50 minutes from a
-  # cold target, 10 from a warm one. On every push to a release branch, and on
-  # demand.
+  # needs nvcc. Each feature set checks snarkVM again. On every push to a
+  # release branch, and on demand.
   each-feature:
-    needs: [start-cpu-runners]
+    needs: [check-shared-refs, start-cpu-runners]
     runs-on: [self-hosted, linux, x64, cpu]
     timeout-minutes: 120
-    if: github.event_name != 'pull_request'
+    if: >-
+      github.event_name != 'pull_request' && !cancelled() &&
+      needs.check-shared-refs.result == 'success' &&
+      contains(fromJSON('["success", "skipped"]'), needs.start-cpu-runners.result) &&
+      github.repository == 'aleo-labs-protocol/snarkOS'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
