@@ -216,6 +216,10 @@ workspace = true
 [dev-dependencies.test-log]
 workspace = true
 
+[dev-dependencies.tokio]
+workspace = true
+features = [ "test-util" ]
+
 [dev-dependencies.tower-http]
 version = "0.7"
 features = [ "fs", "trace" ]
