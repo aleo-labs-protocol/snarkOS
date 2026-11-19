@@ -55,7 +55,7 @@ impl Updater {
         let status = match version {
             // The release list includes release candidates; `releases/latest` never names one.
             None => match Self::update_available() {
-                Ok(latest) => update_builder.release_tag(&format!("v{latest}")).build()?.update()?,
+                Ok(latest) => update_builder.release_tag(format!("v{latest}")).build()?.update()?,
                 Err(UpdaterError::OldReleaseVersion(current, _)) => VersionStatus::UpToDate(current),
                 Err(error) => return Err(error),
             },
