@@ -21,7 +21,7 @@ default = [ ]
 locktick = [ "dep:locktick", "snarkvm/locktick" ]
 memory = [ "parking_lot", "tracing" ]
 persistent = [ "parking_lot", "tracing" ]
-test = [ "memory" ]
+test = [ "memory", "snarkvm/test-helpers" ]
 
 [dependencies.anyhow]
 workspace = true
@@ -52,3 +52,7 @@ optional = true
 
 [dev-dependencies.bytes]
 workspace = true
+
+[dev-dependencies.snarkvm]
+workspace = true
+features = [ "test-helpers" ]

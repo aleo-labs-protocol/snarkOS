@@ -72,6 +72,10 @@ features = [ "codec" ]
 path = "."
 features = [ "test" ]
 
+[dev-dependencies.snarkvm]
+workspace = true
+features = [ "test-helpers" ]
+
 [dev-dependencies.tokio]
 workspace = true
 features = [ "io-util", "macros", "rt-multi-thread" ]
