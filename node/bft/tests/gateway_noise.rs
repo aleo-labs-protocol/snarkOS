@@ -39,10 +39,20 @@ use snarkos_node_bft_events::{
     ResponderInfo,
     ResponderProof,
     ValidatorsRequest,
+    decode_responder_info,
+    encode_initiator_info,
 };
 use snarkos_node_network::{
     PeerPoolHandling,
-    noise::{HandshakeProtocol, NoiseSession, Role, binding_message, detect_handshake_protocol, write_noise_magic},
+    noise::{
+        HandshakeProtocol,
+        NoiseSession,
+        PendingSession,
+        Role,
+        binding_message,
+        detect_handshake_protocol,
+        write_noise_magic,
+    },
 };
 use snarkos_node_tcp::P2P;
 use snarkvm::{
@@ -225,8 +235,13 @@ fn honest_signer(account: Account<CurrentNetwork>) -> impl Fn(&[u8]) -> Vec<u8> 
 }
 
 /// Returns the little-endian bytes of the hash of the gateway's genesis block.
-fn genesis_hash(gateway: &Gateway<CurrentNetwork>) -> Vec<u8> {
-    gateway.ledger().get_block_hash(0).unwrap().to_bytes_le().unwrap()
+fn genesis_hash(gateway: &Gateway<CurrentNetwork>) -> [u8; 32] {
+    gateway.ledger().get_block_hash(0).unwrap().to_bytes_le().unwrap().try_into().unwrap()
+}
+
+/// Returns the trailer of a peer that shares the gateway's genesis block.
+fn trailer_for(gateway: &Gateway<CurrentNetwork>) -> HandshakeTrailer {
+    HandshakeTrailer::new(ConsensusSchedule::of::<CurrentNetwork>(), genesis_hash(gateway))
 }
 
 /// Drives a Noise handshake against a gateway by hand, up to and including the verdict, and hands the
@@ -234,8 +249,7 @@ fn genesis_hash(gateway: &Gateway<CurrentNetwork>) -> Vec<u8> {
 ///
 /// The signature over the binding is produced by `sign`, so that a test can decide whether to
 /// authenticate honestly or not. It announces the current event version, this build's schedule and
-/// the gateway's genesis hash, and reads the gateway's metadata in the original layout, skipping its
-/// trailer.
+/// the gateway's genesis hash.
 async fn handshake_with_gateway(
     gateway: &Gateway<CurrentNetwork>,
     account: &Account<CurrentNetwork>,
@@ -243,13 +257,15 @@ async fn handshake_with_gateway(
     sign: impl Fn(&[u8]) -> Vec<u8>,
 ) -> io::Result<(ResponderProof<CurrentNetwork>, TcpStream)> {
     let version = Event::<CurrentNetwork>::VERSION;
-    let trailer =
-        HandshakeTrailer { genesis_hash: Some(genesis_hash(gateway)), ..HandshakeTrailer::of::<CurrentNetwork>() };
-    handshake_with_gateway_sending(dial_addr(gateway), account, listener_port, version, trailer, sign).await
+    handshake_with_gateway_sending(dial_addr(gateway), account, listener_port, version, trailer_for(gateway), sign)
+        .await
 }
 
 /// Drives a Noise handshake like [`handshake_with_gateway`], announcing the event `version` and
-/// sending `trailer` in the third message.
+/// sending `trailer` in the third message, in the encoding a peer at that version sends. The gateway's
+/// second message must state its own version and carry what a peer at `version` requires.
+///
+/// A peer at [`HandshakeTrailer::CBOR_VERSION`] or above must be given a trailer with every field.
 async fn handshake_with_gateway_sending(
     gateway_addr: SocketAddr,
     account: &Account<CurrentNetwork>,
@@ -267,14 +283,26 @@ async fn handshake_with_gateway_sending(
     noise.send(&hint.to_bytes_le().unwrap()).await?;
 
     // Message 2: the gateway's metadata, which tells us the restrictions ID it expects back.
-    let peer_info = PeerInfo::<CurrentNetwork>::from_bytes_le(&noise.recv().await?).unwrap();
+    let ResponderInfo { info: peer_info, trailer: peer_trailer } =
+        decode_responder_info(version, gateway_addr, &noise.recv().await?).unwrap();
+    assert_eq!(peer_info.version, Event::<CurrentNetwork>::VERSION);
+    assert_eq!(peer_trailer.schedule, Some(ConsensusSchedule::of::<CurrentNetwork>()));
+    assert_eq!(peer_trailer.genesis_hash.map(|hash| hash.len()), Some(32));
 
     // Message 3: our metadata, and whatever `sign` decides to offer as proof.
     let binding = binding_message(HANDSHAKE_DOMAIN, Role::Initiator, &noise.handshake_hash()?);
     let mut our_info = PeerInfo::new(listener_port, account.address(), peer_info.restrictions_id, None);
     our_info.version = version;
-    let our_message = InitiatorInfo { info: our_info, signature: Data::Buffer(sign(&binding).into()), trailer };
-    noise.send(&our_message.to_bytes_le().unwrap()).await?;
+    let signature = Data::Buffer(sign(&binding).into());
+    let genesis_hash = trailer.genesis_hash.as_deref().and_then(|hash| <[u8; 32]>::try_from(hash).ok());
+    let our_message = match trailer.schedule.clone().zip(genesis_hash) {
+        Some((schedule, genesis_hash)) => {
+            encode_initiator_info(peer_info.version, our_info, schedule, genesis_hash, signature).unwrap()
+        }
+        // Only the original layout can carry a trailer that lacks a field or holds a malformed one.
+        None => InitiatorInfo { info: our_info, signature, trailer }.to_bytes_le().unwrap(),
+    };
+    noise.send(&our_message).await?;
 
     // Message 4: the verdict.
     let mut noise = noise.into_transport_mode()?;
@@ -345,15 +373,18 @@ async fn a_contradicted_handshake_hint_is_rejected() {
     // Claim one listening port in the cleartext hint...
     let hint = HandshakeHint { version, listener_port: 4132, address: peer.address() };
     noise.send(&hint.to_bytes_le().unwrap()).await.unwrap();
-    let peer_info = PeerInfo::<CurrentNetwork>::from_bytes_le(&noise.recv().await.unwrap()).unwrap();
+    let ResponderInfo { info: peer_info, .. } =
+        decode_responder_info(version, dial_addr(&gateway), &noise.recv().await.unwrap()).unwrap();
 
     // ...and a different one in the authenticated payload. The hint is what the gateway ran its
     // early checks against, so disagreeing with it must not be a way to slip past them.
     let binding = binding_message(HANDSHAKE_DOMAIN, Role::Initiator, &noise.handshake_hash().unwrap());
-    let signature = peer.sign_bytes(&binding, &mut rand::rng()).unwrap();
+    let signature = Data::Object(peer.sign_bytes(&binding, &mut rand::rng()).unwrap());
     let our_info = PeerInfo::new(4133, peer.address(), peer_info.restrictions_id, None);
-    let our_message = InitiatorInfo { info: our_info, signature: Data::Object(signature), trailer: Default::default() };
-    noise.send(&our_message.to_bytes_le().unwrap()).await.unwrap();
+    let schedule = ConsensusSchedule::of::<CurrentNetwork>();
+    let our_message =
+        encode_initiator_info(peer_info.version, our_info, schedule, genesis_hash(&gateway), signature).unwrap();
+    noise.send(&our_message).await.unwrap();
 
     let mut noise = noise.into_transport_mode().unwrap();
     let verdict = ResponderProof::<CurrentNetwork>::from_bytes_le(&noise.recv().await.unwrap()).unwrap();
@@ -379,13 +410,16 @@ async fn an_initiator_cannot_be_checked_as_one_validator_and_admitted_as_another
     let version = snarkos_node_bft_events::Event::<CurrentNetwork>::VERSION;
     let hint = HandshakeHint { version, listener_port: 4134, address: claimed.address() };
     noise.send(&hint.to_bytes_le().unwrap()).await.unwrap();
-    let peer_info = PeerInfo::<CurrentNetwork>::from_bytes_le(&noise.recv().await.unwrap()).unwrap();
+    let ResponderInfo { info: peer_info, .. } =
+        decode_responder_info(version, dial_addr(&gateway), &noise.recv().await.unwrap()).unwrap();
 
     let binding = binding_message(HANDSHAKE_DOMAIN, Role::Initiator, &noise.handshake_hash().unwrap());
-    let signature = actual.sign_bytes(&binding, &mut rand::rng()).unwrap();
+    let signature = Data::Object(actual.sign_bytes(&binding, &mut rand::rng()).unwrap());
     let our_info = PeerInfo::new(4134, actual.address(), peer_info.restrictions_id, None);
-    let our_message = InitiatorInfo { info: our_info, signature: Data::Object(signature), trailer: Default::default() };
-    noise.send(&our_message.to_bytes_le().unwrap()).await.unwrap();
+    let schedule = ConsensusSchedule::of::<CurrentNetwork>();
+    let our_message =
+        encode_initiator_info(peer_info.version, our_info, schedule, genesis_hash(&gateway), signature).unwrap();
+    noise.send(&our_message).await.unwrap();
 
     // The signature is perfectly valid for `actual`; what must fail is that the gateway ran its
     // early checks against `claimed`.
@@ -410,8 +444,10 @@ async fn the_responder_discloses_its_consensus_schedule() {
     let hint = HandshakeHint { version, listener_port: 4141, address: peer.address() };
     noise.send(&hint.to_bytes_le().unwrap()).await.unwrap();
 
-    let responder_info = ResponderInfo::<CurrentNetwork>::from_bytes_le(&noise.recv().await.unwrap()).unwrap();
-    assert_eq!(responder_info.trailer.schedule, Some(ConsensusSchedule::of::<CurrentNetwork>()));
+    let ResponderInfo { trailer, .. } =
+        decode_responder_info::<CurrentNetwork>(version, dial_addr(&gateways[0]), &noise.recv().await.unwrap())
+            .unwrap();
+    assert_eq!(trailer.schedule, Some(ConsensusSchedule::of::<CurrentNetwork>()));
 }
 
 /// A peer at the current event version that sends its consensus schedule is accepted.
@@ -422,8 +458,7 @@ async fn an_initiator_that_discloses_its_consensus_schedule_is_accepted() {
     let peer = accounts[1].clone();
 
     let sign = honest_signer(peer.clone());
-    let trailer =
-        HandshakeTrailer { genesis_hash: Some(genesis_hash(&gateways[0])), ..HandshakeTrailer::of::<CurrentNetwork>() };
+    let trailer = trailer_for(&gateways[0]);
     let (verdict, _stream) = handshake_with_gateway_sending(
         dial_addr(&gateways[0]),
         &peer,
@@ -451,10 +486,7 @@ async fn the_gateway_weighs_the_schedule_of_an_initiator() {
     let height = u32::MAX - 1_000;
     let mut heights = ConsensusSchedule::of::<CurrentNetwork>().heights().to_vec();
     heights.push(height);
-    let trailer = HandshakeTrailer {
-        schedule: Some(ConsensusSchedule::new(heights).unwrap()),
-        genesis_hash: Some(genesis_hash(&gateway)),
-    };
+    let trailer = HandshakeTrailer::new(ConsensusSchedule::new(heights).unwrap(), genesis_hash(&gateway));
     assert!(gateway.ensure_block_may_be_built(height).is_ok());
 
     let sign = honest_signer(peer.clone());
@@ -556,8 +588,7 @@ async fn an_initiator_that_shares_the_genesis_is_accepted() {
     let (accounts, gateways) = new_test_gateways(1, &mut rng).await;
     let peer = accounts[1].clone();
 
-    let trailer =
-        HandshakeTrailer { genesis_hash: Some(genesis_hash(&gateways[0])), ..HandshakeTrailer::of::<CurrentNetwork>() };
+    let trailer = trailer_for(&gateways[0]);
     let sign = honest_signer(peer.clone());
     let (verdict, _stream) = handshake_with_gateway_sending(
         dial_addr(&gateways[0]),
@@ -582,7 +613,7 @@ async fn an_initiator_with_a_different_genesis_is_rejected() {
     let (accounts, gateways) = new_test_gateways(1, &mut rng).await;
     let peer = accounts[1].clone();
 
-    let trailer = HandshakeTrailer { genesis_hash: Some(vec![0; 32]), ..HandshakeTrailer::of::<CurrentNetwork>() };
+    let trailer = HandshakeTrailer::new(ConsensusSchedule::of::<CurrentNetwork>(), [0; 32]);
     let sign = honest_signer(peer.clone());
     let (verdict, _stream) = handshake_with_gateway_sending(
         dial_addr(&gateways[0]),
@@ -612,7 +643,7 @@ async fn an_initiator_that_owes_a_genesis_hash_is_rejected_without_one() {
         &peer,
         4148,
         HandshakeTrailer::GENESIS_VERSION,
-        HandshakeTrailer::of::<CurrentNetwork>(),
+        HandshakeTrailer { schedule: Some(ConsensusSchedule::of::<CurrentNetwork>()), genesis_hash: None },
         sign,
     )
     .await
@@ -634,7 +665,7 @@ async fn an_initiator_that_predates_the_genesis_hash_is_accepted_without_one() {
         &peer,
         4149,
         HandshakeTrailer::GENESIS_VERSION - 1,
-        HandshakeTrailer::of::<CurrentNetwork>(),
+        HandshakeTrailer { schedule: Some(ConsensusSchedule::of::<CurrentNetwork>()), genesis_hash: None },
         sign,
     )
     .await
@@ -645,8 +676,8 @@ async fn an_initiator_that_predates_the_genesis_hash_is_accepted_without_one() {
     deadline!(Duration::from_secs(5), move || gateway.connected_addresses().contains(&address));
 }
 
-/// A genesis hash cut short is malformed, not absent, so it is rejected even from a peer at an event
-/// version that predates the genesis hash.
+/// A genesis hash cut short in the trailer is malformed, not absent, so it is rejected even from a
+/// peer at an event version that predates the genesis hash.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_initiator_with_a_truncated_genesis_hash_is_rejected() {
     let mut rng = TestRng::default();
@@ -654,11 +685,13 @@ async fn an_initiator_with_a_truncated_genesis_hash_is_rejected() {
     let peer = accounts[1].clone();
 
     for (version, listener_port) in
-        [(HandshakeTrailer::GENESIS_VERSION - 1, 4150), (Event::<CurrentNetwork>::VERSION, 4151)]
+        [(HandshakeTrailer::GENESIS_VERSION - 1, 4150), (HandshakeTrailer::GENESIS_VERSION, 4151)]
     {
-        let mut truncated = genesis_hash(&gateways[0]);
-        truncated.truncate(31);
-        let trailer = HandshakeTrailer { genesis_hash: Some(truncated), ..HandshakeTrailer::of::<CurrentNetwork>() };
+        let truncated = genesis_hash(&gateways[0])[..31].to_vec();
+        let trailer = HandshakeTrailer {
+            schedule: Some(ConsensusSchedule::of::<CurrentNetwork>()),
+            genesis_hash: Some(truncated),
+        };
         let sign = honest_signer(peer.clone());
         let (verdict, _stream) =
             handshake_with_gateway_sending(dial_addr(&gateways[0]), &peer, listener_port, version, trailer, sign)
@@ -667,6 +700,45 @@ async fn an_initiator_with_a_truncated_genesis_hash_is_rejected() {
         assert_eq!(verdict, ResponderProof::Rejected { reason: DisconnectReason::GenesisMismatch });
         assert!(!gateways[0].connected_addresses().contains(&peer.address()));
     }
+}
+
+/// A genesis hash cut short in the CBOR map of a peer at [`HandshakeTrailer::CBOR_VERSION`] makes the
+/// whole message malformed, which the gateway rejects as a protocol violation.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_initiator_with_a_truncated_genesis_hash_in_cbor_is_rejected() {
+    let mut rng = TestRng::default();
+    let (accounts, gateways) = new_test_gateways(1, &mut rng).await;
+    let (gateway, peer) = (gateways[0].clone(), accounts[1].clone());
+
+    let mut stream = TcpStream::connect(dial_addr(&gateway)).await.unwrap();
+    write_noise_magic(&mut stream).await.unwrap();
+    let mut noise = NoiseSession::new(stream, Role::Initiator).unwrap();
+
+    let version = Event::<CurrentNetwork>::VERSION;
+    let hint = HandshakeHint { version, listener_port: 4153, address: peer.address() };
+    noise.send(&hint.to_bytes_le().unwrap()).await.unwrap();
+    let ResponderInfo { info: peer_info, .. } =
+        decode_responder_info(version, dial_addr(&gateway), &noise.recv().await.unwrap()).unwrap();
+
+    let binding = binding_message(HANDSHAKE_DOMAIN, Role::Initiator, &noise.handshake_hash().unwrap());
+    let signature = Data::Object(peer.sign_bytes(&binding, &mut rand::rng()).unwrap());
+    let our_info = PeerInfo::new(4153, peer.address(), peer_info.restrictions_id, None);
+    let schedule = ConsensusSchedule::of::<CurrentNetwork>();
+    let genesis_hash = genesis_hash(&gateway);
+    let message_3 = encode_initiator_info(peer_info.version, our_info, schedule, genesis_hash, signature).unwrap();
+
+    // Re-encode the value of "genesis", a 32-byte string, as its first 31 bytes.
+    let genesis_entry = [&b"\x67genesis\x58\x20"[..], &genesis_hash].concat();
+    let start = message_3.windows(genesis_entry.len()).position(|window| window == genesis_entry).unwrap();
+    let truncated_entry = [&b"\x67genesis\x58\x1f"[..], &genesis_hash[..31]].concat();
+    let message_3 = [&message_3[..start], &truncated_entry[..], &message_3[start + genesis_entry.len()..]].concat();
+    noise.send(&message_3).await.unwrap();
+
+    let mut noise = noise.into_transport_mode().unwrap();
+    let verdict = ResponderProof::<CurrentNetwork>::from_bytes_le(&noise.recv().await.unwrap()).unwrap();
+
+    assert_eq!(verdict, ResponderProof::Rejected { reason: DisconnectReason::ProtocolViolation });
+    assert!(!gateway.connected_addresses().contains(&peer.address()));
 }
 
 /// A gateway that dials a validator on a network with a different genesis block turns it away on its
@@ -700,4 +772,83 @@ async fn an_initiator_rejects_a_responder_with_a_different_genesis() {
     // Neither side may end up considering the other a peer.
     assert!(!gateway_a.connected_addresses().contains(&accounts[1].address()));
     assert!(!gateway_b.connected_addresses().contains(&accounts[0].address()));
+}
+
+/// A gateway answers an initiator below [`HandshakeTrailer::CBOR_VERSION`] in the original layout,
+/// which still states the gateway's own version and meets what that peer requires of it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_gateway_answers_an_initiator_below_the_cbor_version_in_the_original_layout() {
+    let mut rng = TestRng::default();
+    let (accounts, gateways) = new_test_gateways(1, &mut rng).await;
+    let (gateway, peer) = (gateways[0].clone(), accounts[1].clone());
+
+    let version = HandshakeTrailer::CBOR_VERSION - 1;
+    let sign = honest_signer(peer.clone());
+    let (verdict, _stream) =
+        handshake_with_gateway_sending(dial_addr(&gateway), &peer, 4152, version, trailer_for(&gateway), sign)
+            .await
+            .unwrap();
+    assert!(matches!(verdict, ResponderProof::Accepted { .. }), "the handshake should have been accepted");
+
+    let address = peer.address();
+    deadline!(Duration::from_secs(5), move || gateway.connected_addresses().contains(&address));
+}
+
+/// Answers a gateway's dial as a responder below [`HandshakeTrailer::CBOR_VERSION`], which speaks the
+/// original layout, and returns the gateway's third message as such a peer reads it, along with the
+/// binding that message's signature is over.
+///
+/// The stream is handed back, so that the connection stays open.
+async fn respond_in_the_original_layout(
+    listener: TcpListener,
+    gateway: Gateway<CurrentNetwork>,
+    account: Account<CurrentNetwork>,
+) -> io::Result<(InitiatorInfo<CurrentNetwork>, Vec<u8>, TcpStream)> {
+    let listener_port = listener.local_addr()?.port();
+    let (mut stream, _) = listener.accept().await?;
+    let (protocol, _) = detect_handshake_protocol(&mut stream).await?;
+    assert_eq!(protocol, HandshakeProtocol::Noise);
+
+    let pending = PendingSession::accept(stream).await?;
+    let hint = HandshakeHint::<CurrentNetwork>::from_bytes_le(pending.first_payload()?).unwrap();
+    assert_eq!(hint.version, Event::<CurrentNetwork>::VERSION);
+    let mut noise = pending.into_session()?;
+
+    let restrictions_id = gateway.ledger().latest_restrictions_id();
+    let mut our_info = PeerInfo::new(listener_port, account.address(), restrictions_id, None);
+    our_info.version = HandshakeTrailer::CBOR_VERSION - 1;
+    noise.send(&ResponderInfo { info: our_info, trailer: trailer_for(&gateway) }.to_bytes_le().unwrap()).await?;
+    let peer_binding = binding_message(HANDSHAKE_DOMAIN, Role::Initiator, &noise.handshake_hash()?);
+
+    let message_3 = InitiatorInfo::<CurrentNetwork>::from_bytes_le(&noise.recv().await?).unwrap();
+    let binding = binding_message(HANDSHAKE_DOMAIN, Role::Responder, &noise.handshake_hash()?);
+    let mut noise = noise.into_transport_mode()?;
+    let signature = account.sign_bytes(&binding, &mut rand::rng()).unwrap();
+    noise.send(&ResponderProof::Accepted { signature: Data::Object(signature) }.to_bytes_le().unwrap()).await?;
+
+    Ok((message_3, peer_binding, noise.into_inner()))
+}
+
+/// A gateway that dials a responder below [`HandshakeTrailer::CBOR_VERSION`] sends it the original
+/// layout, which still states the gateway's own version and meets what that peer requires of it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_gateway_initiates_with_a_responder_below_the_cbor_version_in_the_original_layout() {
+    let mut rng = TestRng::default();
+    let (accounts, gateways) = new_test_gateways(1, &mut rng).await;
+    let (gateway, peer) = (gateways[0].clone(), accounts[1].clone());
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let responder = task::spawn(respond_in_the_original_layout(listener, gateway.clone(), peer.clone()));
+
+    gateway.tcp().connect(listener_addr).await.unwrap();
+    let (message_3, binding, _stream) = responder.await.unwrap().unwrap();
+
+    assert_eq!(message_3.info.version, Event::<CurrentNetwork>::VERSION);
+    assert_eq!(message_3.info.address, accounts[0].address());
+    assert_eq!(message_3.trailer, trailer_for(&gateway));
+    assert!(message_3.signature.deserialize_blocking().unwrap().verify_bytes(&accounts[0].address(), &binding));
+
+    let address = peer.address();
+    deadline!(Duration::from_secs(5), move || gateway.connected_addresses().contains(&address));
 }

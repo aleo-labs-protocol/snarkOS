@@ -768,12 +768,13 @@ mod tests {
     fn a_member_with_many_activations_ahead_holds_back_only_the_first() {
         let Fixture { committee, addresses, dir: _dir, monitor } = setup();
         let mut heights = own_schedule().heights().to_vec();
-        heights.extend((0..150).map(|offset| H + offset));
+        let num_ahead = u32::try_from(ConsensusSchedule::MAX_VERSIONS - heights.len()).unwrap();
+        heights.extend((0..num_ahead).map(|offset| H + offset));
         monitor.record_schedule(addresses[0], Some(&ConsensusSchedule::new(heights).unwrap()));
         let connected = connected(&addresses[..2]);
 
         assert!(monitor.ensure_block_may_be_built(&committee, &connected, H).is_err());
-        for height in H + 1..H + 150 {
+        for height in H + 1..H + num_ahead {
             assert!(monitor.ensure_block_may_be_built(&committee, &connected, height).is_ok());
         }
     }

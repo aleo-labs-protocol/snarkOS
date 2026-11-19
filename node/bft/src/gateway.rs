@@ -46,6 +46,10 @@ use snarkos_node_bft_events::{
     TransmissionResponse,
     ValidatorsRequest,
     ValidatorsResponse,
+    decode_initiator_info,
+    decode_responder_info,
+    encode_initiator_info,
+    encode_responder_info,
 };
 use snarkos_node_bft_ledger_service::LedgerService;
 use snarkos_node_network::{
@@ -1876,7 +1880,8 @@ impl<N: Network> Gateway<N> {
 
         /* Message 2: receive the responder's metadata, which deliberately carries no signature. */
 
-        let ResponderInfo { info: peer_info, trailer: peer_trailer } = decode_payload(peer_addr, &noise.recv().await?)?;
+        let ResponderInfo { info: peer_info, trailer: peer_trailer } =
+            decode_responder_info(our_info.version, peer_addr, &noise.recv().await?)?;
 
         // The handshake hash at this point already commits to both ephemeral keys, the responder's
         // static key and every payload exchanged so far, so a signature over it is only valid for
@@ -1904,12 +1909,10 @@ impl<N: Network> Gateway<N> {
         let Ok(our_signature) = self.account.sign_bytes(&binding, &mut rand::rng()) else {
             return Err(ConnectError::other(anyhow!("Failed to sign the handshake binding")));
         };
-        let our_message = InitiatorInfo {
-            info: our_info,
-            signature: Data::Object(our_signature),
-            trailer: HandshakeTrailer { genesis_hash: Some(genesis_hash.to_vec()), ..HandshakeTrailer::of::<N>() },
-        };
-        noise.send(&encode_payload(&our_message)?).await?;
+        let schedule = ConsensusSchedule::of::<N>();
+        let our_message =
+            encode_initiator_info(peer_info.version, our_info, schedule, genesis_hash, Data::Object(our_signature))?;
+        noise.send(&our_message).await?;
 
         // Capture the binding for the responder's proof before the hash becomes unavailable; it
         // additionally commits to our static key and to the message we have just sent.
@@ -1994,25 +1997,28 @@ impl<N: Network> Gateway<N> {
 
         let our_info =
             PeerInfo::new(self.local_ip().port(), self.account.address(), restrictions_id, self.snarkos_sha());
-        noise
-            .send(&encode_payload(&ResponderInfo {
-                info: our_info,
-                trailer: HandshakeTrailer { genesis_hash: Some(genesis_hash.to_vec()), ..HandshakeTrailer::of::<N>() },
-            })?)
-            .await?;
+        noise.send(&encode_responder_info(hint.version, our_info, ConsensusSchedule::of::<N>(), genesis_hash)?).await?;
 
         // The binding the initiator is expected to have signed.
         let peer_binding = binding_message(HANDSHAKE_DOMAIN, Role::Initiator, &noise.handshake_hash()?);
 
         /* Message 3: the peer's authenticated metadata and its proof of identity. */
 
-        let InitiatorInfo { info: peer_info, signature: peer_signature, trailer: peer_trailer } =
-            decode_payload::<InitiatorInfo<N>>(peer_addr, &noise.recv().await?)?;
+        let message_3 = noise.recv().await?;
 
         // Our own binding additionally commits to the peer's static key and to the message it has
         // just sent, so it can only be captured after that message has been processed.
         let binding = binding_message(HANDSHAKE_DOMAIN, Role::Responder, &noise.handshake_hash()?);
         let mut noise = noise.into_transport_mode()?;
+
+        let InitiatorInfo { info: peer_info, signature: peer_signature, trailer: peer_trailer } =
+            match decode_initiator_info(our_info.version, peer_addr, &message_3) {
+                Ok(initiator_info) => initiator_info,
+                Err(error) => {
+                    warn!("{CONTEXT} Handshake with '{peer_addr}' failed ({error})");
+                    return self.reject_noise_handshake(peer_addr, noise, DisconnectReason::ProtocolViolation).await;
+                }
+            };
 
         // The cleartext hint is a claim, not a fact: reject the peer if it does not match what it
         // has now authenticated, as otherwise the hint would be a way to bypass the checks above.

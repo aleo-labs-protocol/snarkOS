@@ -5561,6 +5561,7 @@ version = "4.13.1"
 dependencies = [
  "anyhow",
  "bytes",
+ "ciborium",
  "criterion",
  "indexmap 2.14.2",
  "proptest",
