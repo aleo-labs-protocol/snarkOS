@@ -49,7 +49,7 @@ default-features = false
 [workspace.dependencies.snarkvm]
 #path = "../snarkVM"
 git = "https://github.com/aleo-labs-protocol/snarkVM.git"
-rev = "3deafe89e9cbc7dfef3fecc81b1444deb202cc5c" # agent/prune-v23-integration
+rev = "5a828b7834a8c6d009e53d2945f73d4980ad8958" # agent/compaction-v23-integration
 #version = "=4.12.0"
 default-features = false
 
