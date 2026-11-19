@@ -22,6 +22,7 @@ use snarkvm::{
     utilities::io_error,
 };
 
+use bytes::Bytes;
 use std::borrow::Cow;
 
 /// Whether a block response carries the requested blocks, and if not, why.
@@ -97,7 +98,9 @@ impl<N: Network> BlockResponse<N> {
 
     /// Constructs a block response without blocks, which explains why with `status`.
     pub fn unavailable(request: BlockRequest, status: BlockResponseStatus) -> Self {
-        Self { request, status, blocks: Data::Object(DataBlocks(vec![])), latest_consensus_version: None }
+        // The serialized empty `DataBlocks`, which is a block count of 0.
+        let blocks = Data::Buffer(Bytes::from_static(&[0]));
+        Self { request, status, blocks, latest_consensus_version: None }
     }
 }
 
@@ -418,6 +421,10 @@ pub mod prop_tests {
                     .concat();
             assert_eq!(bytes, expected);
         }
+
+        // A status reply has no payload left to serialize.
+        let response = BlockResponse::<CurrentNetwork>::unavailable(request, cases[0].0);
+        assert!(!crate::Event::BlockResponse(response).has_unserialized_payload());
 
         // An unknown tag is rejected.
         let mut bytes = BlockResponse::<CurrentNetwork>::unavailable(request, cases[0].0).to_bytes_le().unwrap();

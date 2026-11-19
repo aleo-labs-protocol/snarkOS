@@ -123,7 +123,7 @@ struct PeerLocators<N: Network> {
     locators_at: Instant,
     /// The oldest block the peer serves, as it reported in a `Ping` or a `Pruned` reply.
     floor: u32,
-    /// The latest height the peer reported in a `NotYet` reply to a request sent since its
+    /// The highest latest height the peer reported in a `NotYet` reply to a request sent since its
     /// locators last changed.
     tip_cap: Option<u32>,
 }
@@ -654,9 +654,6 @@ impl<N: Network> BlockSync<N> {
                  new block requests to send"
                 );
             }
-            if num_outstanding == 0 {
-                self.warn_if_stuck();
-            }
         } else {
             let chunk_size = DataBlocks::<N>::MAXIMUM_NUMBER_OF_BLOCKS as usize;
             for (block_requests, sync_peers) in batches {
@@ -671,6 +668,8 @@ impl<N: Network> BlockSync<N> {
                 }
             }
         }
+
+        self.warn_if_stuck();
     }
 
     /// Inserts a new block response from the given peer IP.
@@ -742,40 +741,32 @@ impl<N: Network> BlockSync<N> {
     /// Handles the peer's reply that it cannot serve `request`, and releases the peer's requests
     /// in the range for re-issue.
     ///
-    /// A `Pruned` reply raises the peer's floor, and also releases its requests below the floor. A
-    /// `NotYet` reply caps the peer's tip, and also releases its requests above the cap, if the
+    /// A `Pruned` reply raises the peer's floor. A `NotYet` reply raises the peer's tip cap, if the
     /// request was sent after the peer's locators last changed; otherwise the reply may predate
-    /// them.
+    /// them. Replies carry no request ID, so a late reply to a request that was issued again is
+    /// judged by when the new request was sent.
     pub fn insert_block_unavailable(&self, peer_ip: SocketAddr, request: BlockRequest, status: BlockResponseStatus) {
         let BlockRequest { start_height, end_height } = request;
         debug!("Peer '{peer_ip}' cannot serve blocks {start_height}..{end_height} ({status:?})");
 
-        // Hold `prepare_requests_lock`, so that a chunk assigned to the peer under its old floor
-        // or tip is either released here or assigned after the change.
-        let _prepare_requests_lock = self.prepare_requests_lock.lock();
         let sent_at = self
             .requests
             .read()
             .get(&start_height)
             .filter(|request| request.sync_ips().contains(&peer_ip))
             .map(|request| request.timestamp);
-        let mut released = start_height..end_height;
         if let Some(peer) = self.locators.write().get_mut(&peer_ip) {
             match status {
                 BlockResponseStatus::Blocks => {}
-                BlockResponseStatus::Pruned { oldest_retained } => {
-                    peer.floor = peer.floor.max(oldest_retained);
-                    released = 0..end_height.max(peer.floor);
-                }
+                BlockResponseStatus::Pruned { oldest_retained } => peer.floor = peer.floor.max(oldest_retained),
                 BlockResponseStatus::NotYet { latest_height } => {
                     if sent_at.is_some_and(|sent_at| peer.locators_at <= sent_at) {
-                        peer.tip_cap = Some(latest_height);
-                        released = start_height.min(latest_height.saturating_add(1))..u32::MAX;
+                        peer.tip_cap = Some(peer.tip_cap.map_or(latest_height, |cap| cap.max(latest_height)));
                     }
                 }
             }
         }
-        self.remove_block_requests_to_peer_in(&peer_ip, released);
+        self.remove_block_requests_to_peer_in(&peer_ip, start_height..end_height);
     }
 
     /// Returns the next block for the given `next_height` if the request is complete,
@@ -1325,20 +1316,23 @@ impl<N: Network> BlockSync<N> {
     /// floor above that block, and these peers are a strict majority of the peers that sent
     /// locators. Unless the node only connects to trusted peers, at least `MINIMUM_NUMBER_OF_PEERS`
     /// peers must have sent locators, so that a lone peer cannot claim a far-ahead tip.
-    fn is_stuck_below_peer_floors(&self) -> bool {
+    pub fn is_stuck_below_peer_floors(&self) -> bool {
         let height = self.retention_height();
-        let next_height = height.saturating_add(1);
-        // A request for the next block, or one still awaiting a response, can still progress.
-        // Answered requests above a gap do not count.
-        let can_progress = {
-            let requests = self.requests.read();
-            requests.contains_key(&next_height)
-                || requests.values().any(|r| r.response.is_none() && !r.sync_ips().is_empty())
-        };
-        if can_progress {
-            return false;
-        }
+        !self.can_progress(height) && self.peers_ahead_serve_from_above(height)
+    }
 
+    /// Returns `true` if a request can still progress from `height`: one for the next block, or
+    /// one still awaiting a response. Answered requests above a gap do not count.
+    fn can_progress(&self, height: u32) -> bool {
+        let requests = self.requests.read();
+        requests.contains_key(&height.saturating_add(1))
+            || requests.values().any(|r| r.response.is_none() && !r.sync_ips().is_empty())
+    }
+
+    /// Returns `true` if the peers ahead of `height` report floors above `height + 1`, and satisfy
+    /// the majority and minimum-peer rules of [`Self::is_stuck_below_peer_floors`].
+    fn peers_ahead_serve_from_above(&self, height: u32) -> bool {
+        let next_height = height.saturating_add(1);
         let locators = self.locators.read();
         let mut num_ahead = 0;
         for peer in locators.values() {
@@ -1354,18 +1348,21 @@ impl<N: Network> BlockSync<N> {
         num_ahead * 2 > num_peers && (self.trusted_peers_only || num_peers >= MINIMUM_NUMBER_OF_PEERS)
     }
 
-    /// Warns, at most every `STUCK_SYNC_WARNING_INTERVAL`, that block sync cannot progress.
+    /// Warns, at most every `STUCK_SYNC_WARNING_INTERVAL`, that block sync cannot progress. Once a
+    /// request can progress again, the next stall is reported at once.
     fn warn_if_stuck(&self) {
+        let height = self.retention_height();
         let mut last_warning = self.last_stuck_warning.lock();
-        if last_warning.is_some_and(|at| at.elapsed() < STUCK_SYNC_WARNING_INTERVAL) {
-            return;
-        }
-        if self.is_stuck_below_peer_floors() {
+        if self.can_progress(height) {
+            *last_warning = None;
+        } else if last_warning.is_none_or(|at| at.elapsed() >= STUCK_SYNC_WARNING_INTERVAL)
+            && self.peers_ahead_serve_from_above(height)
+        {
             *last_warning = Some(Instant::now());
             warn!(
                 "Block sync cannot progress: the peers ahead of this node no longer serve block {}. \
                 Connect to a peer that serves it with `--peers`, or restore a ledger snapshot.",
-                self.retention_height().saturating_add(1)
+                height.saturating_add(1)
             );
         }
     }
@@ -1753,25 +1750,39 @@ impl<N: Network> BlockSync<N> {
             // The height of the common ancestor shared by all selected peers.
             let mut min_common_ancestor = *peer_height;
 
-            // The peers we will synchronize from.
-            // As the previous iteration did not succeed, restart with the next candidate peers.
-            let mut sync_peers = vec![(*peer_ip, peer_locators.clone())];
-
-            // Try adding other peers consistent with this one to the sync peer set.
+            // The other peers consistent with this one, and their heights.
+            let mut others = vec![];
             for (other_ip, (other_locators, other_height)) in candidate_locators.iter().skip(idx + 1) {
                 // Check if these two peers have a common ancestor above the latest ledger height.
                 if let Some(common_ancestor) = self.common_ancestors.read().get(&PeerPair(*peer_ip, *other_ip)) {
                     // If so, then check that their block locators are consistent.
                     if *common_ancestor > latest_ledger_height && peer_locators.is_consistent_with(other_locators) {
-                        // Lower the minimum common ancestor to their common ancestor and to the other
-                        // peer's height, so that every selected peer serves the whole range.
-                        min_common_ancestor = min_common_ancestor.min(*common_ancestor).min(*other_height);
-
-                        // Add the other peer to the list of sync peers.
-                        sync_peers.push((*other_ip, other_locators.clone()));
+                        // If their common ancestor is less than the minimum common ancestor, then update it.
+                        min_common_ancestor = min_common_ancestor.min(*common_ancestor);
+                        others.push((*other_ip, other_locators, *other_height));
                     }
                 }
             }
+
+            // If fewer than `threshold_to_request` peers, counting this one, serve up to the minimum
+            // common ancestor, lower it to the height that many peers serve.
+            if others.iter().filter(|(_, _, height)| *height >= min_common_ancestor).count() + 1 < threshold_to_request
+            {
+                let mut heights: Vec<u32> = others.iter().map(|(_, _, height)| *height).collect();
+                heights.sort_unstable_by(|a, b| b.cmp(a));
+                if let Some(height) = heights.get(threshold_to_request.saturating_sub(2)) {
+                    min_common_ancestor = min_common_ancestor.min(*height);
+                }
+            }
+
+            // The peers we will synchronize from: this one, and the others that serve the whole range.
+            let mut sync_peers = vec![(*peer_ip, peer_locators.clone())];
+            sync_peers.extend(
+                others
+                    .into_iter()
+                    .filter(|(_, _, height)| *height >= min_common_ancestor)
+                    .map(|(other_ip, other_locators, _)| (other_ip, other_locators.clone())),
+            );
 
             // If we have enough sync peers above the latest ledger height, finish and return them.
             if min_common_ancestor > latest_ledger_height && sync_peers.len() >= threshold_to_request {
@@ -2766,15 +2777,15 @@ mod tests {
         insert_requests_to(&sync, peer_a, 1..11);
         add_peers(&sync, 2, 1, 20, 0);
 
-        // The reply releases the chunk, and the peer's other requests below its floor.
+        // The reply releases the chunk only.
         let request = BlockRequest::new(1, 6).unwrap();
         sync.insert_block_unavailable(peer_a, request, pruned(8));
         assert_eq!(floor_of(&sync, peer_a), Some(8));
-        assert_eq!(sync.failed_requests.lock().keys().copied().collect::<Vec<_>>(), (1..8).collect::<Vec<_>>());
-        assert_eq!(sync.requests.read().keys().copied().collect::<Vec<_>>(), (8..11).collect::<Vec<_>>());
+        assert_eq!(sync.failed_requests.lock().keys().copied().collect::<Vec<_>>(), (1..6).collect::<Vec<_>>());
+        assert_eq!(sync.requests.read().keys().copied().collect::<Vec<_>>(), (6..11).collect::<Vec<_>>());
 
         let (requests, sync_peers) = sync.prepare_block_requests().pop().unwrap();
-        assert_eq!(heights_of(&requests), (1..8).collect::<Vec<_>>());
+        assert_eq!(heights_of(&requests), (1..6).collect::<Vec<_>>());
         assert_eq!(sync_peers.keys().copied().collect::<Vec<_>>(), vec![peer_b]);
         assert!(sync.failed_requests.lock().is_empty());
     }
@@ -2785,15 +2796,14 @@ mod tests {
     fn test_not_yet_caps_peer_tip() {
         let sync = sample_sync_at_height(0);
         let peer_ip = sample_peer_ip(1);
-        add_peers(&sync, 1, 1, 20, 0);
-        insert_requests_to(&sync, peer_ip, 1..16);
+        add_peers(&sync, 1, 1, 10, 0);
+        insert_requests_to(&sync, peer_ip, 1..11);
 
-        // The reply releases the chunk, and the peer's other requests above its cap.
+        // The reply releases the chunk only.
         sync.insert_block_unavailable(peer_ip, BlockRequest::new(6, 11).unwrap(), not_yet(7));
         assert_eq!(sync.requests.read().keys().copied().collect::<Vec<_>>(), (1..6).collect::<Vec<_>>());
-        insert_requests_to(&sync, sample_peer_ip(2), 16..21);
         assert_eq!(tip_cap_of(&sync, peer_ip), Some(7));
-        assert_eq!(sync.failed_requests.lock().len(), 10);
+        assert_eq!(sync.failed_requests.lock().len(), 5);
 
         let (requests, sync_peers) = sync.prepare_block_requests().pop().unwrap();
         assert_eq!(heights_of(&requests), vec![6, 7]);
@@ -2801,7 +2811,12 @@ mod tests {
         // Once those are outstanding, no peer serves the rest.
         insert_requests_to(&sync, peer_ip, 6..8);
         assert!(sync.prepare_block_requests().is_empty());
-        assert_eq!(sync.failed_requests.lock().keys().copied().collect::<Vec<_>>(), (8..16).collect::<Vec<_>>());
+        assert_eq!(sync.failed_requests.lock().keys().copied().collect::<Vec<_>>(), vec![8, 9, 10]);
+
+        // A lower cap from another reply since the same locators does not lower it.
+        insert_requests_to(&sync, peer_ip, 8..9);
+        sync.insert_block_unavailable(peer_ip, BlockRequest::new(8, 9).unwrap(), not_yet(6));
+        assert_eq!(tip_cap_of(&sync, peer_ip), Some(7));
     }
 
     /// Tests that a prepared chunk is sent only to peers that serve all of it.
@@ -3035,27 +3050,79 @@ mod tests {
         assert_eq!(sync.select_sync_ips(&sync_peers, 1_004..end, max_num_sync_ips).unwrap().len(), 1);
     }
 
-    /// Tests that a chunk is skipped when a peer it was prepared for no longer serves it, and that
-    /// it is prepared again at once without that peer.
-    #[test]
-    fn test_floor_raised_between_prepare_and_send() {
+    /// A communication service that records the block requests it sends.
+    #[derive(Default)]
+    struct RecordingService {
+        sent: std::sync::Mutex<Vec<(SocketAddr, u32, u32)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CommunicationService for RecordingService {
+        type Message = (u32, u32);
+
+        fn prepare_block_request(start: u32, end: u32) -> Self::Message {
+            (start, end)
+        }
+
+        async fn send(
+            &self,
+            peer_ip: SocketAddr,
+            (start, end): Self::Message,
+        ) -> Option<tokio::sync::oneshot::Receiver<std::io::Result<()>>> {
+            self.sent.lock().unwrap().push((peer_ip, start, end));
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            sender.send(Ok(())).unwrap();
+            Some(receiver)
+        }
+    }
+
+    /// Tests that a chunk is not sent when a peer it was prepared for no longer serves it, and that
+    /// it is queued and prepared again at once without that peer.
+    #[tokio::test]
+    async fn test_floor_raised_between_prepare_and_send() {
         let sync = sample_sync_at_height(1_000);
         let (peer_a, peer_b) = (sample_peer_ip(1), sample_peer_ip(2));
         add_peers(&sync, 1, 2, 1_100, 0);
         let (requests, sync_peers) = sync.prepare_block_requests().pop().unwrap();
-        let (_, (_, _, max_num_sync_ips)) = requests[0];
-        assert_eq!(sync.select_sync_ips(&sync_peers, 1_001..1_006, max_num_sync_ips).unwrap().len(), 2);
+        let chunk = &requests[..DataBlocks::<CurrentNetwork>::MAXIMUM_NUMBER_OF_BLOCKS as usize];
+        assert_eq!(heights_of(chunk), (1_001..1_006).collect::<Vec<_>>());
 
-        // Peer A reports a floor above the batch before it is sent.
+        // Peer A reports a floor above the chunk before it is sent.
         insert_requests_to(&sync, peer_a, 1_090..1_091);
         sync.insert_block_unavailable(peer_a, BlockRequest::new(1_090, 1_091).unwrap(), pruned(1_095));
-        assert!(sync.select_sync_ips(&sync_peers, 1_001..1_006, max_num_sync_ips).is_none());
+        let _ = tokio::time::timeout(Duration::ZERO, sync.wait_for_peer_update()).await;
 
-        let batches = sync.prepare_block_requests();
-        assert!(!batches.is_empty());
-        for (_, sync_peers) in batches {
-            assert_eq!(sync_peers.keys().copied().collect::<Vec<_>>(), vec![peer_b]);
-            assert_eq!(sync.select_sync_ips(&sync_peers, 1_001..1_006, max_num_sync_ips).unwrap().len(), 1);
-        }
+        let service = RecordingService::default();
+        assert!(!sync.send_block_requests(&service, &sync_peers, chunk).await);
+        assert!(service.sent.lock().unwrap().is_empty());
+        assert!((1_001..1_006).all(|height| sync.failed_requests.lock().contains_key(&height)));
+        tokio::time::timeout(Duration::from_secs(1), sync.wait_for_peer_update()).await.unwrap();
+
+        let (requests, sync_peers) = sync.prepare_block_requests().into_iter().next().unwrap();
+        assert_eq!(heights_of(&requests), (1_001..1_006).collect::<Vec<_>>());
+        assert_eq!(sync_peers.keys().copied().collect::<Vec<_>>(), vec![peer_b]);
+        assert!(sync.send_block_requests(&service, &sync_peers, &requests).await);
+        assert_eq!(*service.sent.lock().unwrap(), vec![(peer_b, 1_001, 1_006)]);
+    }
+
+    /// Tests that a capped candidate does not shorten the range when enough other peers serve all
+    /// of it.
+    #[test]
+    fn test_capped_candidate_does_not_shrink_range() {
+        let sync = sample_sync_at_height(1_000);
+        let peer_a = sample_peer_ip(1);
+        add_peers(&sync, 1, 4, 1_100, 0);
+        insert_requests_to(&sync, peer_a, 1_001..1_006);
+        sync.insert_block_unavailable(peer_a, BlockRequest::new(1_001, 1_006).unwrap(), not_yet(1_003));
+
+        let (requests, sync_peers) = sync.prepare_block_requests().pop().unwrap();
+        assert_eq!(heights_of(&requests), (1_001..1_006).collect::<Vec<_>>());
+        assert_eq!(sync_peers.len(), REDUNDANCY_FACTOR);
+        assert!(!sync_peers.contains_key(&peer_a));
+
+        // Requests that are not re-issued run past peer A's cap.
+        insert_requests_to(&sync, sample_peer_ip(2), 1_001..1_006);
+        let (requests, _) = sync.prepare_block_requests().pop().unwrap();
+        assert!(requests.last().unwrap().0 > 1_050);
     }
 }

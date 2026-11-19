@@ -143,14 +143,14 @@ macro_rules! with_data_payload {
             Self::BatchPropose(event) => $f(&mut event.batch_header),
             Self::BatchCertified(event) => $f(&mut event.certificate),
             Self::PrimaryPing(event) => $f(&mut event.primary_certificate),
-            Self::BlockResponse(event) if event.status == BlockResponseStatus::Blocks => $f(&mut event.blocks),
+            Self::BlockResponse(event) => $f(&mut event.blocks),
             Self::ChallengeResponse(event) => $f(&mut event.signature),
             Self::TransmissionResponse(event) => match &mut event.transmission {
                 Transmission::Solution(solution) => $f(solution),
                 Transmission::Transaction(transaction) => $f(transaction),
                 Transmission::Ratification => $default,
             },
-            // The remaining events, and status replies, carry no `Data` payload.
+            // The remaining events carry no `Data` payload.
             //
             // Note that `CertificateResponse` is in this list only because its certificate is held
             // directly rather than behind a `Data`, unlike every other certificate-bearing event.
@@ -158,7 +158,6 @@ macro_rules! with_data_payload {
             // task, and cannot benefit from either of the methods below until that is changed.
             Self::BatchSignature(_)
             | Self::BlockRequest(_)
-            | Self::BlockResponse(_)
             | Self::CertificateRequest(_)
             | Self::CertificateResponse(_)
             | Self::ChallengeRequest(_)
