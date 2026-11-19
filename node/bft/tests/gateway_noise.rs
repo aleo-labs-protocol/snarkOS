@@ -41,6 +41,7 @@ use snarkos_node_bft_events::{
     ValidatorsRequest,
 };
 use snarkos_node_network::{
+    Peer,
     PeerPoolHandling,
     noise::{HandshakeProtocol, NoiseSession, Role, binding_message, detect_handshake_protocol, write_noise_magic},
 };
@@ -726,10 +727,31 @@ async fn a_timed_out_outbound_handshake_does_not_leave_the_peer_connecting() {
         }
     });
 
-    let result = timeout(handshake_timeout_with_margin(), gateway.tcp().connect(silent_addr)).await;
-    assert!(matches!(result, Ok(Err(_))), "the handshake should have timed out: {result:?}");
+    // A validator was seen at this address before.
+    let last_known_aleo_addr = Account::<CurrentNetwork>::new(&mut rng).unwrap().address();
+    let mut candidate = Peer::new_candidate(silent_addr, false);
+    if let Peer::Candidate(peer) = &mut candidate {
+        peer.last_known_aleo_addr = Some(last_known_aleo_addr);
+    }
+    gateway.peer_pool().write().insert(silent_addr, candidate);
 
-    assert!(!gateway.is_connecting(silent_addr), "the timed-out peer is still marked as connecting");
+    let dial = task::spawn({
+        let gateway = gateway.clone();
+        async move { gateway.tcp().connect(silent_addr).await }
+    });
+    let g = gateway.clone();
+    deadline!(Duration::from_secs(5), move || g.is_connecting(silent_addr));
+
+    let result = timeout(handshake_timeout_with_margin(), dial).await.expect("the handshake never timed out").unwrap();
+    assert!(
+        matches!(&result, Err(ConnectError::IoError(e)) if e.kind() == io::ErrorKind::TimedOut),
+        "the handshake should have timed out: {result:?}"
+    );
+
+    match gateway.peer_pool().read().get(&silent_addr) {
+        Some(Peer::Candidate(peer)) => assert_eq!(peer.last_known_aleo_addr, Some(last_known_aleo_addr)),
+        peer => panic!("the timed-out peer should be a candidate again, found {peer:?}"),
+    }
     match gateway.connect(silent_addr) {
         Err(ConnectError::AlreadyConnecting { .. }) => panic!("a timed-out peer can never be dialed again"),
         Ok(handle) => handle.abort(),

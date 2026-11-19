@@ -1816,15 +1816,14 @@ impl<N: Network> Gateway<N> {
         genesis_hash: [u8; 32],
         stream: &'a mut TcpStream,
     ) -> Result<(PeerInfo<N>, Option<ConsensusSchedule>, ConnectingPeerGuard<'a, N>), ConnectError> {
-        // Note who answered here last time, before the pool entry becomes a connecting one and stops
-        // carrying it.
-        let expected_address = match self.peer_pool.read().get(&peer_addr) {
-            Some(Peer::Candidate(peer)) => peer.last_known_aleo_addr,
-            _ => None,
-        };
-
         // Introduce the peer into the peer pool.
         let connecting = self.add_connecting_peer(peer_addr)?;
+
+        // Note who answered here last time.
+        let expected_address = match self.peer_pool.read().get(&peer_addr) {
+            Some(Peer::Connecting(peer)) => peer.last_known_aleo_addr,
+            _ => None,
+        };
 
         let mut noise = NoiseSession::new(stream, Role::Initiator)?;
         let our_info =

@@ -21,13 +21,14 @@ use common::{node::*, test_peer::TestPeer};
 
 use snarkos_node::{Client, Prover, Validator};
 use snarkos_node_network::PeerPoolHandling;
-use snarkos_node_tcp::{ConnectError, P2P};
+use snarkos_node_tcp::{ConnectError, P2P, protocols::Handshake};
 use snarkvm::prelude::{MainnetV0 as CurrentNetwork, store::helpers::memory::ConsensusMemory};
 
 use pea2pea::Pea2Pea;
 
-use std::{net::SocketAddr, time::Duration};
-use tokio::time::sleep;
+use deadline::deadline;
+use std::{io, net::SocketAddr, time::Duration};
+use tokio::time::{sleep, timeout};
 
 // Trait to unify Pea2Pea and P2P traits.
 #[async_trait::async_trait]
@@ -289,6 +290,11 @@ async fn duplicate_connection_attempts() {
     assert_eq!(node2.router().number_of_connected_peers(), 1);
 }
 
+/// How long to wait for a stalled handshake to time out.
+fn handshake_timeout_with_margin<H: Handshake>(_node: &H) -> Duration {
+    Duration::from_millis(H::TIMEOUT_MS + 3_000)
+}
+
 /// A peer that accepts the connection and then never answers holds the router's handshake until it
 /// times out. Once it has, the peer must be dialable again; a peer stuck as connecting is never
 /// dialed again and turns away every inbound handshake.
@@ -306,8 +312,16 @@ async fn a_timed_out_handshake_does_not_leave_the_peer_connecting() {
         }
     });
 
-    let result = node.router().connect(silent_addr).unwrap().await.unwrap();
-    assert!(result.is_err(), "the handshake should have timed out");
+    let dial = node.router().connect(silent_addr).unwrap();
+    let router = node.router().clone();
+    deadline!(Duration::from_secs(5), move || router.is_connecting(silent_addr));
+
+    let result =
+        timeout(handshake_timeout_with_margin(&node), dial).await.expect("the handshake never timed out").unwrap();
+    assert!(
+        matches!(&result, Err(ConnectError::IoError(e)) if e.kind() == io::ErrorKind::TimedOut),
+        "the handshake should have timed out: {result:?}"
+    );
 
     assert!(!node.router().is_connecting(silent_addr), "the timed-out peer is still marked as connecting");
     assert!(!matches!(node.router().connect(silent_addr), Err(ConnectError::AlreadyConnecting { .. })));

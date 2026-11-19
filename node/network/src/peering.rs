@@ -767,6 +767,32 @@ mod tests {
     }
 
     #[test]
+    fn test_connecting_peer_keeps_its_last_known_aleo_addr() {
+        let pool = MockPeerPool::<CurrentNetwork>::new();
+        let mut rng = TestRng::default();
+        let listener_addr = SocketAddr::from(([192, 0, 2, 1], 4000));
+        let aleo_addr = Address::<CurrentNetwork>::new(rng.random());
+
+        let mut candidate = Peer::new_candidate(listener_addr, false);
+        if let Peer::Candidate(peer) = &mut candidate {
+            peer.last_known_aleo_addr = Some(aleo_addr);
+        }
+        pool.peer_pool().write().insert(listener_addr, candidate);
+
+        let connecting = pool.add_connecting_peer(listener_addr).unwrap();
+        match pool.peer_pool().read().get(&listener_addr) {
+            Some(Peer::Connecting(peer)) => assert_eq!(peer.last_known_aleo_addr, Some(aleo_addr)),
+            peer => panic!("expected a connecting peer, found {peer:?}"),
+        }
+
+        drop(connecting);
+        match pool.peer_pool().read().get(&listener_addr) {
+            Some(Peer::Candidate(peer)) => assert_eq!(peer.last_known_aleo_addr, Some(aleo_addr)),
+            peer => panic!("expected a candidate peer, found {peer:?}"),
+        }
+    }
+
+    #[test]
     fn test_number_of_connected_validators() {
         let pool = MockPeerPool::<CurrentNetwork>::new();
         let mut rng = TestRng::default();

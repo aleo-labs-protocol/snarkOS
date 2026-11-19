@@ -25,14 +25,14 @@ pub enum Peer<N: Network> {
     /// A candidate peer that's currently not connected to.
     Candidate(CandidatePeer<N>),
     /// A peer that's currently being connected to (the handshake is in progress).
-    Connecting(ConnectingPeer),
+    Connecting(ConnectingPeer<N>),
     /// A fully connected (post-handshake) peer.
     Connected(ConnectedPeer<N>),
 }
 
 /// A connecting peer.
 #[derive(Clone, Debug)]
-pub struct ConnectingPeer {
+pub struct ConnectingPeer<N: Network> {
     /// The listening address of a connecting peer.
     pub listener_addr: SocketAddr,
     /// Indicates whether the peer is considered trusted.
@@ -41,6 +41,9 @@ pub struct ConnectingPeer {
     pub last_connection_attempt: Option<Instant>,
     /// The total number of connection attempts, since the peer was last connected.
     pub total_connection_attempts: u32,
+    /// The last known Aleo address of this peer, carried over from the candidate it was promoted
+    /// from, and back to the candidate if the handshake fails.
+    pub last_known_aleo_addr: Option<Address<N>>,
 }
 
 /// A candidate peer.
@@ -152,6 +155,7 @@ impl<N: Network> Peer<N> {
             trusted,
             last_connection_attempt: None,
             total_connection_attempts: 0,
+            last_known_aleo_addr: None,
         })
     }
 
@@ -160,14 +164,16 @@ impl<N: Network> Peer<N> {
         let listener_addr = self.listener_addr();
         let trusted = self.is_trusted();
 
-        let (last_connection_attempt, total_connection_attempts) = match self {
-            Self::Candidate(peer) => (peer.last_connection_attempt, peer.total_connection_attempts),
+        let (last_connection_attempt, total_connection_attempts, last_known_aleo_addr) = match self {
+            Self::Candidate(peer) => {
+                (peer.last_connection_attempt, peer.total_connection_attempts, peer.last_known_aleo_addr)
+            }
             Self::Connecting(_) | Self::Connected(_) => {
                 warn!(
                     "Peer '{listener_addr}' is being promoted to Connecting, but is {}",
                     if self.is_connected() { "already Connected" } else { "already Connecting" }
                 );
-                (None, 0)
+                (None, 0, None)
             }
         };
 
@@ -176,6 +182,7 @@ impl<N: Network> Peer<N> {
             trusted,
             last_connection_attempt,
             total_connection_attempts,
+            last_known_aleo_addr,
         });
     }
 
@@ -222,8 +229,9 @@ impl<N: Network> Peer<N> {
     /// Demote a peer to candidate status, marking it as disconnected.
     pub fn downgrade_to_candidate(&mut self, listener_addr: SocketAddr) {
         let last_known_aleo_addr = match self {
+            Self::Candidate(p) => p.last_known_aleo_addr,
+            Self::Connecting(p) => p.last_known_aleo_addr,
             Self::Connected(p) => Some(p.aleo_addr),
-            _ => None,
         };
 
         // Preserve the connection attempt info if the handshake didn't succeed.
