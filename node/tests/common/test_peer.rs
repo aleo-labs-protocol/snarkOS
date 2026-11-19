@@ -23,7 +23,10 @@ use snarkos_node_router::{
 use snarkos_node_tcp::ConnectError;
 use snarkvm::{
     console::network::{MainnetV0 as CurrentNetwork, Network},
-    ledger::{block::Block, narwhal::Data},
+    ledger::{
+        block::{Block, Header},
+        narwhal::Data,
+    },
     prelude::{Address, Field, FromBytes, TestRng},
     utilities::into_io_error,
 };
@@ -71,6 +74,8 @@ pub struct TestPeer {
     account: Account<CurrentNetwork>,
     /// The message version the peer advertises in the handshake.
     version: u32,
+    /// The genesis header the peer presents in the handshake.
+    genesis_header: Header<CurrentNetwork>,
     received_messages: Arc<Mutex<Vec<Message<CurrentNetwork>>>>,
 }
 
@@ -99,6 +104,17 @@ impl TestPeer {
 
     /// Returns a peer that advertises message version `version` in the handshake.
     pub async fn with_version(node_type: NodeType, account: Account<CurrentNetwork>, version: u32) -> Self {
+        Self::with_genesis(node_type, account, version, *sample_genesis_block().header()).await
+    }
+
+    /// Returns a peer that advertises message version `version` and presents `genesis_header` in the
+    /// handshake.
+    pub async fn with_genesis(
+        node_type: NodeType,
+        account: Account<CurrentNetwork>,
+        version: u32,
+        genesis_header: Header<CurrentNetwork>,
+    ) -> Self {
         let peer = Self {
             node: Node::new(Config {
                 max_connections: 200,
@@ -111,6 +127,7 @@ impl TestPeer {
             node_type,
             account,
             version,
+            genesis_header,
             received_messages: Default::default(),
         };
 
@@ -171,7 +188,7 @@ impl TestPeer {
         let mut framed = Framed::new(stream, MessageCodec::<CurrentNetwork>::default());
 
         // Retrieve the genesis block header.
-        let genesis_header = *sample_genesis_block().header();
+        let genesis_header = self.genesis_header;
         // Retrieve the restrictions ID.
         let restrictions_id = Field::<CurrentNetwork>::from_str(
             "7562506206353711030068167991213732850758501012603348777370400520506564970105field",
