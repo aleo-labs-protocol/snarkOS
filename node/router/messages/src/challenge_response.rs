@@ -58,12 +58,13 @@ impl<N: Network> FromBytes for ChallengeResponse<N> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz-helpers"))]
 pub mod prop_tests {
-    use crate::ChallengeResponse;
+    #![cfg_attr(not(test), allow(unused_imports))]
+    use crate::{ChallengeResponse, samples::sample_genesis_block};
     use snarkvm::{
         console::prelude::{FromBytes, ToBytes},
-        ledger::{narwhal::Data, test_helpers::sample_genesis_block},
+        ledger::narwhal::Data,
         prelude::{Field, PrivateKey, Signature, block::Header},
         utilities::rand::{TestRng, Uniform},
     };

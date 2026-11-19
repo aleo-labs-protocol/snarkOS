@@ -34,11 +34,10 @@ use snarkvm::{
         TestRng,
         VM,
         block::Block,
-        store::{ConsensusStore, helpers::memory::ConsensusMemory},
+        store::{ConsensusStore, StorageMode, helpers::memory::ConsensusMemory},
     },
 };
 
-use aleo_std::StorageMode;
 use deadline::deadline;
 use pea2pea::{Pea2Pea, protocols::Writing};
 use std::{sync::Arc, time::Duration};

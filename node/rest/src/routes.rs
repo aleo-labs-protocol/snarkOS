@@ -18,7 +18,7 @@ use snarkos_node_network::PeerPoolHandling;
 use snarkos_node_router::messages::UnconfirmedSolution;
 use snarkos_node_sync::{BftSyncMode, RangePruning, range_may_be_pruned};
 use snarkvm::{
-    ledger::puzzle::Solution,
+    ledger::{puzzle::Solution, store::aleo_ledger_dir},
     prelude::{
         Address,
         ConsensusVersion,
@@ -39,7 +39,6 @@ use snarkvm::{
 
 use axum::{Json, extract::rejection::JsonRejection};
 
-use aleo_std::aleo_ledger_dir;
 use anyhow::{Context, anyhow};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -646,7 +645,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         }
     }
 
-    /// GET /<network>/sync/status
+    /// GET /<network>/sync/status (deprecated alias: /sync_status)
     pub(crate) async fn get_sync_status(State(rest): State<Self>) -> Result<ErasedJson, RestError> {
         // Get the CDN height (if we are syncing from a CDN)
         let (cdn_sync, cdn_height) = if let Some(cdn_sync) = &rest.cdn_sync {
@@ -1135,17 +1134,17 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         }
     }
 
-    /// GET /<network>/peers/count (alias: /connections/p2p/count)
+    /// GET /<network>/connections/p2p/count (deprecated alias: /peers/count)
     pub(crate) async fn get_peers_count(State(rest): State<Self>) -> ErasedJson {
         ErasedJson::new(rest.routing.router().number_of_connected_peers())
     }
 
-    /// GET /<network>/peers/all (alias: /connections/p2p/all)
+    /// GET /<network>/connections/p2p/all (deprecated alias: /peers/all)
     pub(crate) async fn get_peers_all(State(rest): State<Self>) -> ErasedJson {
         ErasedJson::new(rest.routing.router().connected_peers())
     }
 
-    /// GET /<network>/peers/all/metrics (alias: /connections/p2p/all/metrics)
+    /// GET /<network>/connections/p2p/all/metrics (deprecated alias: /peers/all/metrics)
     pub(crate) async fn get_peers_all_metrics(State(rest): State<Self>) -> ErasedJson {
         ErasedJson::new(rest.routing.router().connected_metrics())
     }

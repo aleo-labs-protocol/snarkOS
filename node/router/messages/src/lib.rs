@@ -57,6 +57,9 @@ pub use puzzle_request::PuzzleRequest;
 mod puzzle_response;
 pub use puzzle_response::PuzzleResponse;
 
+#[cfg(any(test, feature = "fuzz-helpers"))]
+mod samples;
+
 mod unconfirmed_solution;
 pub use unconfirmed_solution::UnconfirmedSolution;
 
@@ -64,6 +67,28 @@ mod unconfirmed_transaction;
 pub use unconfirmed_transaction::UnconfirmedTransaction;
 
 pub use snarkos_node_bft_events::DataBlocks;
+
+/// Proptest strategies for every message type, re-exported so callers outside
+/// this crate can reach them.
+///
+/// They live in per-module `prop_tests` blocks inside private modules, which
+/// makes them invisible from anywhere else however the modules are gated. The
+/// consumer is the fuzzing corpus seeder: a mutator starting from nothing
+/// spends nearly every execution failing the version byte at the head of a
+/// reader, so seeding from structurally valid messages is worth more than any
+/// amount of mutator tuning.
+#[cfg(any(test, feature = "fuzz-helpers"))]
+pub mod generators {
+    pub use crate::{
+        challenge_request::prop_tests as challenge_request,
+        challenge_response::prop_tests as challenge_response,
+        peer_response::prop_tests as peer_response,
+        ping::prop_tests as ping,
+        puzzle_response::prop_tests as puzzle_response,
+        unconfirmed_solution::prop_tests as unconfirmed_solution,
+        unconfirmed_transaction::prop_tests as unconfirmed_transaction,
+    };
+}
 
 use snarkos_node_sync_locators::BlockLocators;
 use snarkvm::prelude::{

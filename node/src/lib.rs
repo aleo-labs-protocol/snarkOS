@@ -57,13 +57,12 @@ use snarkos_utilities::SignalHandler;
 use snarkvm::{
     ledger::{
         LoadOptions,
-        store::{AUTHORITY_RETENTION_BLOCKS, min_authority_retention_blocks},
+        store::{AUTHORITY_RETENTION_BLOCKS, StorageMode, min_authority_retention_blocks},
     },
     prelude::{Ledger, Network, store::ConsensusStorage},
     utilities::flatten_error,
 };
 
-use aleo_std::StorageMode;
 use anyhow::{Context, Result, ensure};
 use std::{sync::Arc, time::Duration};
 

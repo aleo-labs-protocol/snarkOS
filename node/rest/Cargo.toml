@@ -1,6 +1,6 @@
 [package]
 name = "snarkos-node-rest"
-version = "4.12.0"
+version = "4.13.1"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "A REST API server for a decentralized virtual machine"
 homepage = "https://aleo.org"
@@ -36,9 +36,6 @@ serial = [
   "snarkos-node-router/serial",
   "snarkos-node-consensus/serial"
 ] 
-
-[dependencies.aleo-std]
-workspace = true
 
 [dependencies.anyhow]
 workspace = true

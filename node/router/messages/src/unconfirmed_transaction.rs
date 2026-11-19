@@ -73,11 +73,12 @@ impl<N: Network> FromBytes for UnconfirmedTransaction<N> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz-helpers"))]
 pub mod prop_tests {
-    use crate::{Transaction, UnconfirmedTransaction};
+    #![cfg_attr(not(test), allow(unused_imports))]
+    use crate::{Transaction, UnconfirmedTransaction, samples::sample_fee_public_transaction};
     use snarkvm::{
-        ledger::{narwhal::Data, test_helpers::sample_fee_public_transaction},
+        ledger::narwhal::Data,
         prelude::{Field, FromBytes, Network, TestRng, ToBytes, Uniform},
     };
 

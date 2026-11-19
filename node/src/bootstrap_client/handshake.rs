@@ -47,7 +47,7 @@ use snarkos_node_network::{
 };
 use snarkvm::{
     ledger::narwhal::Data,
-    prelude::{Address, Network, io_error},
+    prelude::{Address, Network, ToBytes, io_error},
 };
 
 use futures_util::sink::SinkExt;
@@ -224,7 +224,9 @@ impl<N: Network> BootstrapClient<N> {
         let mut noise = pending.into_session()?;
         // The bootstrap client does not track the block height, so it discloses no commit hash.
         let our_info = PeerInfo::new(self.local_ip().port(), self.account.address(), self.restrictions_id, None);
-        noise.send(&encode_payload(&ResponderInfo { info: our_info, trailer: HandshakeTrailer::of::<N>() })?).await?;
+        let genesis_hash = self.genesis_hash.to_bytes_le().map_err(ConnectError::other)?;
+        let trailer = HandshakeTrailer { genesis_hash: Some(genesis_hash), ..HandshakeTrailer::of::<N>() };
+        noise.send(&encode_payload(&ResponderInfo { info: our_info, trailer })?).await?;
 
         let peer_binding = binding_message(HANDSHAKE_DOMAIN, Role::Initiator, &noise.handshake_hash()?);
 

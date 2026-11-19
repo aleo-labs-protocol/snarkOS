@@ -1,6 +1,6 @@
 [package]
 name = "snarkos-node-bft-ledger-service"
-version = "4.12.0"
+version = "4.13.1"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "A ledger service for the memory pool in a decentralized operating system"
 homepage = "https://aleo.org"
@@ -86,6 +86,10 @@ workspace = true
 workspace = true
 optional = true
 features = [ "log" ]
+
+[dev-dependencies.snarkos-utilities]
+workspace = true
+features = [ "test-helpers" ]
 
 [dev-dependencies.snarkvm]
 workspace = true

@@ -14,6 +14,7 @@ concurrency: bump-advisories
 
 jobs:
   bump:
+    # gh-actions is ours; check-shared-refs requires a @vN tag here, not a SHA.
     uses: aleo-labs-protocol/gh-actions/.github/workflows/bump-advisories.yml@v2
     permissions: { contents: read }
     with:

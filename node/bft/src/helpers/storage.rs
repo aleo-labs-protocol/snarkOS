@@ -1463,7 +1463,7 @@ pub(crate) mod tests {
         // carries neither the transmission nor its ID, so only the ledger and storage know it; any
         // block will do here, hence the sample genesis block.
         let certificate_2 = make_certificate(1, rng);
-        let block = snarkvm::ledger::test_helpers::sample_genesis_block(rng);
+        let block = crate::test_helpers::sample_genesis_block(rng);
         storage
             .sync_certificate_with_block(&block, certificate_2.clone(), &Default::default(), false)
             .expect("syncing a certificate referencing a previously-aborted transmission must succeed");

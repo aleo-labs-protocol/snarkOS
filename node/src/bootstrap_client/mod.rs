@@ -64,6 +64,7 @@ pub struct InnerBootstrapClient<N: Network> {
     resolver: RwLock<Resolver<N>>,
     account: Account<N>,
     genesis_header: Header<N>,
+    genesis_hash: N::BlockHash,
     restrictions_id: Field<N>,
     http_client: reqwest::Client,
     latest_committee: TMutex<(HashSet<Address<N>>, Instant)>,
@@ -82,6 +83,7 @@ impl<N: Network> BootstrapClient<N> {
         listener_addr: SocketAddr,
         account: Account<N>,
         genesis_header: Header<N>,
+        genesis_hash: N::BlockHash,
         dev: Option<u16>,
     ) -> anyhow::Result<Self> {
         // Initialize the TCP stack.
@@ -107,6 +109,7 @@ impl<N: Network> BootstrapClient<N> {
             resolver,
             account,
             genesis_header,
+            genesis_hash,
             restrictions_id,
             http_client,
             latest_committee,

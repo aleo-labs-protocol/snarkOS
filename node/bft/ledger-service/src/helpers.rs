@@ -73,13 +73,27 @@ pub fn deserialize_solution_strict<N: Network>(solution: Data<Solution<N>>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use snarkos_utilities::test_fixture::cached_fixture;
     use snarkvm::{
         console::account::{Address, PrivateKey},
-        ledger::{puzzle::PartialSolution, test_helpers::sample_execution_transaction_with_fee},
-        prelude::{MainnetV0, Rng, TestRng, ToBytes},
+        ledger::puzzle::PartialSolution,
+        prelude::{FromBytes, MainnetV0, Rng, TestRng, ToBytes},
     };
 
     type CurrentNetwork = MainnetV0;
+
+    /// Returns a sample execution transaction with a public fee, which costs three proofs to build.
+    ///
+    /// Every test process of this binary gets the same transaction, whatever `rng` is.
+    fn sample_execution_transaction(rng: &mut TestRng) -> Transaction<CurrentNetwork> {
+        cached_fixture(
+            "sample-execution-transaction",
+            &[],
+            |transaction: &Transaction<CurrentNetwork>| transaction.to_bytes_le().unwrap(),
+            |bytes| Transaction::from_bytes_le(bytes).ok(),
+            || snarkvm::ledger::test_helpers::sample_execution_transaction_with_fee(false, rng, 0),
+        )
+    }
 
     fn sample_solution(rng: &mut TestRng) -> Solution<CurrentNetwork> {
         let private_key = PrivateKey::<CurrentNetwork>::new(rng).unwrap();
@@ -91,7 +105,7 @@ mod tests {
     #[test]
     fn deserialize_transaction_strict_accepts_object() -> Result<()> {
         let rng = &mut TestRng::default();
-        let expected = sample_execution_transaction_with_fee(false, rng, 0);
+        let expected = sample_execution_transaction(rng);
 
         let actual = deserialize_transaction_strict(Data::Object(expected.clone()))?;
 
@@ -102,7 +116,7 @@ mod tests {
     #[test]
     fn deserialize_transaction_strict_accepts_canonical_buffer() -> Result<()> {
         let rng = &mut TestRng::default();
-        let expected = sample_execution_transaction_with_fee(false, rng, 0);
+        let expected = sample_execution_transaction(rng);
         let bytes = expected.to_bytes_le()?;
 
         let actual = deserialize_transaction_strict(Data::Buffer(bytes.into()))?;
@@ -114,7 +128,7 @@ mod tests {
     #[test]
     fn deserialize_transaction_strict_rejects_padded_buffer() -> Result<()> {
         let rng = &mut TestRng::default();
-        let transaction = sample_execution_transaction_with_fee(false, rng, 0);
+        let transaction = sample_execution_transaction(rng);
         let mut bytes = transaction.to_bytes_le()?;
         bytes.push(0);
 

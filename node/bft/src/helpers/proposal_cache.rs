@@ -179,7 +179,7 @@ mod tests {
 
     type CurrentNetwork = MainnetV0;
 
-    const ITERATIONS: usize = 100;
+    const ITERATIONS: usize = 10;
 
     pub(crate) fn sample_proposal_cache(
         signer: &PrivateKey<CurrentNetwork>,

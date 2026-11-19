@@ -16,7 +16,7 @@
 use super::*;
 
 use snarkvm::{
-    console::network::ConsensusVersion,
+    console::{account::ComputeKeyCache, network::ConsensusVersion},
     ledger::narwhal::Data,
     prelude::{FromBytes, ToBytes},
     utilities::io_error,
@@ -178,27 +178,52 @@ impl<N: Network> FromBytes for DataBlocks<N> {
         if num_blocks > Self::MAXIMUM_NUMBER_OF_BLOCKS {
             return Err(error("Block response exceeds maximum number of blocks"));
         }
-        // Read the blocks.
-        let blocks = (0..num_blocks).map(|_| Block::read_le(&mut reader)).collect::<Result<Vec<_>, _>>()?;
+        // Read the blocks through one compute-key cache.
+        let mut cache = ComputeKeyCache::default();
+        let blocks = (0..num_blocks)
+            .map(|_| Block::read_le_with_cache(&mut reader, false, &mut cache))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self(blocks))
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz-helpers"))]
 pub mod prop_tests {
+    #![cfg_attr(not(test), allow(unused_imports))]
     use crate::{BlockRequest, BlockResponse, DataBlocks, block_request::prop_tests::any_block_request};
 
+    use snarkos_utilities::test_fixture::cached_fixture;
     use snarkvm::{
         console::network::ConsensusVersion,
-        ledger::{narwhal::Data, test_helpers::sample_genesis_block},
-        prelude::{FromBytes, TestRng, ToBytes},
+        ledger::narwhal::Data,
+        prelude::{FromBytes, TestRng, ToBytes, block::Block},
     };
 
     use bytes::{Buf, BufMut, BytesMut};
     use proptest::prelude::{BoxedStrategy, ProptestConfig, Strategy, any};
+    use std::sync::OnceLock;
     use test_strategy::proptest;
 
     type CurrentNetwork = snarkvm::prelude::MainnetV0;
+
+    /// Returns a sample genesis block, which costs two execution proofs to build.
+    ///
+    /// Every call returns the same block, whatever `rng` is, and so does every test process of this
+    /// binary.
+    pub fn sample_genesis_block(rng: &mut TestRng) -> Block<CurrentNetwork> {
+        static BLOCK: OnceLock<Block<CurrentNetwork>> = OnceLock::new();
+        BLOCK
+            .get_or_init(|| {
+                cached_fixture(
+                    "sample-genesis-block",
+                    &[],
+                    |block: &Block<CurrentNetwork>| block.to_bytes_le().unwrap(),
+                    |bytes| Block::from_bytes_le(bytes).ok(),
+                    || snarkvm::ledger::test_helpers::sample_genesis_block(rng),
+                )
+            })
+            .clone()
+    }
 
     pub fn any_block_response() -> BoxedStrategy<BlockResponse<CurrentNetwork>> {
         (any_block_request(), any::<u64>())
@@ -283,5 +308,23 @@ pub mod prop_tests {
         let blocks = DataBlocks(vec![genesis]);
         blocks.ensure_response_is_well_formed(peer_ip, height, height + 1).unwrap();
         blocks.ensure_response_is_well_formed(peer_ip, height + 1, height + 2).unwrap_err();
+    }
+
+    #[test]
+    fn read_rejects_a_bad_compute_key_after_a_good_one() {
+        let block = sample_genesis_block(&mut TestRng::default());
+        let block_bytes = block.to_bytes_le().unwrap();
+        // The authority follows the version, the block hash, the previous hash and the header.
+        let authority_at = 1 + 32 + 32 + block.header().to_bytes_le().unwrap().len();
+        assert!(block_bytes[authority_at..].starts_with(&block.authority().to_bytes_le().unwrap()));
+        // The beacon signature's `pk_sig` follows the authority variant, the challenge and the response.
+        let pk_sig_at = authority_at + 1 + 64;
+        let mut bad_block_bytes = block_bytes.clone();
+        bad_block_bytes[pk_sig_at..pk_sig_at + 32].fill(0xFF);
+        let expected = Block::<CurrentNetwork>::read_le(&bad_block_bytes[..]).unwrap_err().to_string();
+
+        let bytes = [&[2u8][..], &block_bytes, &bad_block_bytes].concat();
+        let error = DataBlocks::<CurrentNetwork>::read_le(&bytes[..]).unwrap_err().to_string();
+        assert_eq!(error, expected);
     }
 }

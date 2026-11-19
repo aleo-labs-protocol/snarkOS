@@ -36,10 +36,13 @@ use snarkvm::prelude::{
     PrivateKey,
     ViewKey,
     block::Block,
-    store::helpers::{memory::ConsensusMemory, rocksdb::ConsensusDB},
+    store::{
+        StorageMode,
+        aleo_ledger_dir,
+        helpers::{memory::ConsensusMemory, rocksdb::ConsensusDB},
+    },
 };
 
-use aleo_std::{StorageMode, aleo_ledger_dir};
 use anyhow::{Result, bail};
 
 #[cfg(feature = "locktick")]
@@ -246,9 +249,12 @@ impl<N: Network> Node<N> {
         listener_addr: SocketAddr,
         account: Account<N>,
         genesis_header: Header<N>,
+        genesis_hash: N::BlockHash,
         dev: Option<u16>,
     ) -> Result<Self> {
-        Ok(Self::BootstrapClient(BootstrapClient::new(listener_addr, account, genesis_header, dev).await?))
+        Ok(Self::BootstrapClient(
+            BootstrapClient::new(listener_addr, account, genesis_header, genesis_hash, dev).await?,
+        ))
     }
 
     /// Returns the node type.

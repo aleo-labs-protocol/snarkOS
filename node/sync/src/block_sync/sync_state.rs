@@ -146,6 +146,8 @@ impl SyncState {
                 Ordering::Greater => warn!("Greatest peer height reduced from {old_height} to {peer_height}"),
                 Ordering::Less => trace!("Greatest peer height increased from {old_height} to {peer_height}"),
             }
+        } else {
+            trace!("Greatest peer height set to {peer_height}");
         }
 
         self.greatest_peer_height = Some(peer_height);
@@ -165,13 +167,6 @@ impl SyncState {
 
     /// Updates the state of `is_block_synced` for the sync module.
     fn update_is_block_synced(&mut self) {
-        trace!(
-            "Updating is_block_synced: greatest_peer_height={greatest_peer:?}, current_height={current}, status={status:?}",
-            greatest_peer = self.greatest_peer_height,
-            current = self.sync_height,
-            status = self.status,
-        );
-
         let num_blocks_behind = self.num_blocks_behind();
         let old_status = self.status;
 

@@ -60,8 +60,9 @@ impl<N: Network> FromBytes for TransmissionResponse<N> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz-helpers"))]
 pub mod prop_tests {
+    #![cfg_attr(not(test), allow(unused_imports))]
     use crate::{
         TransmissionResponse,
         prop_tests::{any_solution_id, any_transaction_id, any_transmission_checksum},

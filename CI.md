@@ -6,7 +6,7 @@ run from [`benchmarks.yml`](.github/workflows/benchmarks.yml).
 Jobs run in one of two places:
 
 - **GitHub-hosted runners** for cheap jobs: formatting, `cargo deny`,
-  shellcheck, `cargo machete`, the Windows checks and the lighter crates'
+  shellcheck, the source checks, `cargo machete`, the Windows checks and the lighter crates'
   tests. These restore `~/.cargo` and `target/` with `Swatinem/rust-cache`,
   saved only from `staging`.
 - **The self-hosted `cpu` fleet** for heavy jobs: clippy, the heavier
@@ -18,7 +18,7 @@ Jobs run in one of two places:
 
 | Event | Runs |
 |---|---|
-| Pull request | `fmt`, `deny`, `shellcheck`, `machete`, `lint`, `test`, `build-snarkos`, `devnet`, `ci-ok` |
+| Pull request | `fmt`, `deny`, `shellcheck`, `source-checks`, `machete`, `lint`, `test`, `build-snarkos`, `devnet`, `ci-ok` |
 | Push to `staging`, `canary`, `testnet`, `mainnet`, or manual dispatch | the above, plus `devnet-merge`, `windows` |
 | Push to `canary`, `testnet`, `mainnet`, or manual dispatch | the above, plus `devnet-release` |
 
@@ -34,6 +34,7 @@ marked "release" only on the third. The other jobs run on every event.
 | `fmt` | hosted | all | | `cargo fmt --check` on `FMT_TOOLCHAIN` |
 | `deny` | hosted | all | | `cargo deny --workspace check bans licenses sources`, plus `advisories` everywhere but `staging`, whose advisories [`bump-advisories.yml`](.github/workflows/bump-advisories.yml) bumps nightly |
 | `shellcheck` | hosted | all | | `.ci/*.sh`, `scripts/*.sh` |
+| `source-checks` | hosted | all | | `scripts/check_sources.py`: license headers and `locktick` imports in `.rs` files |
 | `lint` | `cpu` | all | 90 | clippy, default and `--all-features`; `cargo check --all-features` of `snarkos-node-metrics` and `snarkos-display` |
 | `test (light)` | hosted | all | 90 | `snarkos-account`, `-utilities`, `-node-tcp`, `-node-sync-locators`, `-node-network` |
 | `test (cdn)` | hosted | all | 90 | `snarkos-node-cdn` |
@@ -52,7 +53,6 @@ marked "release" only on the third. The other jobs run on every event.
 | `devnet (upgrade)` | `cpu` | merge | 90 | `test_full_upgrade.sh`, `test_partial_upgrade.sh` |
 | `devnet (upgrade-required)` | `cpu` | release | 30 | `test_upgrade_required.sh` |
 | `devnet (chaotic-restart-all)` | `cpu` | release | 45 | `test_restart_all.sh`, with delays |
-| `devnet (chaotic-crash-all)` | `cpu` | release | 45 | `test_restart_all.sh` with SIGKILL, with delays |
 | `machete` | hosted | all | | `cargo machete` |
 | `windows` | hosted (Windows) | merge | | `cargo check --examples --benches --tests` in `account`, `cli`, `display`, `node` |
 | `ci-ok` | hosted | all | | fails unless every job a pull request runs succeeded |
@@ -64,6 +64,10 @@ Protected branches require `ci-ok` alone. GitHub counts a skipped job as
 passed for a required check, and a fleet job is skipped when
 `start-cpu-runners` fails or the pull request comes from a fork; `ci-ok`
 fails in both cases.
+
+A pull request that changes only Markdown files starts no run, so it gets no
+`ci-ok` check. A push runs everything. Where a branch rule requires `ci-ok`,
+such a pull request cannot merge until a workflow reports that check for it.
 
 ## Test groups
 

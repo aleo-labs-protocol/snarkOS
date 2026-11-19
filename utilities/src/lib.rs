@@ -24,6 +24,9 @@ pub use node_data::*;
 mod callback_handle;
 pub use callback_handle::CallbackHandle;
 
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod test_fixture;
+
 /// Seed used for deterministic RNG in development mode.
 pub const DEVELOPMENT_MODE_RNG_SEED: u64 = 1234567890u64;
 

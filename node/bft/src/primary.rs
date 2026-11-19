@@ -34,12 +34,15 @@ use crate::{
         Proposal,
         ProposalCache,
         SignedProposals,
+        SkippedMessage,
+        SkippedWhileSyncing,
         Storage,
         assign_to_worker,
         assign_to_workers,
         fmt_id,
         init_sync_channels,
         init_worker_channels,
+        is_awaiting_ledger_sync,
         now,
     },
     spawn_blocking,
@@ -185,6 +188,10 @@ pub struct Primary<N: Network> {
     /// Replaced (and the old one cancelled) on every recheck, so at most one set of resends is in flight.
     resend_token: Arc<Mutex<CancellationToken>>,
 
+    /// The batch proposals and batch certificates from peers that could not be validated
+    /// because the ledger is behind, pending their next summary in the log.
+    skipped_while_syncing: Arc<SkippedWhileSyncing>,
+
     /// The handles for all background tasks spawned by this primary.
     handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
 
@@ -251,6 +258,7 @@ impl<N: Network> Primary<N> {
             latest_proposal_timestamp: Default::default(),
             signed_proposals: Default::default(),
             resend_token: Default::default(),
+            skipped_while_syncing: Default::default(),
             handles: Default::default(),
             proposal_task: Default::default(),
             round_increment_notify: Default::default(),
@@ -677,6 +685,13 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
             return Ok(false);
         }
 
+        // Fetch the current block height and consensus version.
+        let current_block_height = self.ledger.latest_block_height();
+        let consensus_version = N::CONSENSUS_VERSION(current_block_height)?;
+        // Compute the batch proposal spend limit.
+        let proposal_spend_limit = BatchHeader::<N>::batch_spend_limit(current_block_height)
+            .saturating_mul(self.proposal_spent_limit_multiplier);
+
         // Initialize the map of transmissions.
         let mut transmissions: IndexMap<_, _> = Default::default();
         // Track the total execution costs of the batch proposal as it is being constructed.
@@ -686,6 +701,8 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
         // provided by one worker (FIFO) is no longer guaranteed with multiple workers.
         debug_assert_eq!(MAX_WORKERS, 1);
 
+        // Note: a drained transmission is held only in `transmissions` or the local variables below,
+        // so an early return (e.g. `?`) in this loop drops every transmission drained so far.
         'outer: for worker in self.workers().iter() {
             let mut num_worker_transmissions = 0usize;
 
@@ -705,9 +722,22 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
                 }
 
                 // Check if the ledger already contains the transmission.
-                if self.ledger.contains_transmission(&id).unwrap_or(true) {
-                    trace!("Proposing - Skipping transmission '{}' - Already in ledger", fmt_id(id));
-                    continue;
+                match self.ledger.contains_transmission(&id) {
+                    Ok(true) => {
+                        trace!("Proposing - Skipping transmission '{}' - Already in ledger", fmt_id(id));
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        warn!(
+                            "Proposing - Stopping at transmission '{}' - Unable to check the ledger - {e}",
+                            fmt_id(id)
+                        );
+                        // Requeue the transmission at the back of the worker and stop draining,
+                        // as continuing would cycle through the queue forever if every ledger read fails.
+                        worker.reinsert(id, transmission);
+                        break 'outer;
+                    }
                 }
 
                 // Check if storage already knows the transmission, either way.
@@ -751,12 +781,17 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
                             continue;
                         }
 
-                        // Deserialize the transaction. If the transaction exceeds the maximum size, then return an error.
-                        let transaction = spawn_blocking!(deserialize_transaction_strict(transaction))?;
-
-                        // Fetch the current block height and consensus version.
-                        let current_block_height = self.ledger.latest_block_height();
-                        let consensus_version = N::CONSENSUS_VERSION(current_block_height)?;
+                        // Deserialize the transaction. If it is oversized or malformed, skip it.
+                        let transaction = match spawn_blocking!(deserialize_transaction_strict(transaction)) {
+                            Ok(transaction) => transaction,
+                            Err(e) => {
+                                debug!(
+                                    "Proposing - Skipping and discarding transaction '{}' - Unable to deserialize transaction - {e}",
+                                    fmt_id(transaction_id)
+                                );
+                                continue;
+                            }
+                        };
 
                         // Compute the transaction spent cost (in microcredits).
                         // Note: We purposefully discard this transaction if we are unable to compute the spent cost.
@@ -791,9 +826,6 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
                         };
 
                         // Check if the next proposal cost exceeds the batch proposal spend limit.
-                        let batch_spend_limit = BatchHeader::<N>::batch_spend_limit(current_block_height);
-                        let proposal_spend_limit =
-                            batch_spend_limit.saturating_mul(self.proposal_spent_limit_multiplier);
                         if next_proposal_cost > proposal_spend_limit {
                             debug!(
                                 "Proposing - Skipping transaction '{}' - Batch spend limit surpassed ({next_proposal_cost} > {proposal_spend_limit})",
@@ -1300,6 +1332,31 @@ impl<N: Network> Primary<N> {
         Ok(())
     }
 
+    /// Logs a failure to process a batch proposal or batch certificate from a peer.
+    ///
+    /// A failure that is expected because the ledger is behind is logged at TRACE and counted
+    /// towards a periodic summary; every live message from every validator fails this way until
+    /// the ledger catches up. Any other failure is logged at WARN.
+    fn log_peer_message_failure(&self, message: SkippedMessage, error: anyhow::Error) {
+        if !is_awaiting_ledger_sync(&error, self.sync.is_synced(), self.ledger.latest_round()) {
+            warn!("{}", flatten_error(error));
+            return;
+        }
+
+        trace!("{}", flatten_error(error));
+        if let Some(summary) = self.skipped_while_syncing.record(message, Instant::now()) {
+            let ledger_round = self.ledger.latest_round();
+            match self.sync.num_blocks_behind() {
+                Some(num_blocks_behind) => info!(
+                    "{summary} - the ledger is {num_blocks_behind} blocks behind (at round {ledger_round}) and has no committee for their rounds yet"
+                ),
+                None => info!(
+                    "{summary} - the ledger is behind (at round {ledger_round}) and has no committee for their rounds yet"
+                ),
+            }
+        }
+    }
+
     /// Processes a batch certificate from a peer.
     ///
     /// This method performs the following steps:
@@ -1525,7 +1582,7 @@ impl<N: Network> Primary<N> {
                     let round = batch_propose.round;
                     if let Err(err) = self__.process_batch_propose_from_peer(peer_ip, batch_propose).await {
                         let err = err.context(format!("Cannot sign a batch at round {round} from '{peer_ip}'"));
-                        warn!("{}", flatten_error(err));
+                        self__.log_peer_message_failure(SkippedMessage::BatchProposal, err);
                     }
                 });
             }
@@ -1564,12 +1621,9 @@ impl<N: Network> Primary<N> {
                     let id = fmt_id(batch_certificate.id());
                     let round = batch_certificate.round();
                     if let Err(err) = self__.process_batch_certificate_from_peer(peer_ip, batch_certificate).await {
-                        warn!(
-                            "{}",
-                            flatten_error(err.context(format!(
-                                "Cannot store a certificate '{id}' for round {round} from '{peer_ip}'"
-                            )))
-                        );
+                        let err = err
+                            .context(format!("Cannot store a certificate '{id}' for round {round} from '{peer_ip}'"));
+                        self__.log_peer_message_failure(SkippedMessage::BatchCertificate, err);
                     }
                 });
             }
@@ -2213,15 +2267,13 @@ impl<N: Network> Primary<N> {
 #[cfg(test)]
 mod tests {
     use super::{proposal_task::BatchPropose as _, *};
+    use crate::test_helpers::sample_transaction;
 
     use snarkos_node_bft_ledger_service::MockLedgerService;
     use snarkos_node_bft_storage_service::BFTMemoryService;
     use snarkos_node_sync::BlockSync;
     use snarkvm::{
-        ledger::{
-            committee::{Committee, MIN_VALIDATOR_STAKE},
-            test_helpers::sample_execution_transaction_with_fee,
-        },
+        ledger::committee::{Committee, MIN_VALIDATOR_STAKE},
         prelude::{Address, Signature},
     };
 
@@ -2255,7 +2307,15 @@ mod tests {
         committee: Committee<CurrentNetwork>,
         height: u32,
     ) -> Primary<CurrentNetwork> {
-        let ledger = Arc::new(MockLedgerService::new_at_height(committee, height));
+        primary_with_ledger(account_index, accounts, MockLedgerService::new_at_height(committee, height))
+    }
+
+    fn primary_with_ledger(
+        account_index: usize,
+        accounts: &[(SocketAddr, Account<CurrentNetwork>)],
+        ledger: MockLedgerService<CurrentNetwork>,
+    ) -> Primary<CurrentNetwork> {
+        let ledger = Arc::new(ledger);
         let storage = Storage::new(ledger.clone(), Arc::new(BFTMemoryService::new()), 10).unwrap();
 
         // Initialize the primary.
@@ -2313,7 +2373,7 @@ mod tests {
     fn sample_unconfirmed_transaction(
         rng: &mut TestRng,
     ) -> (<CurrentNetwork as Network>::TransactionID, Data<Transaction<CurrentNetwork>>) {
-        let transaction = sample_execution_transaction_with_fee(false, rng, 0);
+        let transaction = sample_transaction(rng);
         let id = transaction.id();
 
         (id, Data::Object(transaction))
@@ -2539,6 +2599,76 @@ mod tests {
         assert!(primary.propose_batch().await.unwrap());
         assert!(primary.proposed_batch.read().as_proposal().unwrap().transmissions().is_empty());
         assert_eq!(primary.workers()[0].num_transmissions(), 0);
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_propose_batch_skips_an_undeserializable_transaction() {
+        let mut rng = TestRng::default();
+        let (primary, accounts) = primary_without_handlers(&mut rng);
+        let peer_ip = accounts[1].0;
+
+        // Queue a valid transaction, a transaction buffer with a trailing byte, and another valid transaction.
+        let bad_transaction = sample_transaction(&mut rng);
+        // A sampled transaction always serializes.
+        let mut bad_bytes = bad_transaction.to_bytes_le().unwrap();
+        bad_bytes.push(0);
+        let transactions = [
+            sample_unconfirmed_transaction(&mut rng),
+            (bad_transaction.id(), Data::Buffer(Bytes::from(bad_bytes))),
+            sample_unconfirmed_transaction(&mut rng),
+        ];
+        let [first_id, _, last_id] = transactions.map(|(transaction_id, transaction)| {
+            // Hashing serialized transaction data does not fail.
+            let checksum = transaction.to_checksum::<CurrentNetwork>().unwrap();
+            let transmission_id = (&transaction_id, &checksum).into();
+            primary.workers()[0].process_transmission_from_peer(
+                peer_ip,
+                transmission_id,
+                Transmission::Transaction(transaction),
+            );
+            transmission_id
+        });
+        assert_eq!(primary.workers()[0].num_transmissions(), 3);
+
+        // Only the malformed transaction is left out of the proposal, and it is not requeued.
+        assert!(primary.propose_batch().await.unwrap());
+        assert_eq!(primary.workers()[0].num_transmissions(), 0);
+        assert_eq!(
+            primary.proposed_batch.read().as_proposal().unwrap().transmissions().keys().copied().collect::<Vec<_>>(),
+            [first_id, last_id]
+        );
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_propose_batch_requeues_a_transmission_the_ledger_cannot_check() {
+        let mut rng = TestRng::default();
+        let (accounts, committee) = sample_committee(&mut rng);
+        let peer_ip = accounts[1].0;
+
+        // Sample three transactions, and make the ledger fail to check the second one.
+        let transmissions = [(); 3].map(|_| {
+            let (transaction_id, transaction) = sample_unconfirmed_transaction(&mut rng);
+            // Hashing serialized transaction data does not fail.
+            let checksum = transaction.to_checksum::<CurrentNetwork>().unwrap();
+            (TransmissionID::from((&transaction_id, &checksum)), Transmission::Transaction(transaction))
+        });
+        let [first_id, unreadable_id, last_id] = transmissions.each_ref().map(|(transmission_id, _)| *transmission_id);
+        let height = CurrentNetwork::CONSENSUS_HEIGHT(ConsensusVersion::V1).unwrap();
+        let ledger =
+            MockLedgerService::new_at_height(committee, height).with_unreadable_transmission_ids([unreadable_id]);
+        let primary = primary_with_ledger(0, &accounts, ledger);
+        for (transmission_id, transmission) in transmissions {
+            primary.workers()[0].process_transmission_from_peer(peer_ip, transmission_id, transmission);
+        }
+        assert_eq!(primary.workers()[0].num_transmissions(), 3);
+
+        // The proposal stops at the transmission the ledger cannot check, which moves to the back of the queue.
+        assert!(primary.propose_batch().await.unwrap());
+        assert_eq!(
+            primary.proposed_batch.read().as_proposal().unwrap().transmissions().keys().copied().collect::<Vec<_>>(),
+            [first_id]
+        );
+        assert_eq!(primary.workers()[0].transmissions().into_keys().collect::<Vec<_>>(), [last_id, unreadable_id]);
     }
 
     #[test_log::test(tokio::test)]
