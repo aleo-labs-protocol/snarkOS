@@ -62,8 +62,7 @@ have none, and a hosted job holds no fleet box.
 
 Protected branches require `ci-ok` alone. GitHub counts a skipped job as
 passed for a required check, and a fleet job is skipped when
-`start-cpu-runners` fails or the pull request comes from a fork; `ci-ok`
-fails in both cases.
+`start-cpu-runners` fails; `ci-ok` fails then.
 
 A pull request that changes only Markdown files starts no run, so it gets no
 `ci-ok` check. Where a branch rule requires `ci-ok`,
@@ -112,12 +111,13 @@ To run the `.ci` scripts on macOS you may want to `brew install bash coreutils
 
 ## Forks
 
-A fork's pull request runs nothing on the fleet. Every self-hosted job checks
-that the head repository is this one. The fleet's `target/` and sccache
-persist between jobs, so anyone who can push a branch here can affect later
-builds there. That is the same trust as push access; do not widen the guard.
+A fork's pull request runs on the fleet once a team member approves its run.
+The run gets no secrets, so `start-cpu-runners` is skipped;
+`fork-pr-runners.yml` starts the boxes instead, and the fleet jobs accept the
+skipped start.
 
-The guard is not what holds. A pull request runs its own copy of `ci.yml`, so
-a fork can delete the guard and target the fleet directly. What holds is the
-repository setting that makes every external contributor's workflow run wait
-for approval. Read a fork's workflow changes before approving its run.
+The fleet's `target/` and sccache persist between jobs, so an approved run can
+affect later builds there. A pull request runs its own copy of `ci.yml`, so no
+guard in that file holds. What holds is the repository setting that makes every
+external contributor's workflow run wait for approval. Read a fork's changes
+before approving its run.
