@@ -94,7 +94,11 @@ const MAX_BLOCK_REQUESTS: usize = 50; // 50 requests
 /// The maximum number of blocks tolerated before the primary is considered behind its peers.
 pub const MAX_BLOCKS_BEHIND: u32 = 1; // blocks
 
-/// How often to warn while block sync cannot progress (see [`BlockSync::is_stuck_below_peer_floors`]).
+/// How long the whole stuck predicate must have held, in total, before block sync counts as stuck
+/// (see [`BlockSync::stuck_for`]).
+const STUCK_SYNC_GRACE: Duration = Duration::from_secs(60);
+
+/// How often to warn while block sync stays stuck.
 const STUCK_SYNC_WARNING_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// This is a dummy IP address that is used to represent the local node.
@@ -205,6 +209,26 @@ impl<N: Network> InsertBlockResponseError<N> {
     }
 }
 
+/// When block sync got stuck and at which height, how long the whole stuck predicate has held since,
+/// the last sample and whether the predicate held at it, and when the node last warned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StuckSince {
+    at: Instant,
+    height: u32,
+    held: Duration,
+    last_sample: (Instant, bool),
+    warned_at: Option<Instant>,
+}
+
+/// What became of a chunk of block requests (see [`BlockSync::send_block_requests`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChunkOutcome {
+    Sent,
+    /// Its peers are at their block request limit until the given time.
+    Deferred(Instant),
+    NotSent,
+}
+
 impl<N: Network> OutstandingRequest<N> {
     /// Get a reference to the IPs of peers that have not responded to the request (yet).
     fn sync_ips(&self) -> &IndexSet<SocketAddr> {
@@ -281,11 +305,15 @@ pub struct BlockSync<N: Network> {
     /// responding but cannot keep up with the request rate.
     last_response_at: Mutex<HashMap<SocketAddr, (Instant, Instant)>>,
 
-    /// Whether the node only connects to trusted peers (see [`Self::is_stuck_below_peer_floors`]).
+    /// Whether the node only connects to trusted peers (see [`Self::stuck_for`]).
     trusted_peers_only: bool,
 
-    /// When the node last warned that block sync cannot progress, and at which height.
-    last_stuck_warning: Mutex<Option<(Instant, u32)>>,
+    /// Since when block sync has been stuck (see [`Self::stuck_for`]).
+    stuck_since: Mutex<Option<StuckSince>>,
+
+    /// When this node sent each peer its recent block requests, within the interval of the
+    /// peers' block request limit.
+    sent_block_requests: Mutex<HashMap<SocketAddr, VecDeque<Instant>>>,
 }
 
 impl<N: Network> BlockSync<N> {
@@ -309,7 +337,8 @@ impl<N: Network> BlockSync<N> {
             failed_requests: Default::default(),
             last_response_at: Default::default(),
             trusted_peers_only: false,
-            last_stuck_warning: Default::default(),
+            stuck_since: Default::default(),
+            sent_block_requests: Default::default(),
         }
     }
 
@@ -475,25 +504,29 @@ impl<N: Network> BlockSync<N> {
         BlockLocators::new(recents, checkpoints)
     }
 
-    /// Returns up to `max_num_sync_ips` of `sync_peers`, randomly sampled, that are still connected
-    /// and serve `heights`, or `None` if none do or fewer than min(`max_num_sync_ips`, still
-    /// connected) do. Call it while holding `prepare_requests_lock`.
+    /// Returns up to `max_num_sync_ips` of `sync_peers`, randomly sampled, that are still connected,
+    /// are not `at_limit`, and serve `heights`, or `None` if none do or fewer than
+    /// min(`max_num_sync_ips`, connected and not `at_limit`) do. Call it while holding
+    /// `prepare_requests_lock`.
     fn select_sync_ips(
         &self,
         sync_peers: &IndexMap<SocketAddr, BlockLocators<N>>,
         heights: Range<u32>,
         max_num_sync_ips: usize,
+        at_limit: impl Fn(&SocketAddr) -> bool,
     ) -> Option<IndexSet<SocketAddr>> {
         let locators = self.locators.read();
-        let num_connected = sync_peers.keys().filter(|ip| locators.contains_key(*ip)).count();
+        let available = |ip: &&SocketAddr| locators.contains_key(*ip) && !at_limit(ip);
+        let num_available = sync_peers.keys().filter(available).count();
         let sync_ips: IndexSet<_> = sync_peers
             .keys()
-            .filter(|ip| locators.get(*ip).is_some_and(|peer| peer.can_serve(heights.clone())))
+            .filter(available)
+            .filter(|ip| locators[*ip].can_serve(heights.clone()))
             .copied()
             .sample(&mut rand::rng(), max_num_sync_ips)
             .into_iter()
             .collect();
-        (sync_ips.len() >= max_num_sync_ips.min(num_connected).max(1)).then_some(sync_ips)
+        (sync_ips.len() >= max_num_sync_ips.min(num_available).max(1)).then_some(sync_ips)
     }
 
     /// Removes the `inserted` requests of a chunk that will not be sent, and queues the chunk's
@@ -523,37 +556,98 @@ impl<N: Network> BlockSync<N> {
         }
     }
 
-    /// Send a batch of block requests. A chunk that is not sent is queued for re-issue.
-    pub async fn send_block_requests<C: CommunicationService>(
+    /// Returns the peers that have reached this node's share of their block request `limit` at
+    /// `now`, each with when its oldest request within the interval leaves it.
+    fn capped_peers(&self, limit: Option<(usize, Duration)>, now: Instant) -> HashMap<SocketAddr, Instant> {
+        let Some((limit, interval)) = limit else {
+            return HashMap::new();
+        };
+        let max_requests = max_block_requests_per_peer(limit);
+        self.sent_block_requests
+            .lock()
+            .iter()
+            .filter_map(|(peer_ip, sent)| {
+                let expired = sent.partition_point(|at| now.duration_since(*at) >= interval);
+                (sent.len() - expired >= max_requests).then(|| (*peer_ip, sent[expired] + interval))
+            })
+            .collect()
+    }
+
+    /// Forgets the block requests sent before the interval of the peers' block request `limit`
+    /// that ends at `now`.
+    fn forget_expired_block_requests(&self, limit: Option<(usize, Duration)>, now: Instant) {
+        let Some((_, interval)) = limit else {
+            return;
+        };
+        self.sent_block_requests.lock().retain(|_, sent| {
+            while sent.front().is_some_and(|at| now.duration_since(*at) >= interval) {
+                sent.pop_front();
+            }
+            !sent.is_empty()
+        });
+    }
+
+    /// Returns when a chunk for `heights` that no `sync_peers` took can be sent, if it waits only for
+    /// the block request limit: every connected one of them still serves `heights`, and some are
+    /// `capped` (see [`Self::capped_peers`]).
+    fn deferred_request_slot(
+        &self,
+        sync_peers: &IndexMap<SocketAddr, BlockLocators<N>>,
+        heights: Range<u32>,
+        capped: &HashMap<SocketAddr, Instant>,
+    ) -> Option<Instant> {
+        let locators = self.locators.read();
+        let connected = || sync_peers.keys().filter_map(|ip| Some((ip, locators.get(ip)?)));
+        if !connected().all(|(_, peer)| peer.can_serve(heights.clone())) {
+            return None;
+        }
+        connected().filter_map(|(ip, _)| capped.get(ip)).min().copied()
+    }
+
+    /// Sends a chunk of block requests, staying below the peers' block request `limit` (see
+    /// [`CommunicationService::block_request_limit`]). A chunk that is not sent is queued for re-issue.
+    async fn send_block_requests<C: CommunicationService>(
         &self,
         communication: &C,
         sync_peers: &IndexMap<SocketAddr, BlockLocators<N>>,
         requests: &[(u32, PrepareSyncRequest<N>)],
-    ) -> bool {
+        limit: Option<(usize, Duration)>,
+    ) -> ChunkOutcome {
         let (start_height, max_num_sync_ips) = match requests.first() {
             Some((height, (_, _, max_num_sync_ips))) => (*height, *max_num_sync_ips),
             None => {
                 warn!("Block sync failed - no block requests");
-                return false;
+                return ChunkOutcome::NotSent;
             }
         };
 
         // Calculate the end height.
         let end_height = start_height.saturating_add(requests.len() as u32);
 
+        let heights = start_height..end_height;
+        let now = Instant::now();
+
         // Hold `prepare_requests_lock` (shared with remove_peer), so that selecting peers that are
         // still connected and inserting the requests are atomic.
         let sync_ips = {
             let _prepare_requests_lock = self.prepare_requests_lock.lock();
-            let Some(sync_ips) = self.select_sync_ips(sync_peers, start_height..end_height, max_num_sync_ips) else {
-                trace!(
-                    "Skipping block request batch for heights {start_height}-{inclusive_end}: too few prepared peers can still serve it",
-                    inclusive_end = end_height.saturating_sub(1)
-                );
+            let capped = self.capped_peers(limit, now);
+            let at_limit = |ip: &SocketAddr| capped.contains_key(ip);
+            let Some(sync_ips) = self.select_sync_ips(sync_peers, heights.clone(), max_num_sync_ips, at_limit) else {
+                let inclusive_end = end_height.saturating_sub(1);
                 self.requeue_requests(requests);
-                // A peer's floor or tip changed since the batch was prepared; prepare it again.
+                if let Some(slot) = self.deferred_request_slot(sync_peers, heights, &capped) {
+                    trace!(
+                        "Deferring block requests for heights {start_height}-{inclusive_end}: peers reached their block request limit"
+                    );
+                    return ChunkOutcome::Deferred(slot);
+                }
+                trace!(
+                    "Skipping block request batch for heights {start_height}-{inclusive_end}: too few prepared peers can still serve it"
+                );
+                // Prepare the batch again from the peers connected now.
                 self.peer_notify.notify_one();
-                return false;
+                return ChunkOutcome::NotSent;
             };
 
             // Insert the chunk of block requests (still holding lock so remove_peer cannot run).
@@ -563,7 +657,13 @@ impl<N: Network> BlockSync<N> {
                     let err = err.context(format!("Failed to insert block request for height {height}"));
                     warn!("{}", flatten_error(&err));
                     self.abandon_chunk(&requests[..i], requests);
-                    return false;
+                    return ChunkOutcome::NotSent;
+                }
+            }
+            if limit.is_some() {
+                let mut sent_block_requests = self.sent_block_requests.lock();
+                for sync_ip in &sync_ips {
+                    sent_block_requests.entry(*sync_ip).or_default().push_back(now);
                 }
             }
             sync_ips
@@ -614,32 +714,44 @@ impl<N: Network> BlockSync<N> {
             // If sending fails for any peer, remove the block request from the sync pool.
             if !success {
                 self.abandon_chunk(requests, requests);
-                return false;
+                return ChunkOutcome::NotSent;
             }
         }
-        true
+        ChunkOutcome::Sent
     }
 
     /// Handles timeouts, checks if block sync is possible, prepares block requests,
-    /// and sends them via the given [`CommunicationService`].
+    /// and sends them via the given [`CommunicationService`]. Returns when a peer's block request
+    /// limit next allows a request that had to wait, if any.
     ///
-    /// Callers typically call this in a loop after waiting for peer updates, e.g.
-    /// `timeout(MAX_SYNC_INTERVAL, self.wait_for_peer_update())`.
-    pub async fn try_issuing_block_requests<C: CommunicationService>(&self, communication: &C) {
+    /// Callers typically call this in a loop after waiting for peer updates until that time, or
+    /// at most `MAX_SYNC_INTERVAL`.
+    pub async fn try_issuing_block_requests<C: CommunicationService>(&self, communication: &C) -> Option<Instant> {
+        let next_request_slot = self.issue_block_requests(communication).await;
+        self.warn_if_stuck(Instant::now());
+        next_request_slot
+    }
+
+    /// Issues block requests (see [`Self::try_issuing_block_requests`]).
+    async fn issue_block_requests<C: CommunicationService>(&self, communication: &C) -> Option<Instant> {
         self.handle_block_request_timeouts();
 
         // Clients fetch the tip even while within the validator sync tolerance.
         if self.connection_mode == ConnectionMode::Gateway && self.is_block_synced() {
             trace!("Node is already synced. Will not issue new block requests");
-            return;
+            return None;
         }
 
         if !self.sync_state.read().can_issue_new_block_requests() && self.failed_requests.lock().is_empty() {
             trace!("Nothing to sync. Will not issue new block requests");
-            return;
+            return None;
         }
 
-        let batches = self.prepare_block_requests();
+        let limit = communication.block_request_limit();
+        let now = Instant::now();
+        self.forget_expired_block_requests(limit, now);
+        let batches = self.prepare_block_requests_avoiding(&self.capped_peers(limit, now));
+        let mut next_request_slot = None;
 
         if batches.is_empty() {
             let total_requests = self.num_total_block_requests();
@@ -654,12 +766,15 @@ impl<N: Network> BlockSync<N> {
                  new block requests to send"
                 );
             }
-            self.warn_if_stuck();
         } else {
             let chunk_size = DataBlocks::<N>::MAXIMUM_NUMBER_OF_BLOCKS as usize;
             for (block_requests, sync_peers) in batches {
                 for (i, requests) in block_requests.chunks(chunk_size).enumerate() {
-                    if !self.send_block_requests(communication, &sync_peers, requests).await {
+                    let outcome = self.send_block_requests(communication, &sync_peers, requests, limit).await;
+                    if outcome != ChunkOutcome::Sent {
+                        if let ChunkOutcome::Deferred(slot) = outcome {
+                            next_request_slot = [next_request_slot, Some(slot)].into_iter().flatten().min();
+                        }
                         // Queue the rest of the batch for re-issue.
                         let rest = ((i + 1) * chunk_size).min(block_requests.len());
                         self.requeue_requests(&block_requests[rest..]);
@@ -669,6 +784,7 @@ impl<N: Network> BlockSync<N> {
                 }
             }
         }
+        next_request_slot
     }
 
     /// Inserts a new block response from the given peer IP.
@@ -911,7 +1027,9 @@ impl<N: Network> BlockSync<N> {
         // Retrieve the current sync height.
         let current_height = self.get_sync_height();
 
-        if let Some((sync_peers, min_common_ancestor)) = self.find_sync_peers_inner(current_height, None) {
+        if let Some((sync_peers, min_common_ancestor)) =
+            self.find_sync_peers_inner(current_height, None, &HashMap::new())
+        {
             // Map the locators into the latest height.
             let sync_peers =
                 sync_peers.into_iter().map(|(ip, locators)| (ip, locators.latest_locator_height())).collect();
@@ -1093,6 +1211,12 @@ impl<N: Network> BlockSync<N> {
 pub type BlockRequestBatch<N> = (Vec<(u32, PrepareSyncRequest<N>)>, IndexMap<SocketAddr, BlockLocators<N>>);
 
 impl<N: Network> BlockSync<N> {
+    /// Prepares block requests from any peer (see [`Self::prepare_block_requests_avoiding`]).
+    #[cfg(test)]
+    fn prepare_block_requests(&self) -> Vec<BlockRequestBatch<N>> {
+        self.prepare_block_requests_avoiding(&HashMap::new())
+    }
+
     /// Returns a list of block requests and the sync peers, if the node needs to sync.
     ///
     /// You usually want to call `remove_timed_out_block_requests` before invoking this function.
@@ -1110,7 +1234,10 @@ impl<N: Network> BlockSync<N> {
     ///  - For clients, `Client::initialize_sync` spawn exactly one task that periodically calls
     ///    `Client::try_issuing_block_requests` which calls this function.
     ///  - Provers do not call this function.
-    pub fn prepare_block_requests(&self) -> Vec<BlockRequestBatch<N>> {
+    ///
+    /// Peers that are `capped` (see [`Self::capped_peers`]) are left out while enough others serve
+    /// the requests.
+    fn prepare_block_requests_avoiding(&self, capped: &HashMap<SocketAddr, Instant>) -> Vec<BlockRequestBatch<N>> {
         let _block_requests_lock = self.prepare_requests_lock.lock();
 
         // Used to print more information when we max out on requests.
@@ -1189,7 +1316,8 @@ impl<N: Network> BlockSync<N> {
                     continue;
                 }
 
-                let Some((sync_peers, min_common_ancestor)) = self.find_sync_peers_inner(current_height, Some(start))
+                let Some((sync_peers, min_common_ancestor)) =
+                    self.find_sync_peers_inner(current_height, Some(start), capped)
                 else {
                     // The requests stay queued until a peer that serves `start` connects.
                     debug!("Cannot re-request blocks {start}..{end_height}: no connected peer serves them");
@@ -1261,7 +1389,7 @@ impl<N: Network> BlockSync<N> {
             print_requests();
             vec![]
         } else if let Some((sync_peers, min_common_ancestor)) =
-            self.find_sync_peers_inner(current_height, Some(start_height))
+            self.find_sync_peers_inner(current_height, Some(start_height), capped)
         {
             // Retrieve the greatest block height of any connected peer.
             // We do not need to update the sync state here, as that already happens when the block locators are received.
@@ -1308,18 +1436,6 @@ impl<N: Network> BlockSync<N> {
         self.metrics.count_request_completed();
     }
 
-    /// Returns `true` if block sync cannot progress because the peers ahead of this node no longer
-    /// serve the next block it needs.
-    ///
-    /// That is the case when no request can still progress, every peer ahead of this node reports a
-    /// floor above that block, and these peers are a strict majority of the peers that sent
-    /// locators. Unless the node only connects to trusted peers, at least `MINIMUM_NUMBER_OF_PEERS`
-    /// peers must have sent locators, so that a lone peer cannot claim a far-ahead tip.
-    pub fn is_stuck_below_peer_floors(&self) -> bool {
-        let height = self.retention_height();
-        !self.can_progress(height) && self.peers_ahead_serve_from_above(height)
-    }
-
     /// Returns `true` if a request can still progress from `height`: one for the next block, or
     /// one still awaiting a response. Answered requests above a gap do not count.
     fn can_progress(&self, height: u32) -> bool {
@@ -1328,42 +1444,80 @@ impl<N: Network> BlockSync<N> {
             || requests.values().any(|r| r.response.is_none() && !r.sync_ips().is_empty())
     }
 
-    /// Returns `true` if the peers ahead of `height` report floors above `height + 1`, and satisfy
-    /// the majority and minimum-peer rules of [`Self::is_stuck_below_peer_floors`].
-    fn peers_ahead_serve_from_above(&self, height: u32) -> bool {
-        let next_height = height.saturating_add(1);
-        let locators = self.locators.read();
-        let mut num_ahead = 0;
-        for peer in locators.values() {
-            if peer.locators.latest_locator_height() <= height {
-                continue;
-            }
-            if peer.floor <= next_height {
-                return false;
-            }
-            num_ahead += 1;
-        }
-        let num_peers = locators.len();
-        num_ahead * 2 > num_peers && (self.trusted_peers_only || num_peers >= MINIMUM_NUMBER_OF_PEERS)
+    /// Returns how long block sync has been stuck because the peers ahead of this node no longer
+    /// serve the next block it needs, or `None` if it is not stuck now.
+    ///
+    /// The stuck predicate holds when no request can still progress, every peer ahead of this node
+    /// reports a floor above that block, and these peers are a strict majority of the peers that
+    /// sent locators. Unless the node only connects to trusted peers, at least
+    /// `MINIMUM_NUMBER_OF_PEERS` peers must have sent locators, so that a lone peer cannot claim a
+    /// far-ahead tip.
+    ///
+    /// The clock starts at a sample where the predicate holds. It restarts when the node's height
+    /// changes, a request can progress, a peer ahead serves the next block, or no peer is ahead. It
+    /// keeps running while the peers ahead fail only the majority or minimum-peer rule. Block sync
+    /// counts as stuck at a sample where the predicate holds, once it has held for
+    /// `STUCK_SYNC_GRACE` in total since the clock started.
+    pub fn stuck_for(&self) -> Option<Duration> {
+        self.stuck_for_at(Instant::now())
     }
 
-    /// Warns that block sync cannot progress, at most every `STUCK_SYNC_WARNING_INTERVAL` while the
-    /// node's height does not advance.
-    fn warn_if_stuck(&self) {
+    /// Returns how long block sync has been stuck at `now` (see [`Self::stuck_for`]).
+    fn stuck_for_at(&self, now: Instant) -> Option<Duration> {
+        self.update_stuck_clock(&mut self.stuck_since.lock(), now)
+    }
+
+    /// Updates the clock in `stuck_since` with a sample at `now`, and returns how long block sync
+    /// has been stuck (see [`Self::stuck_for`]).
+    fn update_stuck_clock(&self, stuck_since: &mut Option<StuckSince>, now: Instant) -> Option<Duration> {
         let height = self.retention_height();
-        let mut last_warning = self.last_stuck_warning.lock();
-        if last_warning.is_some_and(|(at, at_height)| at_height == height && at.elapsed() < STUCK_SYNC_WARNING_INTERVAL)
-        {
+        let (num_peers, num_ahead, ahead_serves_next) = {
+            let locators = self.locators.read();
+            let ahead = || locators.values().filter(|peer| peer.locators.latest_locator_height() > height);
+            (locators.len(), ahead().count(), ahead().any(|peer| peer.floor <= height.saturating_add(1)))
+        };
+        let not_stuck = num_ahead == 0 || ahead_serves_next || self.can_progress(height);
+        if not_stuck || stuck_since.is_some_and(|since| since.height != height) {
+            *stuck_since = None;
+        }
+        let holds = !not_stuck
+            && num_ahead * 2 > num_peers
+            && (self.trusted_peers_only || num_peers >= MINIMUM_NUMBER_OF_PEERS);
+        if stuck_since.is_none() {
+            if !holds {
+                return None;
+            }
+            *stuck_since =
+                Some(StuckSince { at: now, height, held: Duration::ZERO, last_sample: (now, true), warned_at: None });
+        }
+        let since = stuck_since.as_mut()?;
+        let (last_at, last_held) = since.last_sample;
+        if last_held {
+            since.held += now.saturating_duration_since(last_at);
+        }
+        since.last_sample = (now, holds);
+        (holds && since.held >= STUCK_SYNC_GRACE).then(|| now.saturating_duration_since(since.at))
+    }
+
+    /// Warns that block sync cannot progress once it is stuck (see [`Self::stuck_for`]), then at
+    /// most every `STUCK_SYNC_WARNING_INTERVAL` while the node's height does not advance.
+    fn warn_if_stuck(&self, now: Instant) {
+        let mut stuck_since = self.stuck_since.lock();
+        if self.update_stuck_clock(&mut stuck_since, now).is_none() {
             return;
         }
-        if self.is_stuck_below_peer_floors() {
-            *last_warning = Some((Instant::now(), height));
-            warn!(
-                "Block sync cannot progress: the peers ahead of this node no longer serve block {}. \
-                Connect to a peer that serves it with `--peers`, or restore a ledger snapshot.",
-                height.saturating_add(1)
-            );
+        let Some(since) = stuck_since.as_mut() else {
+            return;
+        };
+        if since.warned_at.is_some_and(|at| now.saturating_duration_since(at) < STUCK_SYNC_WARNING_INTERVAL) {
+            return;
         }
+        since.warned_at = Some(now);
+        warn!(
+            "Block sync cannot progress: the peers ahead of this node no longer serve block {}. \
+            Connect to a peer that serves it with `--peers`, or restore a ledger snapshot.",
+            since.height.saturating_add(1)
+        );
     }
 
     /// Returns the higher of the ledger and sync heights. The sync height can lag the ledger, e.g.
@@ -1708,15 +1862,15 @@ impl<N: Network> BlockSync<N> {
         &self,
         current_height: u32,
         first_needed: Option<u32>,
+        capped: &HashMap<SocketAddr, Instant>,
     ) -> Option<(IndexMap<SocketAddr, BlockLocators<N>>, u32)> {
         // Retrieve the latest ledger height.
         let latest_ledger_height = self.ledger.latest_block_height();
 
         // Pick a set of peers above the latest ledger height, and include their locators and heights.
         // This will sort the peers by height in descending order.
-        let candidate_locators: IndexMap<_, _> = self
-            .locators
-            .read()
+        let locators = self.locators.read();
+        let mut candidates: Vec<_> = locators
             .iter()
             .filter_map(|(peer_ip, peer)| match first_needed {
                 None => Some((peer_ip, peer, peer.locators.latest_locator_height())),
@@ -1724,10 +1878,19 @@ impl<N: Network> BlockSync<N> {
                 Some(_) => None,
             })
             .filter(|(_, _, peer_height)| *peer_height > current_height)
+            .collect();
+        // Leave out the peers at their block request limit while enough others are candidates.
+        let num_uncapped = candidates.iter().filter(|(peer_ip, _, _)| !capped.contains_key(*peer_ip)).count();
+        if num_uncapped >= REDUNDANCY_FACTOR.min(candidates.len()) {
+            candidates.retain(|(peer_ip, _, _)| !capped.contains_key(*peer_ip));
+        }
+        let candidate_locators: IndexMap<_, _> = candidates
+            .into_iter()
             .sorted_by(|(_, _, a), (_, _, b)| b.cmp(a))
             .take(NUM_SYNC_CANDIDATE_PEERS)
             .map(|(peer_ip, peer, peer_height)| (*peer_ip, (peer.locators.clone(), peer_height)))
             .collect();
+        drop(locators);
 
         // Case 0: If there are no candidate peers, return `None`.
         if candidate_locators.is_empty() {
@@ -1858,6 +2021,12 @@ impl<N: Network> BlockSync<N> {
             .map(|(height, (hash, previous_hash))| (height, (hash, previous_hash, max_num_sync_ips)))
             .collect()
     }
+}
+
+/// Returns how many block requests to send a peer within the interval of its block request
+/// `limit`, leaving a margin for requests that arrive closer together than they were sent.
+fn max_block_requests_per_peer(limit: usize) -> usize {
+    (limit.saturating_mul(3) / 4).max(1)
 }
 
 /// Returns the end of the range to request from a peer at `height`, and which of the `others` serve
@@ -2045,7 +2214,8 @@ mod tests {
             prepare_requests_lock: Default::default(),
             last_response_at: Default::default(),
             trusted_peers_only: sync.trusted_peers_only,
-            last_stuck_warning: Default::default(),
+            stuck_since: Default::default(),
+            sent_block_requests: Default::default(),
         }
     }
 
@@ -2832,16 +3002,16 @@ mod tests {
         let peer_ip = sample_peer_ip(1);
         add_peers(&sync, 1, 1, 10, 0);
         let sync_peers: IndexMap<_, _> = [(peer_ip, sample_block_locators(10))].into_iter().collect();
-        assert!(sync.select_sync_ips(&sync_peers, 6..11, 1).is_some());
+        assert!(sync.select_sync_ips(&sync_peers, 6..11, 1, |_| false).is_some());
 
         insert_requests_to(&sync, peer_ip, 6..11);
         sync.insert_block_unavailable(peer_ip, BlockRequest::new(6, 11).unwrap(), not_yet(8));
-        assert!(sync.select_sync_ips(&sync_peers, 6..9, 1).is_some());
-        assert!(sync.select_sync_ips(&sync_peers, 6..10, 1).is_none());
+        assert!(sync.select_sync_ips(&sync_peers, 6..9, 1, |_| false).is_some());
+        assert!(sync.select_sync_ips(&sync_peers, 6..10, 1, |_| false).is_none());
 
         sync.insert_block_unavailable(peer_ip, BlockRequest::new(1, 6).unwrap(), pruned(4));
-        assert!(sync.select_sync_ips(&sync_peers, 3..8, 1).is_none());
-        assert!(sync.select_sync_ips(&sync_peers, 4..8, 1).is_some());
+        assert!(sync.select_sync_ips(&sync_peers, 3..8, 1, |_| false).is_none());
+        assert!(sync.select_sync_ips(&sync_peers, 4..8, 1, |_| false).is_some());
     }
 
     /// Tests that floors never decrease while the peer is connected, and that `remove_peer` clears
@@ -2925,6 +3095,14 @@ mod tests {
         assert_eq!(sync.failed_requests.lock().len(), 5);
     }
 
+    /// Returns whether block sync is stuck after the stuck predicate has held for the grace period
+    /// (see [`BlockSync::stuck_for`]).
+    fn is_stuck(sync: &BlockSync<CurrentNetwork>) -> bool {
+        let now = Instant::now();
+        sync.stuck_for_at(now);
+        sync.stuck_for_at(now + STUCK_SYNC_GRACE).is_some()
+    }
+
     /// Tests the stuck predicate: the peers ahead must all have floors above the next needed block,
     /// be a strict majority of the peers with locators, and number at least
     /// `MINIMUM_NUMBER_OF_PEERS` peers with locators unless the node only connects to trusted peers.
@@ -2944,22 +3122,22 @@ mod tests {
             add_peers(&sync, 1, num_pruned, HEIGHT + 100, HEIGHT + 2);
             add_peers(&sync, 1 + num_pruned as u16, num_level, HEIGHT, 0);
             assert!(sync.prepare_block_requests().is_empty());
-            assert_eq!(sync.is_stuck_below_peer_floors(), stuck, "{num_pruned} pruned, {num_level} level");
+            assert_eq!(is_stuck(&sync), stuck, "{num_pruned} pruned, {num_level} level");
         }
 
         // One peer ahead that serves the next block clears it.
         let sync = sample_sync_at_height(HEIGHT);
         add_peers(&sync, 1, 3, HEIGHT + 100, HEIGHT + 2);
-        assert!(sync.is_stuck_below_peer_floors());
+        assert!(is_stuck(&sync));
         add_peers(&sync, 4, 1, HEIGHT + 100, HEIGHT + 1);
-        assert!(!sync.is_stuck_below_peer_floors());
+        assert!(!is_stuck(&sync));
 
         // Without a floor report, the floor is 0.
         let sync = sample_sync_at_height(HEIGHT);
         for id in 1..=3 {
             sync.update_peer_locators(sample_peer_ip(id), &sample_block_locators(HEIGHT + 100), None).unwrap();
         }
-        assert!(!sync.is_stuck_below_peer_floors());
+        assert!(!is_stuck(&sync));
     }
 
     /// Tests that a node that only connects to trusted peers needs no minimum number of peers.
@@ -2968,7 +3146,7 @@ mod tests {
         for trusted_peers_only in [true, false] {
             let sync = sample_sync_at_height(1_000).with_trusted_peers_only(trusted_peers_only);
             add_peers(&sync, 1, 1, 1_100, 1_002);
-            assert_eq!(sync.is_stuck_below_peer_floors(), trusted_peers_only);
+            assert_eq!(is_stuck(&sync), trusted_peers_only);
         }
     }
 
@@ -2989,14 +3167,14 @@ mod tests {
         };
 
         sync.requests.write().insert(6, request(indexset![sample_peer_ip(1)], Some(genesis.clone())));
-        assert!(sync.is_stuck_below_peer_floors());
+        assert!(is_stuck(&sync));
 
         sync.requests.write().insert(1, request(IndexSet::new(), Some(genesis)));
-        assert!(!sync.is_stuck_below_peer_floors());
+        assert!(!is_stuck(&sync));
         sync.requests.write().remove(&1);
 
         sync.requests.write().insert(7, request(indexset![sample_peer_ip(1)], None));
-        assert!(!sync.is_stuck_below_peer_floors());
+        assert!(!is_stuck(&sync));
     }
 
     /// Tests that the stuck predicate and request building use the ledger height when the sync
@@ -3009,7 +3187,7 @@ mod tests {
         add_peers(&sync, 1, 3, 1_100, 1_001);
 
         assert_eq!(sync.prepare_block_requests().pop().unwrap().0.first().unwrap().0, 1_001);
-        assert!(!sync.is_stuck_below_peer_floors());
+        assert!(!is_stuck(&sync));
     }
 
     /// Tests that a `NotYet` reply to a request sent before the peer's locators changed does not
@@ -3044,7 +3222,7 @@ mod tests {
         assert_eq!(heights_of(&requests), vec![1_001, 1_002, 1_003]);
         let (_, (_, _, max_num_sync_ips)) = requests[0];
         assert!(max_num_sync_ips > 1);
-        let sync_ips = sync.select_sync_ips(&sync_peers, 1_001..1_004, max_num_sync_ips).unwrap();
+        let sync_ips = sync.select_sync_ips(&sync_peers, 1_001..1_004, max_num_sync_ips, |_| false).unwrap();
         assert_eq!(sync_ips.len(), 2);
 
         // Above peer A's cap, peer B alone serves the chunk.
@@ -3053,13 +3231,31 @@ mod tests {
         assert_eq!(requests.first().unwrap().0, 1_004);
         assert_eq!(sync_peers.keys().copied().collect::<Vec<_>>(), vec![peer_b]);
         let end = requests.first().unwrap().0 + DataBlocks::<CurrentNetwork>::MAXIMUM_NUMBER_OF_BLOCKS as u32;
-        assert_eq!(sync.select_sync_ips(&sync_peers, 1_004..end, max_num_sync_ips).unwrap().len(), 1);
+        assert_eq!(sync.select_sync_ips(&sync_peers, 1_004..end, max_num_sync_ips, |_| false).unwrap().len(), 1);
     }
 
     /// A communication service that records the block requests it sends.
-    #[derive(Default)]
     struct RecordingService {
         sent: std::sync::Mutex<Vec<(SocketAddr, u32, u32)>>,
+        block_request_limit: Option<(usize, Duration)>,
+    }
+
+    impl Default for RecordingService {
+        /// Returns a service with the router's block request limit.
+        fn default() -> Self {
+            let limit = (
+                snarkos_node_router::MAXIMUM_BLOCK_REQUESTS_PER_INTERVAL,
+                Duration::from_secs(snarkos_node_router::BLOCK_REQUEST_INTERVAL_IN_SECS as u64),
+            );
+            Self { sent: Default::default(), block_request_limit: Some(limit) }
+        }
+    }
+
+    impl RecordingService {
+        /// Returns the number of block requests sent to `peer_ip`.
+        fn num_sent_to(&self, peer_ip: SocketAddr) -> usize {
+            self.sent.lock().unwrap().iter().filter(|(ip, _, _)| *ip == peer_ip).count()
+        }
     }
 
     #[async_trait::async_trait]
@@ -3068,6 +3264,10 @@ mod tests {
 
         fn prepare_block_request(start: u32, end: u32) -> Self::Message {
             (start, end)
+        }
+
+        fn block_request_limit(&self) -> Option<(usize, Duration)> {
+            self.block_request_limit
         }
 
         async fn send(
@@ -3099,7 +3299,8 @@ mod tests {
         let _ = tokio::time::timeout(Duration::ZERO, sync.wait_for_peer_update()).await;
 
         let service = RecordingService::default();
-        assert!(!sync.send_block_requests(&service, &sync_peers, chunk).await);
+        let outcome = sync.send_block_requests(&service, &sync_peers, chunk, service.block_request_limit).await;
+        assert_eq!(outcome, ChunkOutcome::NotSent);
         assert!(service.sent.lock().unwrap().is_empty());
         assert!((1_001..1_006).all(|height| sync.failed_requests.lock().contains_key(&height)));
         tokio::time::timeout(Duration::from_secs(1), sync.wait_for_peer_update()).await.unwrap();
@@ -3107,7 +3308,8 @@ mod tests {
         let (requests, sync_peers) = sync.prepare_block_requests().into_iter().next().unwrap();
         assert_eq!(heights_of(&requests), (1_001..1_006).collect::<Vec<_>>());
         assert_eq!(sync_peers.keys().copied().collect::<Vec<_>>(), vec![peer_b]);
-        assert!(sync.send_block_requests(&service, &sync_peers, &requests).await);
+        let outcome = sync.send_block_requests(&service, &sync_peers, &requests, service.block_request_limit).await;
+        assert_eq!(outcome, ChunkOutcome::Sent);
         assert_eq!(*service.sent.lock().unwrap(), vec![(peer_b, 1_001, 1_006)]);
     }
 
@@ -3166,21 +3368,278 @@ mod tests {
         assert_eq!(sync_range(H, &[(1_003, H)], 3), (H, vec![]));
     }
 
-    /// Tests that the stall warning repeats at most every interval while the height stays, and
-    /// at once after the height advances.
+    /// Tests that the stall warning waits for the grace period, repeats at most every interval
+    /// while the height stays, and waits for the grace period again after the height advances.
     #[test]
     fn test_stall_warning_interval() {
         let sync = sample_sync_at_height(1_000);
         add_peers(&sync, 1, 3, 1_100, 1_050);
-        sync.warn_if_stuck();
-        let (warned_at, height) = sync.last_stuck_warning.lock().unwrap();
-        assert_eq!(height, 1_000);
+        let warned_at = |sync: &BlockSync<CurrentNetwork>| sync.stuck_since.lock().and_then(|since| since.warned_at);
+        let start = Instant::now();
+        sync.warn_if_stuck(start);
+        sync.warn_if_stuck(start + STUCK_SYNC_GRACE - Duration::from_secs(1));
+        assert_eq!(warned_at(&sync), None);
 
-        sync.warn_if_stuck();
-        assert_eq!(sync.last_stuck_warning.lock().unwrap().0, warned_at);
+        let first = start + STUCK_SYNC_GRACE;
+        sync.warn_if_stuck(first);
+        assert_eq!(warned_at(&sync), Some(first));
+        sync.warn_if_stuck(first + STUCK_SYNC_WARNING_INTERVAL - Duration::from_secs(1));
+        assert_eq!(warned_at(&sync), Some(first));
 
         sync.set_sync_height(1_001);
-        sync.warn_if_stuck();
-        assert_eq!(sync.last_stuck_warning.lock().unwrap().1, 1_001);
+        let advanced_at = first + Duration::from_secs(1);
+        sync.warn_if_stuck(advanced_at);
+        assert_eq!(warned_at(&sync), None);
+        sync.warn_if_stuck(advanced_at + STUCK_SYNC_GRACE);
+        assert_eq!(warned_at(&sync), Some(advanced_at + STUCK_SYNC_GRACE));
+    }
+
+    /// Returns when the stuck clock started.
+    fn clock_start(sync: &BlockSync<CurrentNetwork>) -> Option<Instant> {
+        sync.stuck_since.lock().map(|since| since.at)
+    }
+
+    /// Tests that the stuck clock keeps running while a peer leaves and returns every half grace
+    /// period, and that block sync counts as stuck once the stuck predicate has held for the grace
+    /// period in total. Tests that the clock restarts when a peer ahead serves the next block, when a
+    /// request can progress, or when the height changes.
+    #[test]
+    fn test_stuck_clock_survives_peer_churn() {
+        let sync = sample_sync_at_height(1_000);
+        add_peers(&sync, 1, 3, 1_100, 1_050);
+        let start = Instant::now();
+        let step = STUCK_SYNC_GRACE / 2;
+        let mut now = start;
+        assert_eq!(sync.stuck_for_at(now), None);
+        for round in 1..=4 {
+            now += step;
+            sync.remove_peer(&sample_peer_ip(3));
+            assert_eq!(sync.stuck_for_at(now), None);
+            now += step;
+            add_peers(&sync, 3, 1, 1_100, 1_050);
+            assert_eq!(sync.stuck_for_at(now), (round * step >= STUCK_SYNC_GRACE).then(|| now - start));
+        }
+        sync.warn_if_stuck(now);
+        assert_eq!(sync.stuck_since.lock().unwrap().warned_at, Some(now));
+
+        // A peer ahead serves the next block.
+        add_peers(&sync, 4, 1, 1_100, 1_001);
+        assert_eq!(sync.stuck_for_at(now), None);
+        assert_eq!(clock_start(&sync), None);
+        sync.remove_peer(&sample_peer_ip(4));
+        now += Duration::from_secs(1);
+        sync.stuck_for_at(now);
+        assert_eq!(clock_start(&sync), Some(now));
+
+        // A request for the next block is outstanding.
+        insert_requests_to(&sync, sample_peer_ip(1), 1_001..1_002);
+        assert_eq!(sync.stuck_for_at(now + Duration::from_secs(1)), None);
+        assert_eq!(clock_start(&sync), None);
+        sync.remove_peer(&sample_peer_ip(1));
+        add_peers(&sync, 1, 1, 1_100, 1_050);
+
+        // The height advances.
+        sync.stuck_for_at(now + Duration::from_secs(2));
+        sync.set_sync_height(1_001);
+        now += Duration::from_secs(3);
+        sync.stuck_for_at(now);
+        assert_eq!(sync.stuck_since.lock().map(|since| (since.at, since.height)), Some((now, 1_001)));
+    }
+
+    /// Tests that block sync counts as stuck only once the stuck predicate has held for the grace
+    /// period in total: for a node that never had enough peers before a third one connects, and for
+    /// one whose clock ran for a long time while the predicate failed.
+    #[test]
+    fn test_stuck_needs_the_predicate_for_the_grace_period() {
+        let start = Instant::now();
+        let sync = sample_sync_at_height(1_000);
+        add_peers(&sync, 1, 2, 1_100, 1_050);
+        assert_eq!(sync.stuck_for_at(start), None);
+        assert_eq!(clock_start(&sync), None);
+        let third = start + Duration::from_secs(600);
+        add_peers(&sync, 3, 1, 1_100, 1_050);
+        assert_eq!(sync.stuck_for_at(third), None);
+        assert_eq!(sync.stuck_for_at(third + STUCK_SYNC_GRACE - Duration::from_secs(1)), None);
+        assert_eq!(sync.stuck_for_at(third + STUCK_SYNC_GRACE), Some(STUCK_SYNC_GRACE));
+
+        // The predicate holds at one sample, then fails at samples every 5 s for 10 minutes.
+        let sync = sample_sync_at_height(1_000);
+        add_peers(&sync, 1, 3, 1_100, 1_050);
+        let sample = Duration::from_secs(5);
+        assert_eq!(sync.stuck_for_at(start), None);
+        sync.remove_peer(&sample_peer_ip(3));
+        let mut now = start;
+        while now < third {
+            now += sample;
+            assert_eq!(sync.stuck_for_at(now), None);
+        }
+        add_peers(&sync, 3, 1, 1_100, 1_050);
+        assert_eq!(sync.stuck_for_at(now), None);
+        let rest = STUCK_SYNC_GRACE - sample;
+        assert_eq!(sync.stuck_for_at(now + rest - Duration::from_secs(1)), None);
+        assert_eq!(sync.stuck_for_at(now + rest), Some(now + rest - start));
+    }
+
+    /// Tests that the stuck clock restarts when no peer is ahead, whether the peers left or are at
+    /// this node's height.
+    #[test]
+    fn test_stuck_clock_restarts_without_peers_ahead() {
+        let sync = sample_sync_at_height(1_000);
+        add_peers(&sync, 1, 3, 1_100, 1_050);
+        let start = Instant::now();
+        sync.stuck_for_at(start);
+        assert_eq!(clock_start(&sync), Some(start));
+        for id in 1..=3 {
+            sync.remove_peer(&sample_peer_ip(id));
+        }
+        assert_eq!(sync.stuck_for_at(start + Duration::from_secs(60)), None);
+        assert_eq!(clock_start(&sync), None);
+
+        let later = start + Duration::from_secs(2 * 60 * 60);
+        add_peers(&sync, 1, 3, 1_100, 1_050);
+        sync.stuck_for_at(later);
+        assert_eq!(clock_start(&sync), Some(later));
+        add_peers(&sync, 1, 3, 1_000, 1_050);
+        assert_eq!(sync.stuck_for_at(later + Duration::from_secs(60)), None);
+        assert_eq!(clock_start(&sync), None);
+    }
+
+    /// Tests that a request loop pass restarts the stuck clock when no peer is ahead, although it
+    /// has nothing to request.
+    #[tokio::test]
+    async fn test_request_loop_restarts_stuck_clock() {
+        let sync = sample_sync_at_height(1_000);
+        add_peers(&sync, 1, 3, 1_100, 1_050);
+        let service = RecordingService::default();
+        sync.try_issuing_block_requests(&service).await;
+        assert!(clock_start(&sync).is_some());
+        add_peers(&sync, 1, 3, 1_000, 1_050);
+        assert!(!sync.sync_state.read().can_issue_new_block_requests());
+        assert_eq!(sync.try_issuing_block_requests(&service).await, None);
+        assert_eq!(clock_start(&sync), None);
+    }
+
+    /// Runs `num_passes` passes of the request loop, as if all responses arrived after each, and
+    /// returns what the last pass returned.
+    async fn issue_passes(
+        sync: &BlockSync<CurrentNetwork>,
+        service: &RecordingService,
+        num_passes: usize,
+    ) -> Option<Instant> {
+        let mut next_request_slot = None;
+        for _ in 0..num_passes {
+            next_request_slot = sync.try_issuing_block_requests(service).await;
+            sync.requests.write().clear();
+        }
+        next_request_slot
+    }
+
+    /// Returns the number of block requests a peer gets from `service` within its interval.
+    fn max_requests_of(service: &RecordingService) -> usize {
+        max_block_requests_per_peer(service.block_request_limit.unwrap().0)
+    }
+
+    /// Tests that a single serving peer gets no more block requests within the interval than this
+    /// node's share of the peer's limit, that the request loop is told when the oldest request leaves
+    /// the interval, and that the peer gets requests again once they all have.
+    #[tokio::test]
+    async fn test_block_request_limit_one_peer() {
+        let sync = sample_sync_at_height(1_000);
+        let peer_ip = sample_peer_ip(1);
+        add_peers(&sync, 1, 1, 100_000, 0);
+        let service = RecordingService::default();
+        let max_requests = max_requests_of(&service);
+        assert!(max_requests < snarkos_node_router::MAXIMUM_BLOCK_REQUESTS_PER_INTERVAL);
+        let sent = |sync: &BlockSync<CurrentNetwork>| sync.sent_block_requests.lock()[&peer_ip].clone();
+
+        let next_request_slot = issue_passes(&sync, &service, 5).await;
+        assert_eq!(service.num_sent_to(peer_ip), max_requests);
+        let interval = service.block_request_limit.unwrap().1;
+        assert_eq!(next_request_slot, Some(*sent(&sync).front().unwrap() + interval));
+
+        let interval = Duration::from_millis(300);
+        let service = RecordingService { block_request_limit: Some((4, interval)), ..Default::default() };
+        sync.sent_block_requests.lock().clear();
+        let next_request_slot = issue_passes(&sync, &service, 1).await;
+        assert_eq!(service.num_sent_to(peer_ip), 3);
+        assert_eq!(next_request_slot, Some(*sent(&sync).front().unwrap() + interval));
+        tokio::time::sleep_until((*sent(&sync).back().unwrap() + interval).into()).await;
+        issue_passes(&sync, &service, 1).await;
+        assert_eq!(service.num_sent_to(peer_ip), 6);
+    }
+
+    /// Tests that once a peer reaches its block request limit, the requests go to other peers.
+    #[tokio::test]
+    async fn test_block_request_limit_spreads_load() {
+        let sync = sample_sync_at_height(1_000);
+        add_peers(&sync, 1, 3, 100_000, 0);
+        let service =
+            RecordingService { block_request_limit: Some((8, Duration::from_secs(60))), ..Default::default() };
+        assert!(issue_passes(&sync, &service, 1).await.is_some());
+        for id in 1..=3 {
+            assert_eq!(service.num_sent_to(sample_peer_ip(id)), max_requests_of(&service));
+        }
+    }
+
+    /// Tests that request building leaves out a capped peer while enough others serve the
+    /// requests, and keeps it when none do.
+    #[test]
+    fn test_prepare_avoids_capped_peers() {
+        let sync = sample_sync_at_height(1_000);
+        let num_peers = REDUNDANCY_FACTOR as u16 + 1;
+        add_peers(&sync, 1, num_peers as usize, 1_100, 0);
+        let capped: HashMap<_, _> = [(sample_peer_ip(1), Instant::now())].into_iter().collect();
+        let (_, sync_peers) = sync.prepare_block_requests_avoiding(&capped).pop().unwrap();
+        assert!(!sync_peers.contains_key(&sample_peer_ip(1)));
+
+        let capped: HashMap<_, _> = (1..=num_peers).map(|id| (sample_peer_ip(id), Instant::now())).collect();
+        let (_, sync_peers) = sync.prepare_block_requests_avoiding(&capped).pop().unwrap();
+        assert!(sync_peers.keys().all(|peer_ip| capped.contains_key(peer_ip)));
+    }
+
+    /// Tests that a service without a block request limit sends a peer every request.
+    #[tokio::test]
+    async fn test_no_block_request_limit() {
+        let sync = sample_sync_at_height(1_000);
+        add_peers(&sync, 1, 1, 100_000, 0);
+        let service = RecordingService { block_request_limit: None, ..Default::default() };
+        assert_eq!(issue_passes(&sync, &service, 2).await, None);
+        assert_eq!(service.num_sent_to(sample_peer_ip(1)), 2 * MAX_BLOCK_REQUESTS);
+        assert!(sync.sent_block_requests.lock().is_empty());
+    }
+
+    /// Tests that a chunk is prepared again instead of waiting for the limit when a peer it was
+    /// prepared for no longer serves it: peer A is capped, B serves the chunk, and C no longer does.
+    /// A capped peer that has disconnected does not defer a chunk either.
+    #[tokio::test]
+    async fn test_block_request_limit_defers_only_for_capped_servers() {
+        let sync = sample_sync_at_height(1_000);
+        let (peer_a, peer_b, peer_c) = (sample_peer_ip(1), sample_peer_ip(2), sample_peer_ip(3));
+        add_peers(&sync, 1, 3, 100_000, 0);
+        let service = RecordingService::default();
+        let limit = service.block_request_limit;
+        let (requests, sync_peers) = sync.prepare_block_requests().pop().unwrap();
+        let chunk: Vec<_> = requests[..DataBlocks::<CurrentNetwork>::MAXIMUM_NUMBER_OF_BLOCKS as usize]
+            .iter()
+            .map(|(height, (hash, previous_hash, _))| (*height, (*hash, *previous_hash, 3)))
+            .collect();
+        sync.sent_block_requests.lock().insert(peer_a, vec![Instant::now(); max_requests_of(&service)].into());
+        insert_requests_to(&sync, peer_c, 1_090..1_091);
+        sync.insert_block_unavailable(peer_c, BlockRequest::new(1_090, 1_091).unwrap(), pruned(1_095));
+        let _ = tokio::time::timeout(Duration::ZERO, sync.wait_for_peer_update()).await;
+
+        assert_eq!(sync.send_block_requests(&service, &sync_peers, &chunk, limit).await, ChunkOutcome::NotSent);
+        tokio::time::timeout(Duration::from_secs(1), sync.wait_for_peer_update()).await.unwrap();
+        let (reissued, reissue_peers) = sync.prepare_block_requests().into_iter().next().unwrap();
+        assert_eq!(sync.send_block_requests(&service, &reissue_peers, &reissued, limit).await, ChunkOutcome::Sent);
+        assert_eq!(*service.sent.lock().unwrap(), vec![(peer_b, 1_001, 1_006)]);
+
+        // Peer A alone serves the next chunk, is capped, and disconnects.
+        let only_a: IndexMap<_, _> = [(peer_a, sync_peers[&peer_a].clone())].into_iter().collect();
+        sync.remove_peer(&peer_a);
+        let _ = tokio::time::timeout(Duration::ZERO, sync.wait_for_peer_update()).await;
+        let outcome = sync.send_block_requests(&service, &only_a, &requests[5..10], limit).await;
+        assert_eq!(outcome, ChunkOutcome::NotSent);
+        tokio::time::timeout(Duration::from_secs(1), sync.wait_for_peer_update()).await.unwrap();
     }
 }

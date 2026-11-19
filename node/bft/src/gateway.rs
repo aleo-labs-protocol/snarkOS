@@ -423,6 +423,11 @@ impl<N: Network> CommunicationService for Gateway<N> {
         Event::BlockRequest(BlockRequest { start_height, end_height })
     }
 
+    /// Returns `None`: the block requests sent to validators are not limited.
+    fn block_request_limit(&self) -> Option<(usize, Duration)> {
+        None
+    }
+
     /// Sends the given message to specified peer.
     ///
     /// This function returns as soon as the message is queued to be sent,
