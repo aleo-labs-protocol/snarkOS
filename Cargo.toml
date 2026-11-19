@@ -49,7 +49,7 @@ default-features = false
 [workspace.dependencies.snarkvm]
 #path = "../snarkVM"
 git = "https://github.com/aleo-labs-protocol/snarkVM.git"
-rev = "b18c0cf81e0d9c1e8fb2ea41b7aad229534e46b1" #measure/rocksdb-filters-on-de20fd4
+rev = "7c63942e78db766df68cefebf82da9cae61d4c35" #measure/rocksdb-filters-compact-on-de20fd4
 #version = "=4.12.0"
 default-features = false
 
