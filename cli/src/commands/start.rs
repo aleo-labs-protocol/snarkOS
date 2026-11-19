@@ -508,7 +508,6 @@ impl Start {
         if !self.prune_authority_data {
             return Ok(AuthorityRetention::default());
         }
-        // Clients and validators keep a ledger, so only they can prune it.
         if !matches!(self.parse_node_type(), NodeType::Client | NodeType::Validator) {
             bail!("`--prune-authority-data` prunes the ledger and is only supported on a client or validator");
         }

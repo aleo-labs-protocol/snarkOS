@@ -155,8 +155,7 @@ fn range_may_be_pruned<N: Network>(start: u32, end: u32, latest_height: u32) -> 
 }
 
 /// Returns the `410 Gone` for a range from `start` that reaches below `pruned_below`, the store's
-/// authority-pruning watermark, so that the node can no longer assemble its blocks. As with other
-/// errors, the status is only visible on `/v2`: the default and `/v1` prefixes turn it into a 500.
+/// authority-pruning watermark.
 fn pruned_error(start: u32, pruned_below: u32) -> RestError {
     let height = start.max(1);
     RestError::gone(anyhow!(
@@ -413,21 +412,12 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             return Err(RestError::bad_request(anyhow!("invalid input: neither a block height nor a block hash")));
         };
 
-        // Attempt to find a serialized block in the cache. A recent block is served without reading
-        // storage; an older one may have been pruned since it was cached, so the watermark decides.
+        // Serve from the cache unless the block may have been pruned since it was cached.
         let cached = rest.block_cache.lock().get(&hash).cloned();
-        if let Some((height, json_block)) = cached {
-            let end = height.saturating_add(1);
-            if !range_may_be_pruned::<N>(height, end, rest.ledger.latest_height()) {
-                return Ok(json_block);
-            }
-            let pruning = tokio::task::spawn_blocking(move || rest.range_pruning(height, end))
-                .await
-                .map_err(|e| RestError::internal_server_error(anyhow!("tokio error: {e}")))?;
-            return match pruning {
-                RangePruning::Pruned { pruned_below } => Err(pruned_error(height, pruned_below)),
-                RangePruning::Retained | RangePruning::Unknown => Ok(json_block),
-            };
+        if let Some((height, json_block)) = cached
+            && !range_may_be_pruned::<N>(height, height.saturating_add(1), rest.ledger.latest_height())
+        {
+            return Ok(json_block);
         }
 
         // Retrieve and serialize the block from the database. A block whose authority has been pruned

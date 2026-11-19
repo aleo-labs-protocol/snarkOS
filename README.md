@@ -269,21 +269,16 @@ APrivateKey1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 ## 3.4 Prune Old Authority Data
 
-A block's authority (the certificates that committed it) is most of its size. Nodes need only recent
-authorities for consensus and sync. Start a client or validator with `--prune-authority-data` to keep the
-authority data of only the last 500,000 blocks, about two weeks (snarkVM's `AUTHORITY_RETENTION_BLOCKS`).
-Older blocks keep their headers and transactions. `/v2/block/{height}` answers `410 Gone` for them.
+Start a client or validator with `--prune-authority-data` to keep the authority data (the certificates) of
+only the last 500,000 blocks, about two weeks. Older blocks keep their headers and transactions.
+`/v2/block/{height}` answers `410 Gone` for them, and peers fetch them from other nodes.
 
 The first start with the flag prunes the existing ledger before the node joins the network. This can take a
 while on a large ledger. A pruned ledger that is opened without the flag keeps working and stops pruning.
 
-A pruning node tells its peers the oldest block it serves. Peers request older blocks from other peers, such
-as archival nodes, and a pruning node answers a request for older blocks with the oldest block it serves.
-
-If no connected peer serves the blocks a node needs, the node warns. If it can sync from the CDN, it shuts
-down after 5 minutes, so that a restart fetches the missing blocks from the CDN. With `--nocdn`, or `--dev`
-without `--cdn`, it keeps waiting: add a peer that serves the blocks with `--peers`, or restore a ledger
-snapshot.
+If no peer serves the blocks a node needs, the node shuts down after 5 minutes, so that a restart syncs them
+from the CDN. With `--nocdn`, or `--dev` without `--cdn`, it keeps waiting: add a peer with `--peers`, or
+restore a ledger snapshot.
 
 ## 4. FAQs
 

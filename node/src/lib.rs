@@ -55,8 +55,8 @@ use snarkos_node_router::{
     Router,
     messages::{BlockRequest, Message},
 };
-use snarkos_node_sync::{BlockSync, STUCK_SYNC_SHUTDOWN_THRESHOLD, serve_block_request};
-use snarkos_utilities::SignalHandler;
+use snarkos_node_sync::{BlockSync, Ping, STUCK_SYNC_SHUTDOWN_THRESHOLD, serve_block_request};
+use snarkos_utilities::{SignalHandler, Stoppable};
 use snarkvm::{
     ledger::{
         Ledger,
@@ -83,28 +83,9 @@ impl AuthorityRetention {
         Ok(Self(Some(blocks)))
     }
 
-    /// Returns the number of recent blocks whose authority data this node keeps, or `None` if it
-    /// keeps all of it.
-    pub fn blocks(&self) -> Option<u32> {
-        self.0
-    }
-
     /// Returns the options to load the ledger with.
     fn load_options(self) -> LoadOptions {
         LoadOptions::default().with_authority_retention(self.0)
-    }
-
-    /// Returns the options to load the ledger with, installing `dev_committee` if it is set.
-    #[cfg(feature = "test_network")]
-    fn load_options_with_dev_committee(
-        self,
-        dev_committee: Option<snarkvm::ledger::DevCommitteeOptions>,
-    ) -> LoadOptions {
-        let options = self.load_options();
-        match dev_committee {
-            Some(dev_committee) => options.with_dev_committee(dev_committee),
-            None => options,
-        }
     }
 }
 
@@ -120,14 +101,44 @@ pub enum CdnFallback {
     Failed,
 }
 
-/// Waits for the startup CDN sync, if any, and reports whether a restart could repeat it.
-pub async fn wait_for_cdn(cdn_sync: Option<Arc<CdnBlockSync>>) -> Result<CdnFallback> {
-    let Some(cdn_sync) = cdn_sync else { return Ok(CdnFallback::Disabled) };
-    // A failed sync was logged by the CDN sync task.
-    Ok(match cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN")? {
-        Ok(_) => CdnFallback::Available,
-        Err(_) => CdnFallback::Failed,
-    })
+/// Waits for the startup CDN sync, if any, then records the ledger height in `sync` and advertises
+/// it through `ping`. Returns whether a restart could repeat the CDN sync.
+async fn finish_cdn_sync<N: Network, C: ConsensusStorage<N>>(
+    cdn_sync: Option<Arc<CdnBlockSync>>,
+    ledger: &Ledger<N, C>,
+    sync: &BlockSync<N>,
+    ping: &Ping<N>,
+) -> Result<CdnFallback> {
+    let cdn_fallback = match cdn_sync {
+        None => CdnFallback::Disabled,
+        // A failed sync was logged by the CDN sync task.
+        Some(cdn_sync) => match cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN")? {
+            Ok(_) => CdnFallback::Available,
+            Err(_) => CdnFallback::Failed,
+        },
+    };
+    // Blocks added by CDN sync do not pass through block sync.
+    sync.set_sync_height(ledger.latest_height());
+    ping.update_block_locators(sync.get_block_locators()?);
+    Ok(cdn_fallback)
+}
+
+/// Shuts the node down if its block sync stays stuck (see [`shut_down_if_stuck_sync`]). Returns at
+/// once if CDN sync is disabled.
+async fn monitor_stuck_sync<N: Network>(
+    sync: Arc<BlockSync<N>>,
+    signal_handler: Arc<SignalHandler>,
+    cdn_fallback: CdnFallback,
+) {
+    if cdn_fallback == CdnFallback::Disabled {
+        return;
+    }
+    while !signal_handler.is_stopped() {
+        tokio::time::sleep(STUCK_SYNC_SHUTDOWN_THRESHOLD / 10).await;
+        if shut_down_if_stuck_sync(&sync, &signal_handler, cdn_fallback) {
+            break;
+        }
+    }
 }
 
 /// Returns `true` if a node whose block sync has been stuck for `stuck_for` must shut down: after
@@ -139,7 +150,7 @@ fn is_stuck_sync_fatal(stuck_for: Option<Duration>, cdn_fallback: CdnFallback) -
 
 /// Shuts the node down, as failed, if its block sync has been stuck long enough (see
 /// [`is_stuck_sync_fatal`]), and returns whether it did.
-pub fn shut_down_if_stuck_sync<N: Network>(
+fn shut_down_if_stuck_sync<N: Network>(
     sync: &BlockSync<N>,
     signal_handler: &SignalHandler,
     cdn_fallback: CdnFallback,
@@ -286,17 +297,6 @@ mod tests {
         let pruning = AuthorityRetention::prune::<CurrentNetwork>(min).unwrap();
         assert_eq!(pruning.load_options().authority_retention, Some(min));
         assert!(AuthorityRetention::prune::<CurrentNetwork>(min - 1).is_err());
-    }
-
-    #[cfg(feature = "test_network")]
-    #[test]
-    fn dev_committee_keeps_the_retention_window() {
-        let dev_committee = snarkvm::ledger::DevCommitteeOptions { start_round: None, dev_num_validators: 4, seed: 0 };
-        let min = snarkvm::ledger::store::min_authority_retention_blocks::<CurrentNetwork>();
-        let pruning = AuthorityRetention::prune::<CurrentNetwork>(min).unwrap();
-        let options = pruning.load_options_with_dev_committee(Some(dev_committee));
-        assert_eq!(options.authority_retention, Some(min));
-        assert!(options.dev_committee.is_some());
     }
 
     /// Tests that a stuck node shuts down only after the threshold, and never with CDN sync disabled.

@@ -22,9 +22,9 @@ use common::{
     test_peer::{TestPeer, connect_peer},
 };
 
-use snarkos_node_network::{NodeType, PeerPoolHandling};
+use snarkos_node_network::{ConnectionMode, NodeType, PeerPoolHandling};
 use snarkos_node_router::messages::{BlockRequest, BlockResponse, BlockResponseStatus, Message, Ping};
-use snarkos_node_sync::locators::{BlockLocators, CHECKPOINT_INTERVAL, NUM_RECENT_BLOCKS};
+use snarkos_node_sync::BlockSync;
 use snarkvm::{
     ledger::{LoadOptions, store::min_authority_retention_blocks},
     prelude::{
@@ -67,15 +67,6 @@ fn sample_pruned_ledger(storage_mode: StorageMode) -> (Block<CurrentNetwork>, u3
     (genesis, ledger.vm().block_store().authority_pruned_below().unwrap().unwrap())
 }
 
-/// Returns the block locators of `ledger`.
-fn locators(ledger: &Ledger<CurrentNetwork, ConsensusDB<CurrentNetwork>>) -> BlockLocators<CurrentNetwork> {
-    let tip = ledger.latest_height();
-    let hash = |height: u32| (height, ledger.get_hash(height).unwrap());
-    let recents = (tip.saturating_sub(NUM_RECENT_BLOCKS as u32 - 1)..=tip).map(hash).collect();
-    let checkpoints = (0..=tip).step_by(CHECKPOINT_INTERVAL as usize).map(hash).collect();
-    BlockLocators::new(recents, checkpoints).unwrap()
-}
-
 /// Returns the `Ping`s the peer received.
 fn pings(peer: &TestPeer) -> Vec<Ping<CurrentNetwork>> {
     peer.received_messages()
@@ -113,7 +104,8 @@ async fn pruned_client_serves_from_its_watermark() {
     let node_addr = connect_peer(node.router(), &peer).await;
 
     // The `Ping` carries the watermark as the floor.
-    assert!(node.router().send_ping(peer.listening_addr().await, Some(locators(node.ledger()))));
+    let locators = BlockSync::new(node.router().ledger().clone(), ConnectionMode::Router).get_block_locators().unwrap();
+    assert!(node.router().send_ping(peer.listening_addr().await, Some(locators)));
     let peer_clone = peer.clone();
     deadline!(Duration::from_secs(10), move || !pings(&peer_clone).is_empty());
     assert_eq!(pings(&peer).last().unwrap().oldest_retained, Some(w));

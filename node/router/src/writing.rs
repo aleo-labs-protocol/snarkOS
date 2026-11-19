@@ -36,7 +36,13 @@ impl<N: Network> Router<N> {
     /// Returns the oldest block height this node serves: its authority-pruning watermark, or 0. A
     /// watermark that cannot be read counts as 0.
     fn oldest_retained_height(&self) -> u32 {
-        self.ledger().authority_pruned_below().ok().flatten().unwrap_or(0)
+        self.ledger()
+            .authority_pruned_below()
+            .unwrap_or_else(|error| {
+                warn!("Failed to read the authority-pruning watermark - {error:#}");
+                None
+            })
+            .unwrap_or(0)
     }
 
     /// Returns `true` if the peer is connected at a message version that receives `BlockResponse`
