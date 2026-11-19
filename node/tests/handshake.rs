@@ -288,3 +288,27 @@ async fn duplicate_connection_attempts() {
     assert_eq!(node1.router().number_of_connected_peers(), 1);
     assert_eq!(node2.router().number_of_connected_peers(), 1);
 }
+
+/// A peer that accepts the connection and then never answers holds the router's handshake until it
+/// times out. Once it has, the peer must be dialable again; a peer stuck as connecting is never
+/// dialed again and turns away every inbound handshake.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_timed_out_handshake_does_not_leave_the_peer_connecting() {
+    let node = client().await;
+
+    // Accept connections and keep them open without ever writing to them.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let silent_addr = listener.local_addr().unwrap();
+    let _silent = tokio::spawn(async move {
+        let mut streams = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            streams.push(stream);
+        }
+    });
+
+    let result = node.router().connect(silent_addr).unwrap().await.unwrap();
+    assert!(result.is_err(), "the handshake should have timed out");
+
+    assert!(!node.router().is_connecting(silent_addr), "the timed-out peer is still marked as connecting");
+    assert!(!matches!(node.router().connect(silent_addr), Err(ConnectError::AlreadyConnecting { .. })));
+}
