@@ -386,7 +386,7 @@ pub mod prop_tests {
         assert_eq!(BlockResponse::<CurrentNetwork>::read_le(&bytes[..]).unwrap(), block_response);
     }
 
-    /// A `Blocks` response has the same bytes as before status replies existed, in both forms.
+    /// A `Blocks` response keeps the legacy and V12 layouts.
     #[test]
     fn blocks_response_bytes_are_unchanged() {
         let request = BlockRequest::new(1, 3).unwrap();

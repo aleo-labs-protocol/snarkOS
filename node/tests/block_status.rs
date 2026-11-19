@@ -97,7 +97,7 @@ macro_rules! test_block_status_gating {
         $(
             paste::paste! {
                 /// Tests that a peer below the status version gets `Ping` marker 1, and is
-                /// disconnected when it asks for blocks past the tip, as before status replies.
+                /// disconnected when it asks for blocks past the tip.
                 #[tokio::test]
                 async fn [<$node_type _sends_legacy_replies_to_old_peer>]() {
                     let node = node::$node_type().await;
@@ -176,7 +176,9 @@ async fn pruned_reply_reroutes_request() {
 
     let peer_clone = peer_b.clone();
     deadline!(Duration::from_secs(10), move || times_requested(&peer_clone, chunk) == 1);
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Peer B holds the chunk now. A `Ping` sent to peer A after that arrives after any request the
+    // node sent peer A before it.
+    ping_peer(node.router(), &peer_a).await;
     assert_eq!(times_requested(&peer_a, chunk), 1);
     assert_eq!(node.router().number_of_connected_peers(), 2);
 }
