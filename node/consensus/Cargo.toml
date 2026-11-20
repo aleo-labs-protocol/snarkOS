@@ -72,7 +72,6 @@ workspace = true
 
 [dependencies.snarkos-node-bft-storage-service]
 workspace = true
-features = [ "persistent" ]
 
 [dependencies.snarkos-node-sync]
 workspace = true

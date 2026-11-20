@@ -116,7 +116,6 @@ workspace = true
 
 [dependencies.snarkos-node-bft-storage-service]
 workspace = true
-features = [ "memory" ]
 
 [dependencies.snarkos-node-network]
 workspace = true
@@ -195,6 +194,10 @@ workspace = true
 
 [dev-dependencies.snarkos-node-bft]
 path = "."
+features = [ "test-helpers" ]
+
+[dev-dependencies.snarkos-node-bft-storage-service]
+workspace = true
 features = [ "test-helpers" ]
 
 [dev-dependencies.snarkos-node-sync]
