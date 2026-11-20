@@ -3,8 +3,7 @@ name: Run snarkOS Benchmarks
 on:
   push:
     branches:
-      - 'testnet'
-      - 'mainnet'
+      - 'release/**'
   workflow_dispatch:
 
 jobs:
@@ -112,7 +111,7 @@ jobs:
         uses: benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc # v1.22.2
         with:
           name: snarkOS Benchmarks
-          # testnet and mainnet keep separate gh-pages histories.
+          # Each release branch keeps its own gh-pages history.
           benchmark-data-dir-path: dev/bench/${{ github.ref_name }}
           alert-threshold: '150%'
           comment-on-alert: true
@@ -125,14 +124,14 @@ jobs:
           tool: 'customBiggerIsBetter'
           output-file-path: results.json
           alert-comment-cc-users: '@vicsn,@snarkworld,@cbeck88'
-          # The next step pushes stored results for testnet and mainnet.
+          # The next step pushes stored results for release branches.
           auto-push: false
           # Enable Job Summary for PRs
           summary-always: true
 
       - name: Push benchmark result
         # Manual runs on other branches keep the job summary and do not update gh-pages.
-        if: github.ref_name == 'testnet' || github.ref_name == 'mainnet'
+        if: startsWith(github.ref, 'refs/heads/release/')
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: git push origin gh-pages
