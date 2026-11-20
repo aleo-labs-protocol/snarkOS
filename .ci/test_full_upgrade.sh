@@ -151,10 +151,10 @@ function stop_node() {
   fi
 }
 
-# Build heights string: for L, we want exactly L entries: 0,5,10,...,5*(L-1)
+# Build heights string: for L, we want exactly L entries: 0,5,6,...,L+3, the shape of snarkVM's
+# TEST_CONSENSUS_VERSION_HEIGHTS.
 function build_consensus_heights() {
   local lcv="$1"
-  local step=5
 
   if ! is_integer "$lcv" || (( lcv <= 0 )); then
     echo ""
@@ -164,7 +164,7 @@ function build_consensus_heights() {
   local heights=""
   local i=0
   while (( i < lcv )); do
-    local h=$(( i * step ))
+    local h=$(( i == 0 ? 0 : i + 4 ))
     if [ -z "$heights" ]; then
       heights="$h"
     else
@@ -177,10 +177,9 @@ function build_consensus_heights() {
 }
 
 # Build heights string for PR when its latest_consensus_version differs from release:
-# same as build_consensus_heights, but last step is +100 instead of +5.
+# same as build_consensus_heights, but the last version activates 100 blocks after the previous one.
 function build_consensus_heights_with_big_last() {
   local lcv="$1"
-  local step=5
 
   if ! is_integer "$lcv" || (( lcv <= 0)) ; then
     echo ""
@@ -196,9 +195,9 @@ function build_consensus_heights_with_big_last() {
   local heights=""
   local i=0
 
-  # Up to the penultimate entry with step 5
+  # Up to the penultimate entry
   while (( i < (lcv - 1) )); do
-    local h=$(( i * step ))
+    local h=$(( i == 0 ? 0 : i + 4 ))
     if [ -z "$heights" ]; then
       heights="$h"
     else
@@ -208,7 +207,7 @@ function build_consensus_heights_with_big_last() {
   done
 
   # Previous value is for i = lcv - 2
-  local prev=$(( (lcv - 2) * step ))
+  local prev=$(( lcv == 2 ? 0 : lcv + 2 ))
   local last=$(( prev + 100 ))
   heights="$heights,$last"
 
@@ -244,14 +243,14 @@ function derive_consensus_env_from_version() {
   log "Computed latest_consensus_version (release) = $lcv_release"
   log "Computed latest_consensus_version (current) = $lcv_current"
 
-  # Simplification: step is always 5, and |lcv_current - lcv_release| <= 1.
+  # Simplification: |lcv_current - lcv_release| <= 1.
   local heights_release
   local heights_current
 
   heights_release="$(build_consensus_heights "$lcv_release")"
 
   if [ "$lcv_current" = "$lcv_release" ]; then
-    # Same consensus horizon → same step-5 pattern
+    # Same consensus horizon → same pattern
     heights_current="$(build_consensus_heights "$lcv_current")"
   else
     # Different latest consensus version → stretch the last step by +100
@@ -565,8 +564,8 @@ done
 
 # Ensure that every upgraded node applies the configured consensus version schedule, i.e.
 # that its consensus version is the one that its block height implies. Note that this is
-# not necessarily `EXPECTED_MAX_CONSENSUS_VERSION`: the test does not run long enough to
-# reach the last configured height, so the version is checked against the height reached.
+# not necessarily `EXPECTED_MAX_CONSENSUS_VERSION`: the test may end before the last
+# configured height, so the version is checked against the height reached.
 log "Checking that the consensus version matches the configured schedule..."
 for node_index in $(seq 0 $((total_validators+total_clients-1))); do
   # Retry a few times, as the height and the consensus version are read separately and so
