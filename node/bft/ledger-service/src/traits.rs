@@ -24,6 +24,7 @@ use snarkvm::{
         puzzle::{Solution, SolutionID},
     },
     prelude::{Address, ConsensusVersion, Field, Network, Result},
+    synthesizer::process::deployment_freeze::FreezeWindow,
 };
 
 use indexmap::IndexMap;
@@ -147,6 +148,12 @@ pub trait LedgerService<N: Network>: std::fmt::Debug + Send + Sync {
 
     /// Checks the given solution is well-formed.
     async fn check_solution_basic(&self, solution_id: SolutionID<N>, solution: Data<Solution<N>>) -> Result<()>;
+
+    /// Returns the deployment freeze window if deployments are frozen for the next block.
+    /// This is node policy: such a node turns deployments away instead of admitting, forwarding or proposing them.
+    fn deployment_freeze_policy(&self) -> Option<FreezeWindow> {
+        None
+    }
 
     /// Checks the given transaction is well-formed and unique.
     async fn check_transaction_basic(

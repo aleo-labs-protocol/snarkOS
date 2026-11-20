@@ -30,6 +30,7 @@ use snarkvm::{
         store::ConsensusStorage,
     },
     prelude::{Address, ConsensusVersion, Field, Network, Result, narwhal::BatchCertificate},
+    synthesizer::process::deployment_freeze::FreezeWindow,
 };
 
 use async_trait::async_trait;
@@ -168,6 +169,11 @@ impl<N: Network, C: ConsensusStorage<N>> LedgerService<N> for TranslucentLedgerS
     /// Always succeeds.
     async fn check_solution_basic(&self, _solution_id: SolutionID<N>, _solution: Data<Solution<N>>) -> Result<()> {
         Ok(())
+    }
+
+    /// Returns the deployment freeze policy of the inner ledger.
+    fn deployment_freeze_policy(&self) -> Option<FreezeWindow> {
+        self.inner.deployment_freeze_policy()
     }
 
     /// Always succeeds.
