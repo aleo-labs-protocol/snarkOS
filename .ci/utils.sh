@@ -632,16 +632,25 @@ function wait_for_heights() {
   : "${max_wait:=300}"
   : "${poll_interval:=5}"
 
-  local start
-  start=$(now) 
-  
+  local start elapsed
+  start=$(now)
+  # `check_heights` logs progress only for an elapsed time that is a positive multiple of 60.
+  local logged_minutes=0
+  local report
+
   while (( $(elapsed_since "$start") < max_wait )); do
-    if check_heights "$start_index" "$end_index" "$min_height" "$network_name" "$elapsed"; then
+    elapsed=$(elapsed_since "$start")
+    report=0
+    if (( elapsed / 60 > logged_minutes )); then
+      logged_minutes=$((elapsed / 60))
+      report=$((logged_minutes * 60))
+    fi
+    if check_heights "$start_index" "$end_index" "$min_height" "$network_name" "$report"; then
       return 0
     fi
 
     # Continue waiting
-    sleep 5
+    sleep "$poll_interval"
   done
   return 1
 }
@@ -659,40 +668,62 @@ function print_client_logs() {
 }
 
 
-# Function checking that the first node reached the latest (unchanging) consensus version.
+# Blocks until the node with the given index reaches the activation height of the last version in
+# the consensus version schedule it serves, and checks that it runs that version there.
 function wait_for_stable_consensus_version() {
   local node_index=$1
   local network_name=$2
-  
-  local last_seen_consensus_version=0
-  local last_seen_height=0
 
-  # Check consensus versions periodically with a timeout
-  log "ℹ️ Waiting for consensus version to stabilize..."
-  local start
+  local max_wait=300
+  local port=$((3030 + node_index))
+  # Versions that are not scheduled have a height of `u32::MAX`, and are never reached.
+  local filter='[.consensus_heights[] | select(. != 4294967295)] | "\(length) \(last)"'
+
+  local schedule="" final_version final_height height consensus_version
+  local start next_report=10
   start=$(now)
-  
-  while (( $(elapsed_since "$start") < 300 )); do  # 5 minutes max
-    consensus_version=$(get_consensus_version "$node_index" "$network_name" || echo "0")
-    height=$(get_block_height "$node_index" "$network_name" || echo "0")
 
-    # If the consensus version is greater than the last seen, we update it.
-    if (( consensus_version > last_seen_consensus_version )); then
-      log "✅ Consensus version updated to $consensus_version"
-    # If the consensus version is the same whereas the block height is different and at least 10, we can assume that the consensus version is stable
-    elif (( (height != last_seen_height) && (height >= 10) )); then
-        log "✅ Consensus version is stable at $consensus_version with height $height"
-        return 0
+  log "ℹ️ Waiting for the last scheduled consensus version..."
+  while (( $(elapsed_since "$start") < max_wait )); do
+    if [[ -z "$schedule" ]]; then
+      if schedule=$(curl -s --max-time 5 "http://$localhost:$port/v2/$network_name/version" | jq -er "$filter" 2>/dev/null) &&
+         [[ "$schedule" =~ ^[0-9]+\ [0-9]+$ ]]; then
+        read -r final_version final_height <<< "$schedule"
+        # A devnet makes about one block every 2 s.
+        if (( final_height * 4 > max_wait )); then
+          max_wait=$(( final_height * 4 ))
+        fi
+        log "Node #${node_index} schedules consensus version $final_version at height $final_height"
+      else
+        schedule=""
+      fi
     fi
 
-    last_seen_consensus_version=$consensus_version
-    last_seen_height=$height
+    if [[ -n "$schedule" ]]; then
+      height=$(get_block_height_by_port "$port" "$network_name" 5)
+      if (is_integer "$height") && (( height >= final_height )); then
+        consensus_version=$(get_consensus_version "$node_index" "$network_name" || echo "")
+        if [[ "$consensus_version" != "$final_version" ]]; then
+          log "❌ Node #${node_index} is at consensus version ${consensus_version:-<none>} at height $height, expected $final_version"
+          return 1
+        fi
+        log "✅ Consensus version is stable at $consensus_version with height $height"
+        return 0
+      fi
+    fi
 
-    # Continue waiting
-    sleep 10
-    log "Waited $(elapsed_since "$start") seconds so far..."
+    if (( $(elapsed_since "$start") >= next_report )); then
+      log "Waited $(elapsed_since "$start") seconds so far (height ${height:-<none>})..."
+      next_report=$((next_report + 10))
+    fi
+    sleep 1
   done
 
+  if [[ -z "$schedule" ]]; then
+    log "❌ Node #${node_index} did not serve its consensus version schedule within ${max_wait}s"
+  else
+    log "❌ Node #${node_index} did not reach height $final_height within ${max_wait}s"
+  fi
   return 1
 }
 

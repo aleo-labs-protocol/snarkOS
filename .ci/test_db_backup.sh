@@ -19,7 +19,7 @@ tmp_dir="${TMPDIR:-/tmp}"
 checkpoint_height=3
 rollback_height=10
 num_checkpoints=0
-remaining_checkpoints=2
+remaining_checkpoints=1
 
 # Create log directory
 init_log_dir
@@ -124,9 +124,10 @@ function create_checkpoints() {
 wait_for_nodes "$total_validators" 0 "$network_name"
 
 # Check heights periodically with a timeout
-total_wait=0
+start=$(now)
+next_report=10
 checkpoint_created=false
-while (( total_wait < 600 )); do  # 10 minutes max
+while (( $(elapsed_since "$start") < 600 )); do  # 10 minutes max
   # Apply short-circuiting
   if [[ $checkpoint_created = true ]] || check_heights  0 "$total_validators" "$checkpoint_height" "$network_name"; then
     if [[ $checkpoint_created = false ]]; then
@@ -166,8 +167,6 @@ while (( total_wait < 600 )); do  # 10 minutes max
           snarkos clean "--network=$network_id" "--dev=$validator_index" --keep-node-data \
               "--ledger-storage=$(checkpoint_dir "$suffix")"
         fi
-       # Wait until the cleanup concludes
-        sleep 1
 
         # Restart using the checkpoint
         suffix="${validator_index}_$((num_checkpoints-1))"
@@ -223,9 +222,11 @@ while (( total_wait < 600 )); do  # 10 minutes max
   fi
 
   # Continue waiting
-  sleep 3
-  total_wait=$((total_wait + 3))
-  log "Waited $total_wait seconds so far..."
+  sleep 1
+  if (( $(elapsed_since "$start") >= next_report )); then
+    log "Waited $(elapsed_since "$start") seconds so far..."
+    next_report=$((next_report + 10))
+  fi
 done
 
 # The main loop has expired by now
