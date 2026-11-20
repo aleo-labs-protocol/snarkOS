@@ -90,8 +90,10 @@ checks the crate without `metrics`. The `simple_node` line passes
 [`.config/nextest.toml`](.config/nextest.toml) sets two test threads, which
 the hosted entries use. The fleet entries run 16 tests at a time through
 `NEXTEST_TEST_THREADS`: most of their slow tests wait on timers rather than
-the CPU, and a box runs one job. Each entry uploads nextest's JUnit reports as
-the artifact `junit-<entry>`, one file per line, with the time of each test.
+the CPU, and a box runs one job. `gateway::prop_tests::gateway_start` runs
+alone, because it asserts a fixed port that other tests may take. Each entry
+uploads nextest's JUnit reports as the artifact `junit-<entry>`, one file per
+line, with the time of each test.
 
 ## Devnets
 
