@@ -7,8 +7,10 @@ Jobs run in one of two places:
 
 - **GitHub-hosted runners** for cheap jobs: formatting, `cargo deny`,
   shellcheck, the source checks, `cargo machete`, the Windows checks and the lighter crates'
-  tests. These restore `~/.cargo` and `target/` with `Swatinem/rust-cache`,
-  saved only from `staging`.
+  tests. The hosted test jobs restore `~/.cargo` and `target/` with
+  `Swatinem/rust-cache`, saved only from `staging`. The Windows checks build
+  cold. Their caches would take about half of the repository's 10 GB cache
+  limit and evict the test jobs' entries.
 - **The self-hosted `cpu` fleet** for heavy jobs: clippy, the heavier
   crates' tests, the `snarkos` build and the devnets. `start-cpu-runners`
   starts the boxes the run needs; they stop themselves when idle. Each box
