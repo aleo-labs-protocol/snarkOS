@@ -28,10 +28,6 @@ locktick = [
 ]
 # Lets benches advance a test ledger to the latest consensus version.
 test_consensus_heights = [ "snarkvm/test_consensus_heights" ]
-serial = [
-  "snarkos-node-router/serial",
-  "snarkos-node-consensus/serial"
-] 
 
 [dependencies.anyhow]
 workspace = true

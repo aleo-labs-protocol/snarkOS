@@ -26,10 +26,6 @@ locktick = [
 metrics = [ "dep:snarkos-node-metrics", "snarkvm/metrics" ]
 mock = [ ]
 cuda = [ "snarkvm/cuda" ]
-serial = [
-  "snarkvm/serial",
-  "snarkos-node-metrics?/serial"
-]
 test-helpers = [ "mock" ]
 test_network = [
   "snarkvm/dev-committee",
