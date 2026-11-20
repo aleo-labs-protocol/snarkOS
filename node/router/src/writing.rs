@@ -24,13 +24,30 @@ use tokio::sync::oneshot;
 impl<N: Network> Router<N> {
     /// Sends a "Ping" message to the given peer.
     ///
+    /// `oldest_retained` (see [`Self::oldest_retained_height`]) is sent only to peers that support it.
     /// Returns false if the peer does not exist or disconnected.
     #[must_use]
-    pub fn send_ping(&self, peer_ip: SocketAddr, block_locators: Option<BlockLocators<N>>) -> bool {
-        // This node serves every block it has.
-        let oldest_retained = self.supports_status_replies(peer_ip).then_some(0);
+    pub fn send_ping(
+        &self,
+        peer_ip: SocketAddr,
+        block_locators: Option<BlockLocators<N>>,
+        oldest_retained: Option<u32>,
+    ) -> bool {
+        let oldest_retained = oldest_retained.filter(|_| self.supports_status_replies(peer_ip));
         let ping = messages::Ping::new(self.node_type(), block_locators, oldest_retained);
         self.send(peer_ip, Message::Ping(ping)).is_some()
+    }
+
+    /// Returns the oldest block height this node serves: its authority-pruning watermark, or 0 if
+    /// nothing is pruned. Returns `None`, and logs it, if the watermark cannot be read.
+    pub fn oldest_retained_height(&self) -> Option<u32> {
+        match self.ledger().authority_pruned_below() {
+            Ok(pruned_below) => Some(pruned_below.unwrap_or(0)),
+            Err(error) => {
+                warn!("Failed to read the authority-pruning watermark - {error:#}");
+                None
+            }
+        }
     }
 
     /// Returns `true` if the peer is connected at a message version that receives `BlockResponse`

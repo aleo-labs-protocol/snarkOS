@@ -105,6 +105,11 @@ impl<N: Network> LedgerService<N> for ProverLedgerService<N> {
         bail!("Blocks {heights:?} do not exist in prover")
     }
 
+    /// Returns `None`: a prover has no ledger to prune.
+    fn authority_pruned_below(&self) -> Result<Option<u32>> {
+        Ok(None)
+    }
+
     /// Returns the solution for the given solution ID.
     fn get_solution(&self, solution_id: &SolutionID<N>) -> Result<Option<Solution<N>>> {
         bail!("Solution '{solution_id}' does not exist in prover")

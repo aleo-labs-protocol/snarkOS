@@ -63,9 +63,6 @@ workspace = true
 [dependencies.bytes]
 workspace = true
 
-[dependencies.cfg-if]
-workspace = true
-
 [dependencies.colored]
 workspace = true
 
