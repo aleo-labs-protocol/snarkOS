@@ -36,7 +36,9 @@ pub use mock::*;
 pub mod prover;
 pub use prover::*;
 
+#[cfg(feature = "test")]
 pub mod translucent;
+#[cfg(feature = "test")]
 pub use translucent::*;
 
 pub mod traits;
