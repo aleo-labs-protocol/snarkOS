@@ -60,6 +60,12 @@ jobs:
         with: { persist-credentials: false }
       # gh-actions is ours; check-shared-refs requires a @vN tag here, not a SHA.
       - uses: aleo-labs-protocol/gh-actions/.github/actions/check-shared-refs@v2
+      # An `include` name missing from its `name` axis adds a leg instead of failing.
+      - name: Check that each matrix name axis matches its include names
+        run: |
+          bad=$(yq '.jobs[].strategy.matrix | select(.name != null) | (.name - [.include[].name]) + ([.include[].name] - .name) | .[]' .github/workflows/ci.yml)
+          echo "$bad"
+          [ -z "$bad" ]
 
   fmt:
     runs-on: ubuntu-latest
@@ -374,6 +380,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        name: [dev-on-prod-restart, chaotic-minority-reset, chaotic-majority-restart, upgrade]
         include:
           - name: dev-on-prod-restart
             timeout: 45
@@ -395,7 +402,8 @@ jobs:
               export CARGO_TARGET_DIR="$SNARKOS_RELEASE_DIR/target"
               ./.ci/test_full_upgrade.sh
               ./.ci/test_partial_upgrade.sh
-    name: devnet (${{ matrix.name }})
+    # No expression: GitHub shows a skipped job's `name` unevaluated.
+    name: devnet-merge
     steps: *devnet-steps
 
   # Devnets for releases only. On every push to a release branch, on pull
@@ -414,6 +422,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        name: [upgrade-required, chaotic-restart-all]
         include:
           - name: upgrade-required
             timeout: 30
@@ -422,7 +431,7 @@ jobs:
             timeout: 45
             delay: true
             runs: ./.ci/test_restart_all.sh
-    name: devnet (${{ matrix.name }})
+    name: devnet-release
     steps: *devnet-steps
 
   # The release binary must compile in no test-only code. `test-helpers` in the

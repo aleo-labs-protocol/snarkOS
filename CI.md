@@ -32,7 +32,7 @@ a job marked "release" only on the third. The other jobs run on every event.
 | Job | Runner | Trigger | Timeout (min) | What it runs |
 |---|---|---|---|---|
 | `start-cpu-runners` | hosted | all | | starts fleet boxes |
-| `check-shared-refs` | hosted | all | | checks that each `aleo-labs-protocol/gh-actions` ref is a release tag |
+| `check-shared-refs` | hosted | all | | checks that each `aleo-labs-protocol/gh-actions` ref is a release tag, and that each matrix `name` axis lists the same names as its `include` |
 | `fmt` | hosted | all | | `cargo fmt --check` on `FMT_TOOLCHAIN` |
 | `deny` | hosted | all | | `cargo deny --workspace check bans licenses sources`, plus `advisories` everywhere but `staging`, whose advisories [`bump-advisories.yml`](.github/workflows/bump-advisories.yml) bumps nightly |
 | `shellcheck` | hosted | all | | `.ci/*.sh`, `scripts/*.sh` |
@@ -48,12 +48,12 @@ a job marked "release" only on the third. The other jobs run on every event.
 | `build-snarkos` | `cpu` | all | 60 | release `snarkos` with `test_network`, as an artifact |
 | `devnet (devnet)` | `cpu` | all | 40 | `test_db_backup.sh`, `test_devnet.sh` |
 | `devnet (simple-node)` | `cpu` | all | 60 | `test_simple_node.sh` |
-| `devnet (dev-on-prod-restart)` | `cpu` | merge | 45 | `test_dev_on_prod_restart.sh` |
-| `devnet (chaotic-minority-reset)` | `cpu` | merge | 45 | `test_reset_minority.sh`, with delays |
-| `devnet (chaotic-majority-restart)` | `cpu` | merge | 45 | `test_restart_majority.sh`, with delays |
-| `devnet (upgrade)` | `cpu` | merge | 90 | `test_full_upgrade.sh`, `test_partial_upgrade.sh` |
-| `devnet (upgrade-required)` | `cpu` | release | 30 | `test_upgrade_required.sh` |
-| `devnet (chaotic-restart-all)` | `cpu` | release | 45 | `test_restart_all.sh`, with delays |
+| `devnet-merge (dev-on-prod-restart)` | `cpu` | merge | 45 | `test_dev_on_prod_restart.sh` |
+| `devnet-merge (chaotic-minority-reset)` | `cpu` | merge | 45 | `test_reset_minority.sh`, with delays |
+| `devnet-merge (chaotic-majority-restart)` | `cpu` | merge | 45 | `test_restart_majority.sh`, with delays |
+| `devnet-merge (upgrade)` | `cpu` | merge | 90 | `test_full_upgrade.sh`, `test_partial_upgrade.sh` |
+| `devnet-release (upgrade-required)` | `cpu` | release | 30 | `test_upgrade_required.sh` |
+| `devnet-release (chaotic-restart-all)` | `cpu` | release | 45 | `test_restart_all.sh`, with delays |
 | `machete` | hosted | all | | `cargo machete` |
 | `windows` | hosted (Windows) | merge | | `cargo check --examples --benches --tests` in `account`, `cli`, `display`, `node` |
 | `ci-ok` | hosted | all | | fails unless every job succeeded; a merge or release job may be skipped where it is not meant to run |
