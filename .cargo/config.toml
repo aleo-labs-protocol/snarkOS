@@ -17,6 +17,11 @@ rustflags = [
 # Hazard: a `RUSTFLAGS` environment variable replaces every `rustflags` setting, this one
 # included. To combine `--cfg locktick` with a `RUSTFLAGS` build, such as the one the
 # `tokio_console` feature needs, put `--cfg locktick` in `RUSTFLAGS` itself.
+#
+# Hazard: because the aliases set target rustflags, cargo ignores `[build] rustflags` and
+# `CARGO_BUILD_RUSTFLAGS` under them on every platform, as it already does on x86-64 Linux because
+# of the table above. Pass extra flags in `CARGO_TARGET_<TRIPLE>_RUSTFLAGS` instead, which cargo
+# adds to the aliases' flags.
 [alias]
 locktick-build = ["build", "--config", "target.'cfg(all())'.rustflags=['--cfg','locktick']"]
 locktick-check = ["check", "--config", "target.'cfg(all())'.rustflags=['--cfg','locktick']"]
