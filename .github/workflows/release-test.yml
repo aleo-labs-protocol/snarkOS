@@ -104,7 +104,7 @@ jobs:
       network: testnet
       params: ${{ format('stockpile={0},rate=50,duration=120,min_inclusion=1,deploy_rate=0.2', inputs.stockpile) }}
 
-  # A saved ledger is this release's, for the next release's sync test. The sync host runs one at a time.
+  # A saved ledger is this release's, for the next release's sync test. The sync host runs both legs at once.
   sync-testnet:
     needs: resolve
     permissions:

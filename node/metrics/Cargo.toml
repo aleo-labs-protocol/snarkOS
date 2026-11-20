@@ -19,7 +19,6 @@ edition = "2024"
 [features]
 default = [ "metrics" ]
 metrics = [ "snarkvm/metrics" ]
-serial = [ "snarkvm/serial" ]
 
 [dependencies.metrics]
 version = "0.22"

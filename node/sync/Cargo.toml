@@ -18,7 +18,6 @@ edition = "2024"
 
 [features]
 default = [ ]
-serial = ["snarkos-node-bft-ledger-service/serial"]
 metrics = [ "dep:snarkos-node-metrics", "snarkos-node-network/metrics" ]
 cuda = [ "snarkvm/cuda", "snarkos-node-bft-ledger-service/cuda", "snarkos-node-router/cuda" ]
 test-helpers = [ "snarkos-node-sync-locators/test-helpers" ]

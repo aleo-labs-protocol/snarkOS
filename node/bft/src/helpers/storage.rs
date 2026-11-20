@@ -29,7 +29,6 @@ use snarkvm::{
 use anyhow::Context;
 use indexmap::{IndexMap, IndexSet, map::Entry};
 use lru::LruCache;
-#[cfg(not(feature = "serial"))]
 use rayon::prelude::*;
 use std::{
     cmp,

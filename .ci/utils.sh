@@ -390,6 +390,8 @@ function check_logs() {
   local max_client_log_size_bytes=${5:-}
   # Optional Unix epoch timestamp; only log lines at or after this time are checked.
   local since_epoch=${6:-}
+  # Optional extended regex; ERROR lines that match it are expected and do not fail the check.
+  local expected_errors=${7:-}
 
   if [ -n "$since_epoch" ]; then
     log "Only checking log lines at or after $(epoch_to_iso "$since_epoch")"
@@ -416,10 +418,14 @@ function check_logs() {
 
     validator_log_content=$(log_lines_since "$validator_log" "$since_epoch")
 
-    if echo "$validator_log_content" | grep -q "ERROR"; then
+    validator_errors=$(echo "$validator_log_content" | grep "ERROR" || true)
+    if [ -n "$expected_errors" ] && [ -n "$validator_errors" ]; then
+      validator_errors=$(echo "$validator_errors" | grep -vE "$expected_errors" || true)
+    fi
+    if [ -n "$validator_errors" ]; then
       log "❌ Test failed! Validator #${validator_index} logs contain errors."
       # Print the errors to the console.
-      echo "$validator_log_content" | grep "ERROR"
+      echo "$validator_errors"
       return 1
     fi
   done
@@ -442,10 +448,14 @@ function check_logs() {
 
     client_log_content=$(log_lines_since "$client_log" "$since_epoch")
 
-    if echo "$client_log_content" | grep -q "ERROR"; then
+    client_errors=$(echo "$client_log_content" | grep "ERROR" || true)
+    if [ -n "$expected_errors" ] && [ -n "$client_errors" ]; then
+      client_errors=$(echo "$client_errors" | grep -vE "$expected_errors" || true)
+    fi
+    if [ -n "$client_errors" ]; then
       log "❌ Test failed! Client #${client_index} logs contain errors."
       # Print the errors to the console.
-      echo "$client_log_content" | grep "ERROR"
+      echo "$client_errors"
       return 1
     fi
   done
@@ -512,12 +522,13 @@ function wait_for_peers() {
 }
 
 # Succeeds if the node with the given index has the specified number of BFT connections (or greater)
+# within max_wait seconds (default 300).
 function wait_for_bft_connections() {
   local node_index=$1
   local min_peers=$2
   local network_name=$3
+  local max_wait=${4:-300}
 
-  local max_wait=300
   local poll_interval=1
   local port=$((3030 + node_index))
 
@@ -539,7 +550,7 @@ function wait_for_bft_connections() {
     sleep "$poll_interval"
   done
 
-  log "❌ BFT connections did not reach $min_peers within 5 minutes."
+  log "❌ BFT connections did not reach $min_peers within ${max_wait}s."
   return 1
 }
 

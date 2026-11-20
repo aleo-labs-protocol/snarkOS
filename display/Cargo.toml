@@ -18,7 +18,6 @@ edition = "2024"
 
 [features]
 default = [ ]
-serial = [ "snarkvm/serial", "snarkos-node/serial" ]
 
 [dependencies.anyhow]
 workspace = true

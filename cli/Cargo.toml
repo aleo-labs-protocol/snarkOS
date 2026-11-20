@@ -35,11 +35,6 @@ test_network = [
   "snarkvm/dev-print",
   "snarkvm/dev_genesis_state_root",
 ]
-serial = [
-  "snarkvm/serial",
-  "snarkos-node/serial",
-  "snarkos-display/serial",
-]
 tokio_console = [ "dep:console-subscriber", "tokio/tracing" ]
 
 [dependencies.anstyle]

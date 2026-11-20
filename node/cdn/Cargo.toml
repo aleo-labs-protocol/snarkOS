@@ -18,10 +18,6 @@ edition = "2024"
 
 [features]
 default = [ ]
-serial = [ 
-  "snarkos-node-metrics/serial",
-  "snarkvm/serial",
-]
 cuda = [ "snarkvm/cuda" ]
 metrics = [ "dep:snarkos-node-metrics" ]
 

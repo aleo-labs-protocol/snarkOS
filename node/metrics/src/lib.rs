@@ -21,7 +21,6 @@ pub use names::*;
 // Re-export the snarkVM metrics.
 pub use snarkvm::metrics::*;
 
-#[cfg(not(feature = "serial"))]
 use rayon::prelude::*;
 
 use snarkos_utilities::locks::parking_lot::Mutex;

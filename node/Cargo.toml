@@ -38,10 +38,6 @@ cuda = [
   "snarkos-node-router/cuda",
   "snarkos-node-sync/cuda"
 ]
-serial = [
-  "snarkvm/serial",
-  "snarkos-node-bft/serial"
-]
 test-helpers = []
 test_network = [ "snarkos-node-bft/test_network", "snarkos-node-consensus/test_network", "snarkos-utilities/test_network" ]
 

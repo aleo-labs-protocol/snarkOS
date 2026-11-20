@@ -60,7 +60,6 @@ use snarkvm::{
 
 use anyhow::ensure;
 use indexmap::IndexMap;
-#[cfg(not(feature = "serial"))]
 use rayon::prelude::*;
 
 use std::{fmt, ops::Range, sync::Arc};
