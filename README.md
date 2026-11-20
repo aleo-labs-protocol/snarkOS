@@ -208,8 +208,7 @@ Once enabled, telemetry metrics are available through:
     // GET /{network}/validators/participation?metadata={true}
     ```
 
-Telemetry is part of the `metrics` feature, which is enabled by default. The `telemetry` feature flag
-is kept as an alias for `metrics`, so commands that name it explicitly still work:
+Telemetry is part of the `metrics` feature, which is enabled by default:
 
 #### 1. [Installation](#2.3-installation)
 
@@ -617,14 +616,9 @@ cargo run --release -- clean --dev <NODE_ID>
 
 ## 6.4 Feature Flags
 
-By default, the metrics feature is turned on for some internal crates. It carries the validator
-telemetry described in [Validator Telemetry Metrics](#321-validator-telemetry-metrics).
-
-* **history** -
-  Enables a /history REST endpoint.
-* **telemetry** -
-  Deprecated alias for **metrics**, kept so that existing build commands keep working.
-  Validator telemetry is part of **metrics**.
+* **metrics** -
+  Enabled by default. Adds the `--metrics` flag and the metrics exporter. It carries the validator
+  telemetry described in [Validator Telemetry Metrics](#321-validator-telemetry-metrics).
 * **cuda** -
   Allows some operations to run on the (NVidia) GPU, instead of on the CPU. See [CUDA acceleration for provers](#optional-cuda-acceleration-for-provers) for install tips and current puzzle status.
 * **locktick** -

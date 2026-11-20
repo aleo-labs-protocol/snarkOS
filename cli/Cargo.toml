@@ -18,7 +18,6 @@ edition = "2024"
 
 [features]
 default = [ ]
-async = [ ]
 locktick = [
   "dep:locktick",
   "snarkos-display/locktick",

@@ -591,7 +591,7 @@ mod tests {
 
     type CurrentNetwork = MainnetV0;
 
-    /// Use `RUST_MIN_STACK=67108864 cargo test --release profiler --features timer` to run this test.
+    /// Use `RUST_MIN_STACK=67108864 cargo test --release profiler` to run this test.
     #[ignore]
     #[tokio::test]
     async fn test_profiler() -> Result<()> {
