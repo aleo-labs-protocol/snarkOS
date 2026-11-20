@@ -1404,7 +1404,10 @@ mod route_tests {
         for prefix in ["/mainnet", "/v1/mainnet", "/v2/mainnet"] {
             let (status, body) = get_versioned(&rest, &format!("{prefix}/programs/summary")).await;
             assert_eq!(status, StatusCode::OK, "{prefix}: {body}");
-            assert_eq!(body, r#"{"height":0,"programs":[{"id":"credits.aleo","edition":0}]}"#, "{prefix}");
+            assert_eq!(
+                body, r#"{"height":0,"programs":[{"id":"credits.aleo","edition":0,"amendment_count":0}]}"#,
+                "{prefix}"
+            );
         }
     }
 
@@ -1447,7 +1450,7 @@ mod route_tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(
             body,
-            r#"{"height":1,"programs":[{"id":"aaa_summary.aleo","edition":0},{"id":"credits.aleo","edition":0}]}"#
+            r#"{"height":1,"programs":[{"id":"aaa_summary.aleo","edition":0,"amendment_count":0},{"id":"credits.aleo","edition":0,"amendment_count":0}]}"#
         );
     }
 

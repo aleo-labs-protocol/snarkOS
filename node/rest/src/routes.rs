@@ -284,11 +284,12 @@ struct ProgramsSummary {
     programs: Vec<ProgramSummary>,
 }
 
-/// A deployed program and its latest edition.
+/// A deployed program, its latest edition, and that edition's amendment count.
 #[derive(Serialize)]
 struct ProgramSummary {
     id: String,
     edition: u16,
+    amendment_count: u64,
 }
 
 /// The return value for a `sync_status` query.
@@ -905,21 +906,32 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
 
     /// GET /<network>/programs/summary
     ///
-    /// Returns every deployed program with its latest edition, sorted by ID, and a `height`.
-    /// Every program deployed at or before `height` is listed. The list may also include programs
-    /// deployed after `height`, and an edition may be newer than it was at `height`.
-    /// Amendments (verifying-key changes that keep the edition) are not reflected.
+    /// Returns every deployed program with its latest edition and that edition's amendment count,
+    /// sorted by ID, and a `height`. Every program deployed at or before `height` is listed. The
+    /// list may also include programs deployed after `height`, and an edition or amendment count
+    /// may be newer than it was at `height`.
     pub(crate) async fn get_programs_summary(State(rest): State<Self>) -> Result<ErasedJson, RestError> {
         let summarize = move || {
             // Read the height first. The ledger advances it only after the block's storage batch
-            // is written, so the scan below sees every deployment up to it.
+            // is written, so the scans below see every deployment and amendment up to it.
             let height = rest.ledger.latest_height();
-            let mut programs: Vec<_> = rest
-                .ledger
-                .vm()
-                .transaction_store()
-                .program_ids_and_latest_editions()
-                .map(|(id, edition)| ProgramSummary { id: id.to_string(), edition: *edition })
+            let store = rest.ledger.vm().transaction_store();
+            let editions: Vec<_> =
+                store.program_ids_and_latest_editions().map(|(id, edition)| (*id, *edition)).collect();
+            // An edition's amendments have indices `0..count`, so counting entries gives the same
+            // number as `get_amendment_count`.
+            let mut amendment_counts = HashMap::<(ProgramID<N>, u16), u64>::new();
+            for (key, _) in store.amendment_transaction_ids() {
+                let (id, edition, _) = *key;
+                *amendment_counts.entry((id, edition)).or_default() += 1;
+            }
+            let mut programs: Vec<_> = editions
+                .into_iter()
+                .map(|(id, edition)| ProgramSummary {
+                    id: id.to_string(),
+                    edition,
+                    amendment_count: amendment_counts.get(&(id, edition)).copied().unwrap_or(0),
+                })
                 .collect();
             programs.sort_unstable_by(|a, b| a.id.cmp(&b.id));
             // `ErasedJson::new` serializes eagerly, so this keeps serialization off the async thread.
