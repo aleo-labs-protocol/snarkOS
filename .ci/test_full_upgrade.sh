@@ -34,7 +34,7 @@ MAX_VALIDATOR_LOG_SIZE_BYTES=$((8 * 1024 * 1024))
 MAX_CLIENT_LOG_SIZE_BYTES=$((1 * 1024 * 1024))
 
 
-# How long to wait between upgrades (seconds); used for block-height window
+# How long a restarted node may take to rejoin the network (seconds).
 WAIT_BETWEEN_UPGRADES="${WAIT_BETWEEN_UPGRADES:-60}"
 
 # How long an upgraded node may take to serve its REST API again (seconds).
@@ -271,44 +271,50 @@ function derive_consensus_env_from_version() {
   log "Exported CONSENSUS_VERSION_HEIGHTS_CURRENT=${CONSENSUS_VERSION_HEIGHTS_CURRENT}"
 }
  
-function wait_for_height_increase_window() {
-  local previous_height="$1"
-  local duration="${2:-60}"
-  local interval="${3:-5}"
+# Blocks for up to duration seconds until the node with the given index reaches 5 blocks above
+# previous_height and, if it is a validator, has a gateway connection to every other validator.
+function wait_for_node_to_rejoin() {
+  local node_index="$1"
+  local previous_height="$2"
+  local duration="${3:-60}"
 
-  local elapsed=0
-  local increased=0
-  local current_height="$previous_height"
+  # The previous height may be slightly outdated, so require several blocks.
+  local target_height=$(( previous_height + 5 ))
+  local port=$(( 3030 + node_index ))
+  local height=""
+  local start next_report=10
+  start=$(now)
 
-  log "Waiting ${duration}s window to see height increase above $previous_height..."
-
-  while (( elapsed < duration )); do
-    # Note: take the height across all nodes rather than from a single one. The node that
-    # is being upgraded is unreachable while it restarts, so polling just that one would
-    # report a stalled chain even while the rest of the network advances happily.
-    local height
-    height="$(get_network_block_height "$((total_validators + total_clients))" "$network_name")"
-    if (is_integer "$height"); then
-      current_height="$height"
-      log "Current height=${current_height}"
-      if (( current_height > previous_height )); then
-        increased=$(( current_height - previous_height ))
-      fi
-    else
-      log "WARN: no node responded to a height request"
+  log "Waiting up to ${duration}s for node index ${node_index} to reach height ${target_height}..."
+  while (( $(elapsed_since "$start") < duration )); do
+    height=$(get_block_height_by_port "$port" "$network_name" 5)
+    if (is_integer "$height") && (( height >= target_height )); then
+      break
     fi
-    sleep "$interval"
-    elapsed=$((elapsed + interval))
+    if (( $(elapsed_since "$start") >= next_report )); then
+      log "Node index ${node_index} is at height ${height:-<none>}"
+      next_report=$((next_report + 10))
+    fi
+    sleep 1
   done
 
-  # Wait multiple blocks in case the previous height was slightly outdated.
-  if (( increased >= 5 )); then
-    log "✅ Height increased from $previous_height to $current_height during upgrade window."
-    return 0
-  else
-    echo "❌ Timeout: height did not increase above $previous_height during ${duration}s." >&2
+  if ! (is_integer "$height") || (( height < target_height )); then
+    echo "❌ Timeout: node index ${node_index} is at height ${height:-<none>}, below ${target_height}, after ${duration}s." >&2
     return 1
   fi
+
+  if (( node_index < total_validators )); then
+    local remaining=$(( duration - $(elapsed_since "$start") ))
+    if (( remaining < 1 )); then
+      remaining=1
+    fi
+    if ! wait_for_bft_connections "$node_index" "$((total_validators - 1))" "$network_name" "$remaining"; then
+      return 1
+    fi
+  fi
+
+  log "✅ Node index ${node_index} rejoined at height ${height} after $(elapsed_since "$start")s."
+  return 0
 }
 
 # Prints the given message and the tail of the given node log, then exits the test.
@@ -334,12 +340,13 @@ function wait_for_restarted_node() {
   fi
 }
 
-# Blocks until the chain advances for WAIT_BETWEEN_UPGRADES seconds. Exits the test otherwise.
-# Call it only once the restarted node is back, so that the window measures the network advancing
-# *with* it, rather than crediting progress made while it was down.
+# Blocks until the restarted node with the given index follows the advancing chain, for at most
+# WAIT_BETWEEN_UPGRADES seconds. Exits the test otherwise. Call it only once the node serves its
+# REST API again, so that the baseline is the height the network reached while it was down.
 function wait_for_chain_to_advance() {
-  local description="$1"
-  local log_file="$2"
+  local node_index="$1"
+  local description="$2"
+  local log_file="$3"
 
   local baseline_height
   baseline_height=$(get_network_block_height "$((total_validators + total_clients))" "$network_name")
@@ -347,8 +354,8 @@ function wait_for_chain_to_advance() {
     baseline_height=0
   fi
 
-  if ! wait_for_height_increase_window "$baseline_height" "$WAIT_BETWEEN_UPGRADES" 5; then
-    fail_with_log "$log_file" "Restart failed: chain did not advance after restarting ${description}."
+  if ! wait_for_node_to_rejoin "$node_index" "$baseline_height" "$WAIT_BETWEEN_UPGRADES"; then
+    fail_with_log "$log_file" "Restart failed: ${description} did not rejoin the advancing chain."
   fi
 }
 
@@ -478,7 +485,7 @@ function restart_on_release_binary() {
     log "✅ The ${description} opened a router connection to upgraded validator ${responder}."
   fi
 
-  wait_for_chain_to_advance "$description" "$log_file"
+  wait_for_chain_to_advance "$node_index" "$description" "$log_file"
 }
 
 ########################################
@@ -544,7 +551,7 @@ for node_index in $(seq 0 $((total_validators+total_clients-1))); do
 
   description="upgraded ${role} ${idx_label} (node index ${node_index})"
   wait_for_restarted_node "$description" "$log_file"
-  wait_for_chain_to_advance "$description" "$log_file"
+  wait_for_chain_to_advance "$node_index" "$description" "$log_file"
 
   # The last validator and the last client still run the release binary.
   if (( node_index == 0 )); then

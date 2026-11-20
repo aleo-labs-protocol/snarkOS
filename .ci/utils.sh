@@ -512,12 +512,13 @@ function wait_for_peers() {
 }
 
 # Succeeds if the node with the given index has the specified number of BFT connections (or greater)
+# within max_wait seconds (default 300).
 function wait_for_bft_connections() {
   local node_index=$1
   local min_peers=$2
   local network_name=$3
+  local max_wait=${4:-300}
 
-  local max_wait=300
   local poll_interval=1
   local port=$((3030 + node_index))
 
@@ -539,7 +540,7 @@ function wait_for_bft_connections() {
     sleep "$poll_interval"
   done
 
-  log "❌ BFT connections did not reach $min_peers within 5 minutes."
+  log "❌ BFT connections did not reach $min_peers within ${max_wait}s."
   return 1
 }
 
