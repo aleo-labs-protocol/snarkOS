@@ -585,19 +585,25 @@ impl<N: Network> BlockSync<N> {
     }
 
     /// Returns when a chunk for `heights` that no `sync_peers` took can be sent, if it waits only for
-    /// the block request limit: all of them are still connected and serve `heights`, and some are
-    /// `capped` (see [`Self::capped_peers`]).
+    /// the block request limit: all of them are still connected and serve `heights`. That is when
+    /// enough `capped` peers (see [`Self::capped_peers`]) have freed up to make up the
+    /// min(`max_num_sync_ips`, `sync_peers.len()`) peers [`Self::select_sync_ips`] needs.
     fn deferred_request_slot(
         &self,
         sync_peers: &IndexMap<SocketAddr, BlockLocators<N>>,
         heights: Range<u32>,
+        max_num_sync_ips: usize,
         capped: &HashMap<SocketAddr, Instant>,
     ) -> Option<Instant> {
         let locators = self.locators.read();
         if !sync_peers.keys().all(|ip| locators.get(ip).is_some_and(|peer| peer.can_serve(heights.clone()))) {
             return None;
         }
-        sync_peers.keys().filter_map(|ip| capped.get(ip)).min().copied()
+        let mut slots: Vec<_> = sync_peers.keys().filter_map(|ip| capped.get(ip)).copied().collect();
+        slots.sort_unstable();
+        let num_free = sync_peers.len() - slots.len();
+        let num_to_free = max_num_sync_ips.min(sync_peers.len()).max(1).checked_sub(num_free)?;
+        slots.get(num_to_free.checked_sub(1)?).copied()
     }
 
     /// Sends a chunk of block requests, staying below the peers' block request `limit` (see
@@ -632,7 +638,7 @@ impl<N: Network> BlockSync<N> {
             let Some(sync_ips) = self.select_sync_ips(sync_peers, heights.clone(), max_num_sync_ips, at_limit) else {
                 let inclusive_end = end_height.saturating_sub(1);
                 self.requeue_requests(requests);
-                if let Some(slot) = self.deferred_request_slot(sync_peers, heights, &capped) {
+                if let Some(slot) = self.deferred_request_slot(sync_peers, heights, max_num_sync_ips, &capped) {
                     trace!(
                         "Deferring block requests for heights {start_height}-{inclusive_end}: peers reached their block request limit"
                     );
@@ -746,7 +752,7 @@ impl<N: Network> BlockSync<N> {
         let limit = communication.block_request_limit();
         let now = Instant::now();
         self.forget_expired_block_requests(limit, now);
-        let batches = self.prepare_block_requests_avoiding(&self.capped_peers(limit, now));
+        let batches = self.prepare_block_requests();
         let mut next_request_slot = None;
 
         if batches.is_empty() {
@@ -1023,9 +1029,7 @@ impl<N: Network> BlockSync<N> {
         // Retrieve the current sync height.
         let current_height = self.get_sync_height();
 
-        if let Some((sync_peers, min_common_ancestor)) =
-            self.find_sync_peers_inner(current_height, None, &HashMap::new())
-        {
+        if let Some((sync_peers, min_common_ancestor)) = self.find_sync_peers_inner(current_height, None) {
             // Map the locators into the latest height.
             let sync_peers =
                 sync_peers.into_iter().map(|(ip, locators)| (ip, locators.latest_locator_height())).collect();
@@ -1207,12 +1211,6 @@ impl<N: Network> BlockSync<N> {
 pub type BlockRequestBatch<N> = (Vec<(u32, PrepareSyncRequest<N>)>, IndexMap<SocketAddr, BlockLocators<N>>);
 
 impl<N: Network> BlockSync<N> {
-    /// Prepares block requests from any peer (see [`Self::prepare_block_requests_avoiding`]).
-    #[cfg(test)]
-    fn prepare_block_requests(&self) -> Vec<BlockRequestBatch<N>> {
-        self.prepare_block_requests_avoiding(&HashMap::new())
-    }
-
     /// Returns a list of block requests and the sync peers, if the node needs to sync.
     ///
     /// You usually want to call `remove_timed_out_block_requests` before invoking this function.
@@ -1231,9 +1229,9 @@ impl<N: Network> BlockSync<N> {
     ///    `Client::try_issuing_block_requests` which calls this function.
     ///  - Provers do not call this function.
     ///
-    /// Peers that are `capped` (see [`Self::capped_peers`]) are left out while enough others serve
-    /// the requests.
-    fn prepare_block_requests_avoiding(&self, capped: &HashMap<SocketAddr, Instant>) -> Vec<BlockRequestBatch<N>> {
+    /// Block request limits do not change the sync peers; they only decide which of them get each
+    /// chunk, and when (see [`Self::send_block_requests`]).
+    fn prepare_block_requests(&self) -> Vec<BlockRequestBatch<N>> {
         let _block_requests_lock = self.prepare_requests_lock.lock();
 
         // Used to print more information when we max out on requests.
@@ -1312,8 +1310,7 @@ impl<N: Network> BlockSync<N> {
                     continue;
                 }
 
-                let Some((sync_peers, min_common_ancestor)) =
-                    self.find_sync_peers_inner(current_height, Some(start), capped)
+                let Some((sync_peers, min_common_ancestor)) = self.find_sync_peers_inner(current_height, Some(start))
                 else {
                     // The requests stay queued until a peer that serves `start` connects.
                     debug!("Cannot re-request blocks {start}..{end_height}: no connected peer serves them");
@@ -1385,7 +1382,7 @@ impl<N: Network> BlockSync<N> {
             print_requests();
             vec![]
         } else if let Some((sync_peers, min_common_ancestor)) =
-            self.find_sync_peers_inner(current_height, Some(start_height), capped)
+            self.find_sync_peers_inner(current_height, Some(start_height))
         {
             // Retrieve the greatest block height of any connected peer.
             // We do not need to update the sync state here, as that already happens when the block locators are received.
@@ -1510,8 +1507,10 @@ impl<N: Network> BlockSync<N> {
         }
         since.warned_at = Some(now);
         let hint = match self.connection_mode {
-            ConnectionMode::Router => "Connect to a peer that serves it with `--peers`, or restore a ledger snapshot.",
-            ConnectionMode::Gateway => "Restore a ledger snapshot, or sync from the CDN.",
+            ConnectionMode::Router => {
+                "Connect to a peer that serves it with `--peers`, or restart the node to sync from the CDN."
+            }
+            ConnectionMode::Gateway => "Restart the node to sync from the CDN, or restore a ledger snapshot.",
         };
         warn!(
             "Block sync cannot progress: the peers ahead of this node no longer serve block {}. {hint}",
@@ -1861,7 +1860,6 @@ impl<N: Network> BlockSync<N> {
         &self,
         current_height: u32,
         first_needed: Option<u32>,
-        capped: &HashMap<SocketAddr, Instant>,
     ) -> Option<(IndexMap<SocketAddr, BlockLocators<N>>, u32)> {
         // Retrieve the latest ledger height.
         let latest_ledger_height = self.ledger.latest_block_height();
@@ -1869,7 +1867,7 @@ impl<N: Network> BlockSync<N> {
         // Pick a set of peers above the latest ledger height, and include their locators and heights.
         // This will sort the peers by height in descending order.
         let locators = self.locators.read();
-        let mut candidates: Vec<_> = locators
+        let candidates: Vec<_> = locators
             .iter()
             .filter_map(|(peer_ip, peer)| match first_needed {
                 None => Some((peer_ip, peer, peer.locators.latest_locator_height())),
@@ -1878,15 +1876,6 @@ impl<N: Network> BlockSync<N> {
             })
             .filter(|(_, _, peer_height)| *peer_height > current_height)
             .collect();
-        // Leave out the peers at their block request limit while enough others are candidates.
-        // Capping never hides a hash conflict: candidates that disagree are all kept.
-        let num_uncapped = candidates.iter().filter(|(peer_ip, _, _)| !capped.contains_key(*peer_ip)).count();
-        if num_uncapped < candidates.len()
-            && num_uncapped >= REDUNDANCY_FACTOR.min(candidates.len())
-            && !locators_conflict_from(candidates.iter().map(|(_, peer, _)| &peer.locators), latest_ledger_height)
-        {
-            candidates.retain(|(peer_ip, _, _)| !capped.contains_key(*peer_ip));
-        }
         let candidate_locators: IndexMap<_, _> = candidates
             .into_iter()
             .sorted_by(|(_, _, a), (_, _, b)| b.cmp(a))
@@ -2060,14 +2049,6 @@ fn sync_range(height: u32, others: &[(u32, u32)], threshold: usize) -> (u32, Vec
         }
     }
     (end, kept)
-}
-
-/// Returns `true` if two of `locators` give different hashes for a height at or above `height`.
-fn locators_conflict_from<'a, N: Network>(locators: impl Iterator<Item = &'a BlockLocators<N>>, height: u32) -> bool {
-    let mut hashes = HashMap::new();
-    locators
-        .flat_map(|locators| locators.recents.iter().chain(&locators.checkpoints))
-        .any(|(at, hash)| *at >= height && *hashes.entry(*at).or_insert(*hash) != *hash)
 }
 
 /// If any peer is detected to be dishonest in this function, it will not set the hash or previous hash,
@@ -3597,20 +3578,51 @@ mod tests {
         }
     }
 
-    /// Tests that request building leaves out a capped peer while enough others serve the
-    /// requests, and keeps it when none do.
-    #[test]
-    fn test_prepare_avoids_capped_peers() {
+    /// Tests that block request limits do not change the sync peers, and that a chunk for one peer
+    /// skips a capped one.
+    #[tokio::test]
+    async fn test_capped_peer_is_skipped_at_send() {
         let sync = sample_sync_at_height(1_000);
-        let num_peers = REDUNDANCY_FACTOR as u16 + 1;
-        add_peers(&sync, 1, num_peers as usize, 1_100, 0);
-        let capped: HashMap<_, _> = [(sample_peer_ip(1), Instant::now())].into_iter().collect();
-        let (_, sync_peers) = sync.prepare_block_requests_avoiding(&capped).pop().unwrap();
-        assert!(!sync_peers.contains_key(&sample_peer_ip(1)));
+        let num_peers = REDUNDANCY_FACTOR + 1;
+        add_peers(&sync, 1, num_peers, 1_100, 0);
+        let service = RecordingService::default();
+        cap_peer(&sync, &service, sample_peer_ip(1), Instant::now());
+        let (requests, sync_peers) = sync.prepare_block_requests().pop().unwrap();
+        let (_, (_, _, max_num_sync_ips)) = requests[0];
+        assert_eq!((sync_peers.len(), max_num_sync_ips), (num_peers, 1));
 
-        let capped: HashMap<_, _> = (1..=num_peers).map(|id| (sample_peer_ip(id), Instant::now())).collect();
-        let (_, sync_peers) = sync.prepare_block_requests_avoiding(&capped).pop().unwrap();
-        assert!(sync_peers.keys().all(|peer_ip| capped.contains_key(peer_ip)));
+        sync.try_issuing_block_requests(&service).await;
+        assert!(!service.sent.lock().unwrap().is_empty());
+        assert_eq!(service.num_sent_to(sample_peer_ip(1)), 0);
+    }
+
+    /// Tests that capped peers still lead the sync peers when the uncapped ones are on a fork, and
+    /// that a chunk for all of them waits until the last one it needs frees up.
+    #[tokio::test]
+    async fn test_capped_peers_still_lead_over_a_fork() {
+        let sync = sample_sync_at_height(1_000);
+        add_peers(&sync, 1, 3, 1_200, 0);
+        for id in 4..=6 {
+            let locators = sample_block_locators_with_fork(1_150, 1_120);
+            sync.update_peer_locators(sample_peer_ip(id), &locators, Some(0)).unwrap();
+        }
+        let service = RecordingService::default();
+        let at = Instant::now();
+        for id in 1..=3 {
+            cap_peer(&sync, &service, sample_peer_ip(id), at - Duration::from_secs(id.into()));
+        }
+
+        let (requests, sync_peers) = sync.prepare_block_requests().pop().unwrap();
+        let (_, (_, _, max_num_sync_ips)) = requests[0];
+        assert_eq!(max_num_sync_ips, 3);
+        assert_eq!(
+            sync_peers.keys().copied().collect::<IndexSet<_>>(),
+            (1..=3).map(sample_peer_ip).collect::<IndexSet<_>>()
+        );
+        let next_request_slot = sync.try_issuing_block_requests(&service).await;
+        assert!(service.sent.lock().unwrap().is_empty());
+        let interval = service.block_request_limit.unwrap().1;
+        assert_eq!(next_request_slot, Some(at - Duration::from_secs(1) + interval));
     }
 
     /// Tests that a service without a block request limit sends a peer every request.
@@ -3720,38 +3732,5 @@ mod tests {
         sync.try_issuing_block_requests(&service).await;
         assert!(service.sent.lock().unwrap().contains(&(sample_peer_ip(3), 1_001, 1_006)));
         assert_eq!(service.num_sent_to(sample_peer_ip(1)) + service.num_sent_to(sample_peer_ip(2)), 0);
-    }
-
-    /// Returns sample locators up to `tip` with a different hash at `forged`.
-    fn locators_forged_at(tip: u32, forged: u32) -> BlockLocators<CurrentNetwork> {
-        let mut locators = sample_block_locators(tip);
-        *locators.recents.get_mut(&forged).unwrap() = Field::<CurrentNetwork>::from_u32(u32::MAX).into();
-        locators
-    }
-
-    /// Tests that locators conflict only where two of them hash a height differently.
-    #[test]
-    fn test_locators_conflict_from() {
-        let (near, far, forged) =
-            (sample_block_locators(10_050), sample_block_locators(100_000), locators_forged_at(10_050, 9_990));
-        assert!(!locators_conflict_from([&near, &far].into_iter(), 0));
-        assert!(locators_conflict_from([&near, &far, &forged].into_iter(), 9_990));
-        assert!(!locators_conflict_from([&near, &forged].into_iter(), 9_991));
-    }
-
-    /// Tests that a capped peer whose locators conflict with another candidate's is kept, so that
-    /// the requests stop below the conflict as they would without the cap.
-    #[test]
-    fn test_capping_keeps_conflicting_peers() {
-        let sync = sample_sync_at_height(9_950);
-        add_peers(&sync, 1, 2, 100_000, 0);
-        add_peers(&sync, 3, 1, 10_050, 0);
-        let forged = sample_peer_ip(4);
-        sync.update_peer_locators(forged, &locators_forged_at(10_050, 9_990), Some(0)).unwrap();
-        let capped: HashMap<_, _> = [(forged, Instant::now())].into_iter().collect();
-
-        let (requests, sync_peers) = sync.prepare_block_requests_avoiding(&capped).pop().unwrap();
-        assert!(sync_peers.contains_key(&forged));
-        assert_eq!(heights_of(&requests), (9_951..9_990).collect::<Vec<_>>());
     }
 }
