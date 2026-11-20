@@ -1181,6 +1181,19 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         .map_err(|err| RestError::internal_server_error(anyhow!("Tokio error: {err}")))?
     }
 
+    /// GET /<network>/program/{id}/history/ranges
+    pub(crate) async fn get_program_history_ranges(
+        State(rest): State<Self>,
+        Path(program_id): Path<ProgramID<N>>,
+    ) -> Result<ErasedJson, RestError> {
+        let store = rest.ledger.vm().finalize_store().clone();
+        let ranges = tokio::task::spawn_blocking(move || store.get_program_history_ranges(&program_id))
+            .await
+            .map_err(|err| RestError::internal_server_error(anyhow!("Tokio error: {err}")))?
+            .map_err(RestError::internal_server_error)?;
+        Ok(ErasedJson::new(ranges))
+    }
+
     /// GET /<network>/program/{id}/mapping/{name}/{key}/history/{height}
     pub(crate) async fn get_program_history(
         State(rest): State<Self>,
