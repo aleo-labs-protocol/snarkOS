@@ -13,6 +13,8 @@
 #    After upgrading the first validator, restart the last validator on the release binary and check
 #    that it dials the upgraded validator. After upgrading the first client, do the same for the
 #    last client.
+# 7. If the PR binary has a newer consensus version, wait until the network passes its activation
+#    height, which lies after every upgrade, and check that every node runs it.
 ####################################################
 
 set -eo pipefail  # error on any command failure
@@ -39,6 +41,14 @@ WAIT_BETWEEN_UPGRADES="${WAIT_BETWEEN_UPGRADES:-60}"
 
 # How long an upgraded node may take to serve its REST API again (seconds).
 MAX_RESTART_WAIT="${MAX_RESTART_WAIT:-300}"
+
+# A validator stops REQUIRED_UPGRADE_SAFETY_MARGIN blocks before a newer consensus version that
+# validators holding the availability threshold of stake schedule and it does not. With four
+# validators, that is two of them.
+REQUIRED_UPGRADE_SAFETY_MARGIN=100
+
+# A devnet makes about one block every 2 s.
+SECONDS_PER_BLOCK=2
 
 # Load shared helpers (is_integer, get_network_name, wait_for_nodes, stop_nodes, ...)
 # shellcheck source=SCRIPTDIR/utils.sh
@@ -177,9 +187,10 @@ function build_consensus_heights() {
 }
 
 # Build heights string for PR when its latest_consensus_version differs from release:
-# same as build_consensus_heights, but the last version activates 100 blocks after the previous one.
+# same as build_consensus_heights, but the last version activates gap blocks after the previous one.
 function build_consensus_heights_with_big_last() {
   local lcv="$1"
+  local gap="$2"
 
   if ! is_integer "$lcv" || (( lcv <= 0)) ; then
     echo ""
@@ -208,7 +219,7 @@ function build_consensus_heights_with_big_last() {
 
   # Previous value is for i = lcv - 2
   local prev=$(( lcv == 2 ? 0 : lcv + 2 ))
-  local last=$(( prev + 100 ))
+  local last=$(( prev + gap ))
   heights="$heights,$last"
 
   echo "$heights"
@@ -227,6 +238,7 @@ function derive_consensus_env_from_version() {
   local lcv_release=""
   local lcv_current=""
   local schedule=""
+  local new_version_height=""
 
   if ! schedule=$(query_default_consensus_version "$SNARKOS_CURRENT_BIN" current); then
     log "ERROR: Could not determine consensus version from current binary"
@@ -253,8 +265,14 @@ function derive_consensus_env_from_version() {
     # Same consensus horizon → same pattern
     heights_current="$(build_consensus_heights "$lcv_current")"
   else
-    # Different latest consensus version → stretch the last step by +100
-    heights_current="$(build_consensus_heights_with_big_last "$lcv_current")"
+    # The release validators must not reach the stop height of the new version before every
+    # validator is upgraded. Each validator step takes at most a window of WAIT_BETWEEN_UPGRADES
+    # seconds; the restart of the release validator counts twice, as it also waits up to 60 s for
+    # a heartbeat of validator 0. The last 20 blocks cover the restarts themselves.
+    local validator_steps=$(( total_validators + 2 ))
+    local gap=$(( REQUIRED_UPGRADE_SAFETY_MARGIN + validator_steps * WAIT_BETWEEN_UPGRADES / SECONDS_PER_BLOCK + 20 ))
+    heights_current="$(build_consensus_heights_with_big_last "$lcv_current" "$gap")"
+    new_version_height="${heights_current##*,}"
   fi
 
   log "Release CONSENSUS_VERSION_HEIGHTS=${heights_release}"
@@ -264,6 +282,8 @@ function derive_consensus_env_from_version() {
   export CONSENSUS_VERSION_HEIGHTS_RELEASE="$heights_release"
   export CONSENSUS_VERSION_HEIGHTS_CURRENT="$heights_current"
   export EXPECTED_MAX_CONSENSUS_VERSION="$lcv_current"
+  # Empty unless the PR binary has a newer consensus version.
+  export NEW_VERSION_HEIGHT="$new_version_height"
 
   log "Derived EXPECTED_MAX_CONSENSUS_VERSION=${EXPECTED_MAX_CONSENSUS_VERSION}"
   log "Exported CONSENSUS_VERSION_HEIGHTS_RELEASE=${CONSENSUS_VERSION_HEIGHTS_RELEASE}"
@@ -562,10 +582,33 @@ for node_index in $(seq 0 $((total_validators+total_clients-1))); do
 done
 
 
+# The new consensus version activates after every upgrade. Wait until every node is 5 blocks past
+# its activation height, and check that every node runs it.
+if [ -n "$NEW_VERSION_HEIGHT" ]; then
+  total_nodes=$((total_validators + total_clients))
+  target_height=$((NEW_VERSION_HEIGHT + 5))
+  current_height=$(get_network_block_height "$total_nodes" "$network_name")
+  if ! (is_integer "$current_height"); then
+    current_height=0
+  fi
+  max_wait=$(( (target_height - current_height) * 2 * SECONDS_PER_BLOCK + 120 ))
+  log "Waiting up to ${max_wait}s for every node to reach height ${target_height}, past the activation of consensus version ${EXPECTED_MAX_CONSENSUS_VERSION} at height ${NEW_VERSION_HEIGHT}..."
+  if ! wait_for_heights 0 "$total_nodes" "$target_height" "$network_name" "$max_wait" 5; then
+    log "❌ Test failed! Not every node reached height ${target_height} within ${max_wait}s."
+    exit 1
+  fi
+  for node_index in $(seq 0 $((total_nodes - 1))); do
+    node_version=$(get_consensus_version "$node_index" "$network_name" || echo "")
+    if [ "$node_version" != "$EXPECTED_MAX_CONSENSUS_VERSION" ]; then
+      log "❌ Test failed! Node #${node_index} is at consensus version ${node_version:-<none>}, expected ${EXPECTED_MAX_CONSENSUS_VERSION}."
+      exit 1
+    fi
+  done
+  log "✅ Every node runs consensus version ${EXPECTED_MAX_CONSENSUS_VERSION} past its activation height ${NEW_VERSION_HEIGHT}."
+fi
+
 # Ensure that every upgraded node applies the configured consensus version schedule, i.e.
-# that its consensus version is the one that its block height implies. Note that this is
-# not necessarily `EXPECTED_MAX_CONSENSUS_VERSION`: the test may end before the last
-# configured height, so the version is checked against the height reached.
+# that its consensus version is the one that its block height implies.
 log "Checking that the consensus version matches the configured schedule..."
 for node_index in $(seq 0 $((total_validators+total_clients-1))); do
   # Retry a few times, as the height and the consensus version are read separately and so
