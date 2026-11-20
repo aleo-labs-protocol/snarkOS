@@ -88,7 +88,7 @@ checks the crate without `metrics`. The `simple_node` line passes
 `--no-tests=fail`, because the step otherwise lets a command match no tests.
 
 [`.config/nextest.toml`](.config/nextest.toml) sets two test threads, which
-the hosted entries use. The fleet entries run 16 at a time through
+the hosted entries use. The fleet entries run 16 tests at a time through
 `NEXTEST_TEST_THREADS`: most of their slow tests wait on timers rather than
 the CPU, and a box runs one job. Each entry uploads nextest's JUnit reports as
 the artifact `junit-<entry>`, one file per line, with the time of each test.

@@ -479,9 +479,9 @@ async fn the_gateway_weighs_the_schedule_of_an_initiator() {
 /// A validator counts as connected only once its schedule is recorded, so that no block check
 /// counts its stake as not ahead before its schedule is known.
 ///
-/// The handshake and the heartbeat block their workers while the lock is held, so the test keeps
-/// workers to spare. A blocked worker can also leave the gateway's runtime polling no socket or
-/// timer, so nothing the test waits for while it holds the lock runs on that runtime.
+/// The handshake and the heartbeat block their workers while the lock is held. A blocked worker can
+/// leave the gateway's runtime polling no socket or timer, so the test runs its side of the
+/// handshake, and waits, on threads of its own.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_validator_counts_as_connected_only_once_its_schedule_is_recorded() {
     let mut rng = TestRng::default();
