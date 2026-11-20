@@ -22,7 +22,7 @@ pub struct Updater;
 impl Updater {
     const SNARKOS_BIN_NAME: &'static str = "snarkos";
     const SNARKOS_REPO_NAME: &'static str = "snarkOS";
-    const SNARKOS_REPO_OWNER: &'static str = "ProvableHQ";
+    const SNARKOS_REPO_OWNER: &'static str = "aleo-labs-protocol";
 
     /// Show all available releases for `snarkos`.
     pub fn show_available_releases() -> Result<String, UpdaterError> {
@@ -53,7 +53,12 @@ impl Updater {
             .show_output(show_output);
 
         let status = match version {
-            None => update_builder.build()?.update()?,
+            // The release list includes release candidates; `releases/latest` never names one.
+            None => match Self::update_available() {
+                Ok(latest) => update_builder.release_tag(format!("v{latest}")).build()?.update()?,
+                Err(UpdaterError::OldReleaseVersion(current, _)) => VersionStatus::UpToDate(current),
+                Err(error) => return Err(error),
+            },
             Some(v) => update_builder.release_tag(&v).build()?.update()?,
         };
 

@@ -78,12 +78,19 @@ Before beginning, please ensure your machine has Rust installed, with at least [
 
 Start by cloning this GitHub repository:
 ```
-git clone --branch mainnet --single-branch https://github.com/ProvableHQ/snarkOS.git
+git clone https://github.com/aleo-labs-protocol/snarkOS.git
 ```
 
-Next, move into the `snarkOS` directory:
+Next, move into the `snarkOS` directory and check out the latest release for your network, `mainnet` or `testnet`:
 ```
 cd snarkOS
+./scripts/checkout-latest-release.sh mainnet
+```
+The script needs `curl` and `jq`. Rerun it to update to a new release. See [Branching and Releasing](BRANCHING_AND_RELEASING.md).
+
+A release older than `v5.0.0` does not contain the script. From such a checkout, run it from `staging`:
+```
+git fetch origin staging && git show FETCH_HEAD:scripts/checkout-latest-release.sh | bash -s mainnet
 ```
 
 **[For Ubuntu users]** A helper script to install dependencies is available. From the `snarkOS` directory, run:
