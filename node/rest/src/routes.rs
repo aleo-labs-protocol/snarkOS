@@ -277,6 +277,20 @@ pub(crate) struct TransactionWithMetadata<T: Serialize, N: Network> {
     block_height: Option<u32>,
 }
 
+/// The return value for a `programs/summary` query.
+#[derive(Serialize)]
+struct ProgramsSummary {
+    height: u32,
+    programs: Vec<ProgramSummary>,
+}
+
+/// A deployed program and its latest edition.
+#[derive(Serialize)]
+struct ProgramSummary {
+    id: String,
+    edition: u16,
+}
+
 /// The return value for a `sync_status` query.
 #[skip_serializing_none]
 #[derive(Copy, Clone, Serialize)]
@@ -887,6 +901,33 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         Path(id): Path<ProgramID<N>>,
     ) -> Result<ErasedJson, RestError> {
         Ok(ErasedJson::new(rest.ledger.get_latest_edition_for_program(&id)?))
+    }
+
+    /// GET /<network>/programs/summary
+    ///
+    /// Returns every deployed program with its latest edition, sorted by ID, and a `height`.
+    /// Every program deployed at or before `height` is listed. The list may also include programs
+    /// deployed after `height`, and an edition may be newer than it was at `height`.
+    pub(crate) async fn get_programs_summary(State(rest): State<Self>) -> Result<ErasedJson, RestError> {
+        let summarize = move || {
+            // Read the height first. The ledger advances it only after the block's storage batch
+            // is written, so the scan below sees every deployment up to it.
+            let height = rest.ledger.latest_height();
+            let mut programs: Vec<_> = rest
+                .ledger
+                .vm()
+                .transaction_store()
+                .program_ids_and_latest_editions()
+                .map(|(id, edition)| ProgramSummary { id: id.to_string(), edition: *edition })
+                .collect();
+            programs.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+            ProgramsSummary { height, programs }
+        };
+
+        match tokio::task::spawn_blocking(summarize).await {
+            Ok(summary) => Ok(ErasedJson::new(summary)),
+            Err(err) => Err(RestError::internal_server_error(anyhow!(err).context("Tokio error"))),
+        }
     }
 
     /// GET /<network>/program/{programID}/mappings

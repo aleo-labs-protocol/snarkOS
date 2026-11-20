@@ -381,6 +381,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             .route("/program/{id}/mapping/{name}/{key}", get(Self::get_mapping_value))
             .route("/program/{id}/amendment_count", get(Self::get_program_amendment_count))
             .route("/program/{id}/{edition}/amendment_count", get(Self::get_program_amendment_count_for_edition))
+            .route("/programs/summary", get(Self::get_programs_summary))
 
             // GET ../sync/.. (with the deprecated ../sync_status alias)
             .route("/sync_status", get(Self::get_sync_status))
@@ -814,8 +815,6 @@ mod route_tests {
     /// port and spawn a server. None of the routes exercised here touch `consensus`, `cdn_sync`,
     /// `routing` or `block_sync`; those fields exist only to satisfy the type.
     async fn sample_rest() -> CurrentRest {
-        let rng = &mut TestRng::default();
-
         // `Ledger::load` reaches snarkVM's sequential-operation thread and blocks on the reply,
         // which panics if called from an async context. Production always drives these from a
         // blocking task, so do the same here.
@@ -828,6 +827,13 @@ mod route_tests {
         .await
         .expect("the ledger task panicked")
         .expect("couldn't load the test ledger");
+
+        sample_rest_with(ledger).await
+    }
+
+    /// Builds a `Rest` over the given ledger, as `sample_rest` does.
+    async fn sample_rest_with(ledger: Ledger<CurrentNetwork, ConsensusMemory<CurrentNetwork>>) -> CurrentRest {
+        let rng = &mut TestRng::default();
 
         let ledger_service = Arc::new(MockLedgerService::new(sample_committee(rng)));
 
@@ -1389,6 +1395,66 @@ mod route_tests {
 
         let hash: <CurrentNetwork as Network>::BlockHash = serde_json::from_str(&body).unwrap();
         assert_eq!(hash, sample_genesis_block::<CurrentNetwork>().hash());
+    }
+
+    #[tokio::test]
+    async fn programs_summary_lists_credits_at_the_genesis_height() {
+        let rest = sample_rest().await;
+
+        for prefix in ["/mainnet", "/v1/mainnet", "/v2/mainnet"] {
+            let (status, body) = get_versioned(&rest, &format!("{prefix}/programs/summary")).await;
+            assert_eq!(status, StatusCode::OK, "{prefix}: {body}");
+
+            let summary: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(summary["height"], 0);
+            let programs = summary["programs"].as_array().unwrap();
+            assert!(programs.contains(&serde_json::json!({"id": "credits.aleo", "edition": 0})), "{body}");
+            let ids: Vec<&str> = programs.iter().map(|program| program["id"].as_str().unwrap()).collect();
+            assert!(ids.is_sorted(), "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn programs_summary_lists_a_deployed_program() {
+        use snarkvm::prelude::{PrivateKey, Program, store::ConsensusStore};
+        use std::str::FromStr;
+
+        // The mainnet genesis funds no key we hold, so build a genesis that does and deploy with
+        // it. Ledger and VM calls panic in an async context.
+        let ledger = tokio::task::spawn_blocking(|| {
+            let rng = &mut TestRng::default();
+            let private_key = PrivateKey::<CurrentNetwork>::new(rng).unwrap();
+            let store = ConsensusStore::open(StorageMode::new_test(None)).unwrap();
+            let genesis = VM::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>::from(store)
+                .unwrap()
+                .genesis_beacon(&private_key, rng)
+                .unwrap();
+            let ledger =
+                Ledger::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>::load(genesis, StorageMode::new_test(None))
+                    .unwrap();
+
+            // Named to sort before `credits.aleo`.
+            let program = Program::<CurrentNetwork>::from_str(
+                "program aaa_summary.aleo;\n\nfunction hello:\n    input r0 as u32.private;\n    input r1 as u32.private;\n    add r0 r1 into r2;\n    output r2 as u32.private;\n",
+            )
+            .unwrap();
+            let deployment = ledger.vm().deploy(&private_key, &program, None, 600_000, None, rng).unwrap();
+            let block = ledger
+                .prepare_advance_to_next_beacon_block(&private_key, vec![], vec![], vec![deployment], rng)
+                .unwrap();
+            ledger.advance_to_next_block(&block).unwrap();
+            ledger
+        })
+        .await
+        .expect("the ledger task panicked");
+        let rest = sample_rest_with(ledger).await;
+
+        let (status, body) = get_versioned(&rest, "/v2/mainnet/programs/summary").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body,
+            r#"{"height":1,"programs":[{"id":"aaa_summary.aleo","edition":0},{"id":"credits.aleo","edition":0}]}"#
+        );
     }
 
     /// The routes of the removed `history` feature, in history compatibility mode.
