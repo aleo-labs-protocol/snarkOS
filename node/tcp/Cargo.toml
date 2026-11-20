@@ -18,7 +18,6 @@ edition = "2024"
 
 [features]
 default = [ ]
-locktick = [ "dep:locktick", "snarkos-node-metrics/locktick" ]
 metrics = [ "dep:snarkos-node-metrics" ]
 
 [dependencies.async-trait]
@@ -27,17 +26,9 @@ workspace = true
 [dependencies.bytes]
 workspace = true
 
-[dependencies.parking_lot]
-workspace = true
-
 [dependencies.futures-util]
 workspace = true
 features = [ "sink" ]
-
-[dependencies.locktick]
-workspace = true
-features = [ "parking_lot" ]
-optional = true
 
 [dependencies.snarkos-node-metrics]
 workspace = true
@@ -46,6 +37,9 @@ optional = true
 [dependencies.once_cell]
 workspace = true
 features = [ "parking_lot" ]
+
+[dependencies.snarkos-utilities]
+workspace = true
 
 [dependencies.tokio]
 workspace = true

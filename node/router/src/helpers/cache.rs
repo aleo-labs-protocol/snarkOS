@@ -18,10 +18,7 @@ use snarkvm::prelude::{Network, puzzle::SolutionID};
 
 use core::hash::Hash;
 use linked_hash_map::LinkedHashMap;
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::RwLock;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::RwLock;
+use snarkos_utilities::locks::parking_lot::RwLock;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     net::{IpAddr, SocketAddr},

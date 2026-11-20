@@ -20,7 +20,7 @@ use crate::{
 };
 
 use snarkos_node_cdn::CDN_BASE_URL;
-use snarkos_utilities::SimpleStoppable;
+use snarkos_utilities::{SimpleStoppable, locks::parking_lot::RwLock};
 
 use snarkvm::{
     console::network::Network,
@@ -32,10 +32,6 @@ use snarkvm::prelude::FromBytes;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{Parser, builder::NonEmptyStringValueParser};
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::RwLock;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::RwLock;
 use std::{
     io::{Write, stdout},
     str::FromStr,

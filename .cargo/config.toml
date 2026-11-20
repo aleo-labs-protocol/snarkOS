@@ -5,3 +5,24 @@ rustflags = [
     # you explicitly set target-cpu yourself when building.
     "-C", "target-cpu=skylake"
 ]
+
+# `cargo locktick-<command>` runs a cargo command with `--cfg locktick`, which swaps every lock
+# in `snarkos_utilities::locks` for its `locktick` counterpart, for example
+# `cargo locktick-build --release`. The `--config` adds to the `rustflags` above rather than
+# replacing them.
+#
+# Hazard: cargo drops a `--config` placed before an external subcommand such as `clippy`,
+# `nextest` or `hack`, so each alias puts it after its subcommand.
+#
+# Hazard: a `RUSTFLAGS` environment variable replaces every `rustflags` setting, this one
+# included. To combine `--cfg locktick` with a `RUSTFLAGS` build, such as the one the
+# `tokio_console` feature needs, put `--cfg locktick` in `RUSTFLAGS` itself.
+#
+# Hazard: because the aliases set target rustflags, cargo ignores `[build] rustflags` and
+# `CARGO_BUILD_RUSTFLAGS` under them on every platform, as it already does on x86-64 Linux because
+# of the table above. Pass extra flags in `CARGO_TARGET_<TRIPLE>_RUSTFLAGS` instead, which cargo
+# adds to the aliases' flags.
+[alias]
+locktick-build = ["build", "--config", "target.'cfg(all())'.rustflags=['--cfg','locktick']"]
+locktick-check = ["check", "--config", "target.'cfg(all())'.rustflags=['--cfg','locktick']"]
+locktick-clippy = ["clippy", "--config", "target.'cfg(all())'.rustflags=['--cfg','locktick']"]

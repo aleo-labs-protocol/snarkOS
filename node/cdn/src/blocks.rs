@@ -17,7 +17,11 @@
 // https://github.com/rust-lang/rust-clippy/issues/6446
 #![allow(clippy::await_holding_lock)]
 
-use snarkos_utilities::{SignalHandler, Stoppable};
+use snarkos_utilities::{
+    SignalHandler,
+    Stoppable,
+    locks::{parking_lot::Mutex, tokio::Mutex as TMutex},
+};
 
 use snarkvm::{
     console::account::ComputeKeyCache,
@@ -26,10 +30,6 @@ use snarkvm::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-#[cfg(feature = "locktick")]
-use locktick::{parking_lot::Mutex, tokio::Mutex as TMutex};
-#[cfg(not(feature = "locktick"))]
-use parking_lot::Mutex;
 use reqwest::Client;
 use std::{
     cmp,
@@ -39,8 +39,6 @@ use std::{
     },
     time::{Duration, Instant},
 };
-#[cfg(not(feature = "locktick"))]
-use tokio::sync::Mutex as TMutex;
 use tokio::task::JoinHandle;
 
 /// The number of blocks per file.
@@ -603,7 +601,7 @@ mod tests {
         read_blocks,
     };
 
-    use snarkos_utilities::SimpleStoppable;
+    use snarkos_utilities::{SimpleStoppable, locks::parking_lot::RwLock};
 
     use snarkvm::{
         prelude::{FromBytes, MainnetV0, Network, block::Block},
@@ -611,7 +609,6 @@ mod tests {
     };
 
     use http::Uri;
-    use parking_lot::RwLock;
     use std::{sync::Arc, time::Instant};
 
     type CurrentNetwork = MainnetV0;

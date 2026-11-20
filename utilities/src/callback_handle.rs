@@ -13,12 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::locks::parking_lot::{RwLock, RwLockReadGuard};
 use anyhow::{Result, bail};
-#[cfg(feature = "locktick")]
-use locktick::{LockGuard, parking_lot::RwLock};
-#[cfg(not(feature = "locktick"))]
-use parking_lot::RwLock;
-use parking_lot::RwLockReadGuard;
 
 /// Helper struct to hold a reference to a callback struct.
 pub struct CallbackHandle<C: Clone + Send + Sync> {
@@ -53,15 +49,6 @@ impl<C: Send + Sync + Clone> CallbackHandle<C> {
 
     /// Get reference to the callback.
     /// Cannot be shared across await-boundaries.
-    #[cfg(feature = "locktick")]
-    #[inline]
-    pub fn get_ref(&self) -> LockGuard<RwLockReadGuard<'_, Option<C>>> {
-        self.callback.read()
-    }
-
-    /// Get reference to the callback.
-    /// Cannot be shared across await-boundaries.
-    #[cfg(not(feature = "locktick"))]
     #[inline]
     pub fn get_ref(&self) -> RwLockReadGuard<'_, Option<C>> {
         self.callback.read()

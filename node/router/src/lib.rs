@@ -24,7 +24,10 @@ extern crate tracing;
 extern crate snarkos_node_metrics as metrics;
 
 pub use snarkos_node_router_messages as messages;
-use snarkos_utilities::NodeDataDir;
+use snarkos_utilities::{
+    NodeDataDir,
+    locks::parking_lot::{Mutex, RwLock},
+};
 
 mod handshake;
 
@@ -68,10 +71,6 @@ use snarkos_node_tcp::{Config, ConnectionSide, Tcp};
 use snarkvm::prelude::{Address, Network, PrivateKey, ViewKey};
 
 use anyhow::Result;
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::{Mutex, RwLock};
-#[cfg(not(feature = "locktick"))]
-use parking_lot::{Mutex, RwLock};
 use std::{collections::HashMap, future::Future, io, net::SocketAddr, ops::Deref, sync::Arc};
 use tokio::task::JoinHandle;
 

@@ -621,10 +621,24 @@ cargo run --release -- clean --dev <NODE_ID>
   telemetry described in [Validator Telemetry Metrics](#321-validator-telemetry-metrics).
 * **cuda** -
   Allows some operations to run on the (NVidia) GPU, instead of on the CPU. See [CUDA acceleration for provers](#optional-cuda-acceleration-for-provers) for install tips and current puzzle status.
-* **locktick** -
-  This feature turns on code for detecting deadlocks.
 * **test_targets** -
   This feature allows the lowering of coinbase and proof targets for testing.
+
+### Lock instrumentation
+
+The `locktick` cfg, which is not a feature, swaps every lock for an instrumented one from the
+[`locktick`](https://crates.io/crates/locktick) crate, to help find deadlocks and lock contention.
+Every three seconds, the node logs each lock guard that is held or waited for. To build the node
+with it, run:
+
+```
+cargo locktick-build --release
+```
+
+`cargo locktick-build` is an alias in `.cargo/config.toml` that adds `--cfg locktick` to the
+compiler flags. `cargo locktick-check` and `cargo locktick-clippy` do the same for `check` and
+`clippy`. If you set the `RUSTFLAGS` environment variable, it overrides the alias,
+so add `--cfg locktick` to `RUSTFLAGS` instead.
 
 ## 6.5 Local Backups
 

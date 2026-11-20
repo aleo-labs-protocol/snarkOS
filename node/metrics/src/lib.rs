@@ -23,10 +23,7 @@ pub use snarkvm::metrics::*;
 
 use rayon::prelude::*;
 
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::Mutex;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::Mutex;
+use snarkos_utilities::locks::parking_lot::Mutex;
 use snarkvm::{
     ledger::narwhal::TransmissionID,
     prelude::{Block, Network, Transaction, cfg_iter},

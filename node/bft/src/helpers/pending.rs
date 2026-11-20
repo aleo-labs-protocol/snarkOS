@@ -16,16 +16,13 @@
 use crate::{Gateway, MAX_FETCH_TIMEOUT};
 use snarkos_node_bft_ledger_service::LedgerService;
 use snarkos_node_network::PeerPoolHandling;
+use snarkos_utilities::locks::parking_lot::RwLock;
 use snarkvm::{
     console::network::{Network, consensus_config_value},
     prelude::Result,
 };
 
 use anyhow::{anyhow, bail};
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::RwLock;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::RwLock;
 use std::{
     collections::{HashMap, HashSet},
     hash::Hash,

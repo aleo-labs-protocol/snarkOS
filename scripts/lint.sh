@@ -5,7 +5,7 @@
 
 set -e
 
-echo "Checking license headers and locktick imports..."
+echo "Checking license headers..."
 "$(dirname "$0")/check_sources.py"
 
 echo "Running clippy..."

@@ -1,0 +1,20 @@
+# Locks come from `snarkos_utilities::locks`, so that building with `--cfg locktick` instruments
+# all of them. `std::sync` locks are not covered.
+disallowed-types = [
+  { path = "parking_lot::Mutex", reason = "use snarkos_utilities::locks::parking_lot::Mutex" },
+  { path = "parking_lot::RwLock", reason = "use snarkos_utilities::locks::parking_lot::RwLock" },
+  { path = "parking_lot::FairMutex", reason = "locktick cannot instrument it; use snarkos_utilities::locks::parking_lot::Mutex" },
+  { path = "parking_lot::ReentrantMutex", reason = "locktick cannot instrument it; use snarkos_utilities::locks::parking_lot::Mutex" },
+  { path = "tokio::sync::Mutex", reason = "use snarkos_utilities::locks::tokio::Mutex" },
+  { path = "tokio::sync::RwLock", reason = "use snarkos_utilities::locks::tokio::RwLock" },
+  { path = "locktick::parking_lot::Mutex", reason = "use snarkos_utilities::locks::parking_lot::Mutex" },
+  { path = "locktick::parking_lot::RwLock", reason = "use snarkos_utilities::locks::parking_lot::RwLock" },
+  { path = "locktick::tokio::Mutex", reason = "use snarkos_utilities::locks::tokio::Mutex" },
+  { path = "locktick::tokio::RwLock", reason = "use snarkos_utilities::locks::tokio::RwLock" },
+  { path = "parking_lot::MutexGuard", reason = "use snarkos_utilities::locks::parking_lot::MutexGuard" },
+  { path = "parking_lot::RwLockReadGuard", reason = "use snarkos_utilities::locks::parking_lot::RwLockReadGuard" },
+  { path = "parking_lot::RwLockWriteGuard", reason = "use snarkos_utilities::locks::parking_lot::RwLockWriteGuard" },
+  { path = "tokio::sync::MutexGuard", reason = "use snarkos_utilities::locks::tokio::MutexGuard" },
+  { path = "tokio::sync::RwLockReadGuard", reason = "use snarkos_utilities::locks::tokio::RwLockReadGuard" },
+  { path = "tokio::sync::RwLockWriteGuard", reason = "use snarkos_utilities::locks::tokio::RwLockWriteGuard" },
+]

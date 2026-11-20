@@ -27,10 +27,7 @@ use snarkvm::{
     prelude::{Address, ConsensusVersion, Field, Network, Result, Zero, bail, consensus_config_value},
 };
 
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::Mutex;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::Mutex;
+use snarkos_utilities::locks::parking_lot::Mutex;
 use std::{
     collections::{BTreeMap, HashSet},
     ops::Range,

@@ -38,7 +38,7 @@ use snarkos_node_tcp::{
     P2P,
     protocols::{Disconnect, Handshake, OnConnect, Reading},
 };
-use snarkos_utilities::{DevHotswapConfig, NodeDataDir, SignalHandler};
+use snarkos_utilities::{DevHotswapConfig, NodeDataDir, SignalHandler, locks::parking_lot::Mutex};
 
 use snarkvm::prelude::{
     Ledger,
@@ -51,10 +51,6 @@ use snarkvm::prelude::{
 use anyhow::{Context, Result};
 use cfg_if::cfg_if;
 use core::future::Future;
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::Mutex;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::Mutex;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::task::JoinHandle;
 

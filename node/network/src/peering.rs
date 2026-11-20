@@ -16,13 +16,10 @@
 use crate::{CandidatePeer, ConnectedPeer, ConnectionMode, NodeType, Peer, Resolver};
 
 use snarkos_node_tcp::{ConnectError, P2P, is_bogon_ip, is_unspecified_or_broadcast_ip};
+use snarkos_utilities::locks::parking_lot::RwLock;
 use snarkvm::prelude::{Address, Network};
 
 use anyhow::Result;
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::RwLock;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::RwLock;
 use std::{
     cmp,
     collections::{

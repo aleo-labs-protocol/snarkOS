@@ -21,7 +21,7 @@
 
 use snarkos_account::Account;
 use snarkos_node_bft_ledger_service::MockLedgerService;
-use snarkos_utilities::NodeDataDir;
+use snarkos_utilities::{NodeDataDir, locks::parking_lot::RwLock};
 use snarkvm::{
     prelude::{FromBytes, MainnetV0 as CurrentNetwork, PrivateKey},
     utilities::TestRng,
@@ -65,10 +65,6 @@ use snarkvm::{
 };
 
 use async_trait::async_trait;
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::RwLock;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::RwLock;
 use std::{collections::HashMap, io, net::SocketAddr, str::FromStr, sync::Arc};
 use tracing::*;
 

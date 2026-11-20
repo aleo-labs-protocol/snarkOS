@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
-"""Checks the `.rs` files that git tracks.
+"""Checks that every `.rs` file git tracks starts with the license header in `.resources/license_header`.
 
-Tracked files that are deleted from the working tree are not checked.
-
-- Every file starts with the license header in `.resources/license_header`.
-  On Linux, the copyright range in that header must end in the current year.
-- In every file, each `Mutex` or `RwLock` imported from `parking_lot` or
-  `tokio` has a matching import from `locktick`. The `locktick` feature relies
-  on this to swap in its instrumented lock types.
+Tracked files that are deleted from the working tree are not checked. On Linux, the copyright range
+in that header must also end in the current year.
 
 Usage: scripts/check_sources.py [ROOT]
 
@@ -23,10 +18,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LICENSE_HEADER = (REPO_ROOT / ".resources" / "license_header").read_bytes()
-
-# Matches the `Mutex` and `RwLock` type names, but not names that contain them,
-# such as `TMutex` or `MutexGuard`.
-LOCK_TYPE = re.compile(r"\b(?:Mutex|RwLock)\b")
 
 
 def rust_files(root):
@@ -50,36 +41,6 @@ def check_license_year():
     return None
 
 
-def lock_import_imbalance(text):
-    """Returns the number of `parking_lot` and `tokio` lock imports minus the number of `locktick` lock imports.
-
-    The scan is line-based. An import statement starts at a line that begins with `use`
-    and ends at the first line that ends with `;`. Indented `use` statements, such as
-    those in a `mod tests` block, are not scanned.
-    """
-    # This matches Rust's `str::lines`, which splits on `\n` and strips one trailing `\r`.
-    lines = (line.removesuffix("\r") for line in text.split("\n"))
-
-    imbalance = 0
-    # The crate of the import statement being scanned, or `None` outside a relevant statement.
-    crate = None
-    for line in lines:
-        if crate is None:
-            if line.startswith("use locktick::"):
-                crate = "locktick"
-            elif line.startswith(("use parking_lot::", "use tokio::")):
-                crate = "lock"
-
-        if crate is not None:
-            locks = len(LOCK_TYPE.findall(line))
-            imbalance += locks if crate == "lock" else -locks
-
-        if line.endswith(";"):
-            crate = None
-
-    return imbalance
-
-
 def main():
     root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else REPO_ROOT
 
@@ -99,16 +60,6 @@ def main():
             continue
         if not contents.startswith(LICENSE_HEADER):
             errors.append(f"{name}: the license header is missing or does not match .resources/license_header")
-        try:
-            text = contents.decode("utf-8")
-        except UnicodeDecodeError as error:
-            errors.append(f"{name}: is not valid UTF-8: {error}")
-            continue
-        imbalance = lock_import_imbalance(text)
-        if imbalance > 0:
-            errors.append(f"{name}: {imbalance} lock import(s) from parking_lot or tokio have no locktick counterpart")
-        elif imbalance < 0:
-            errors.append(f"{name}: {-imbalance} locktick import(s) have no parking_lot or tokio counterpart")
 
     for error in errors:
         print(f"error: {error}", file=sys.stderr)
