@@ -41,10 +41,11 @@ use snarkos_node_bft_events::{
     ValidatorsRequest,
 };
 use snarkos_node_network::{
+    Peer,
     PeerPoolHandling,
     noise::{HandshakeProtocol, NoiseSession, Role, binding_message, detect_handshake_protocol, write_noise_magic},
 };
-use snarkos_node_tcp::P2P;
+use snarkos_node_tcp::{ConnectError, P2P, protocols::Handshake};
 use snarkvm::{
     ledger::{narwhal::Data, store::helpers::memory::ConsensusMemory},
     prelude::{FromBytes, TestRng, ToBytes},
@@ -700,4 +701,97 @@ async fn an_initiator_rejects_a_responder_with_a_different_genesis() {
     // Neither side may end up considering the other a peer.
     assert!(!gateway_a.connected_addresses().contains(&accounts[1].address()));
     assert!(!gateway_b.connected_addresses().contains(&accounts[0].address()));
+}
+
+/// How long to wait for a stalled handshake to time out.
+fn handshake_timeout_with_margin() -> Duration {
+    Duration::from_millis(<Gateway<CurrentNetwork> as Handshake>::TIMEOUT_MS + 3_000)
+}
+
+/// A responder that accepts the connection and then never answers holds the dialing gateway's
+/// handshake until it times out. Once it has, the peer must be dialable again; a peer stuck as
+/// connecting is never dialed by the heartbeat and turns away every inbound handshake.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_timed_out_outbound_handshake_does_not_leave_the_peer_connecting() {
+    let mut rng = TestRng::default();
+    let (_accounts, gateways) = new_test_gateways(1, &mut rng).await;
+    let gateway = gateways[0].clone();
+
+    // Accept connections and keep them open without ever writing to them.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let silent_addr = listener.local_addr().unwrap();
+    let _silent = task::spawn(async move {
+        let mut streams = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            streams.push(stream);
+        }
+    });
+
+    // A validator was seen at this address before.
+    let last_known_aleo_addr = Account::<CurrentNetwork>::new(&mut rng).unwrap().address();
+    let mut candidate = Peer::new_candidate(silent_addr, false);
+    if let Peer::Candidate(peer) = &mut candidate {
+        peer.last_known_aleo_addr = Some(last_known_aleo_addr);
+    }
+    gateway.peer_pool().write().insert(silent_addr, candidate);
+
+    let dial = task::spawn({
+        let gateway = gateway.clone();
+        async move { gateway.tcp().connect(silent_addr).await }
+    });
+    let g = gateway.clone();
+    deadline!(Duration::from_secs(5), move || g.is_connecting(silent_addr));
+
+    let result = timeout(handshake_timeout_with_margin(), dial).await.expect("the handshake never timed out").unwrap();
+    assert!(
+        matches!(&result, Err(ConnectError::IoError(e)) if e.kind() == io::ErrorKind::TimedOut),
+        "the handshake should have timed out: {result:?}"
+    );
+
+    match gateway.peer_pool().read().get(&silent_addr) {
+        Some(Peer::Candidate(peer)) => assert_eq!(peer.last_known_aleo_addr, Some(last_known_aleo_addr)),
+        peer => panic!("the timed-out peer should be a candidate again, found {peer:?}"),
+    }
+    match gateway.connect(silent_addr) {
+        Err(ConnectError::AlreadyConnecting { .. }) => panic!("a timed-out peer can never be dialed again"),
+        Ok(handle) => handle.abort(),
+        Err(_) => {}
+    }
+}
+
+/// An initiator that stalls after its first message holds the responder's handshake until it times
+/// out. The validator it claimed to be must still be able to connect afterwards, in both directions.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_timed_out_inbound_handshake_does_not_block_the_validator() {
+    let mut rng = TestRng::default();
+    let (accounts, gateways) = new_test_gateways(2, &mut rng).await;
+    let (gateway_a, gateway_b) = (gateways[0].clone(), gateways[1].clone());
+    let addr_b = dial_addr(&gateway_b);
+
+    // Open a handshake with gateway A as validator B, then stall after the hint, as a peer does
+    // whose later messages are lost.
+    let mut stream = TcpStream::connect(dial_addr(&gateway_a)).await.unwrap();
+    write_noise_magic(&mut stream).await.unwrap();
+    let mut noise = NoiseSession::new(stream, Role::Initiator).unwrap();
+    let version = Event::<CurrentNetwork>::VERSION;
+    let hint = HandshakeHint { version, listener_port: addr_b.port(), address: accounts[1].address() };
+    noise.send(&hint.to_bytes_le().unwrap()).await.unwrap();
+
+    let a = gateway_a.clone();
+    deadline!(Duration::from_secs(5), move || a.is_connecting(addr_b));
+    // Keep the stalled stream open until gateway A gives up on it, so that it is the timeout, and
+    // not a closed socket, that ends the handshake.
+    let a = gateway_a.clone();
+    deadline!(handshake_timeout_with_margin(), move || a.tcp().num_connecting() == 0);
+    drop(noise);
+
+    assert!(!gateway_a.is_connecting(addr_b), "validator B is still marked as connecting");
+
+    // The real validator B dials gateway A.
+    gateway_b.tcp().connect(dial_addr(&gateway_a)).await.unwrap();
+    let (a, b) = (gateway_a.clone(), gateway_b.clone());
+    let (address_a, address_b) = (accounts[0].address(), accounts[1].address());
+    deadline!(Duration::from_secs(5), move || {
+        a.connected_addresses().contains(&address_b) && b.connected_addresses().contains(&address_a)
+    });
 }

@@ -49,6 +49,7 @@ use snarkos_node_bft_events::{
 };
 use snarkos_node_bft_ledger_service::LedgerService;
 use snarkos_node_network::{
+    ConnectingPeerGuard,
     ConnectionMode,
     NodeType,
     Peer,
@@ -1630,15 +1631,11 @@ impl<N: Network> Handshake for Gateway<N> {
         // Make the socket more robust; every other handshake in the node does this too.
         harden_socket(stream)?;
 
-        // If this is an inbound connection, we log it, but don't know the listening address yet.
-        // Otherwise, we can immediately register the listening address.
-        let mut listener_addr = if peer_side == ConnectionSide::Initiator {
+        if peer_side == ConnectionSide::Initiator {
             debug!("{CONTEXT} Received a connection request from '{peer_addr}'");
-            None
         } else {
             debug!("{CONTEXT} Shaking hands with {peer_addr}...");
-            Some(peer_addr)
-        };
+        }
 
         // Retrieve the restrictions ID.
         let restrictions_id = self.ledger.latest_restrictions_id();
@@ -1650,8 +1647,6 @@ impl<N: Network> Handshake for Gateway<N> {
             .and_then(|bytes| bytes.try_into().ok())
             .ok_or_else(|| ConnectError::other(anyhow!("Failed to encode the genesis hash")))?;
 
-        // Perform the handshake; we pass on a mutable reference to peer_ip in case the process is broken at any point in time.
-        //
         // Validators speak only the Noise handshake. A peer that opens with anything else is turned
         // away before any key is derived.
         let handshake_result = if peer_side == ConnectionSide::Responder {
@@ -1660,14 +1655,7 @@ impl<N: Network> Handshake for Gateway<N> {
         } else {
             match detect_handshake_protocol(stream).await? {
                 (HandshakeProtocol::Noise, _) => {
-                    self.handshake_inner_responder_noise(
-                        peer_addr,
-                        &mut listener_addr,
-                        restrictions_id,
-                        genesis_hash,
-                        stream,
-                    )
-                    .await
+                    self.handshake_inner_responder_noise(peer_addr, restrictions_id, genesis_hash, stream).await
                 }
                 (HandshakeProtocol::Legacy, _) => {
                     Err(ConnectError::other(format!("'{peer_addr}' did not offer the Noise handshake")))
@@ -1675,86 +1663,63 @@ impl<N: Network> Handshake for Gateway<N> {
             }
         };
 
-        // Register the peer, or roll it back, if the handshake got far enough to learn its listening
-        // address.
-        match (&handshake_result, listener_addr) {
-            (Ok((peer_info, peer_schedule)), Some(addr)) => {
-                let node_type = if bootstrap_peers::<N>(self.is_dev()).contains(&addr) {
-                    NodeType::BootstrapClient
-                } else {
-                    NodeType::Validator
-                };
-                // A block check reads the connected validators before their schedules, so the schedule
-                // is recorded before the validator counts as connected.
-                if node_type == NodeType::Validator {
-                    self.upgrade_monitor.record_schedule(peer_info.address, peer_schedule.as_ref());
-                }
-                let mut peer_pool = self.peer_pool.write();
-
-                // Validators may change their listening address, but not the Aleo address; traverse
-                // the peer pool, and retain previously connected (the prior Aleo address is known)
-                // candidate peers with the same Aleo address only if their listening address is the
-                // same; otherwise, it may be concluded that a known validator has changed their
-                // listening address, and thus the old entry should be removed as outdated.
-                peer_pool.retain(|_, peer| {
-                    if let Peer::Candidate(peer) = peer
-                        && let Some(old_aleo_addr) = peer.last_known_aleo_addr
-                    {
-                        old_aleo_addr != peer_info.address || peer.listener_addr == addr
-                    } else {
-                        true
-                    }
-                });
-
-                let is_connected = match peer_pool.get_mut(&addr) {
-                    Some(peer) => {
-                        self.resolver.write().insert_peer(addr, peer_addr, Some(peer_info.address));
-                        peer.upgrade_to_connected(
-                            peer_addr,
-                            peer_info.listener_port,
-                            peer_info.address,
-                            node_type,
-                            peer_info.version,
-                            peer_info.snarkos_sha,
-                            ConnectionMode::Gateway,
-                        );
-                        true
-                    }
-                    None => false,
-                };
-                // The upgrade status reads the peer pool, so the lock is released first.
-                drop(peer_pool);
-
-                if is_connected && node_type == NodeType::Validator {
-                    log_schedule_difference::<N>(addr, peer_schedule.as_ref());
-                    self.update_upgrade_status();
-                }
-                info!("{CONTEXT} Connected to '{addr}'");
-            }
-            (Err(_), Some(addr)) => {
-                if let Some(peer) = self.peer_pool.write().get_mut(&addr) {
-                    // The peer may only be downgraded if it's a ConnectingPeer.
-                    if peer.is_connecting() {
-                        peer.downgrade_to_candidate(addr);
-                    }
-                }
-            }
-            // The handshake cannot succeed before it has learned the peer's listening address, so
-            // this is unreachable; if it ever happened, the connection would go live with neither a
-            // peer pool nor a resolver entry, and every event on it would be discarded as coming
-            // from an unknown peer. Refuse it instead of leaving it in that state.
-            (Ok(_), None) => {
-                return Err(ConnectError::other(format!(
-                    "the handshake with '{peer_addr}' succeeded without a listening address"
-                )));
-            }
-            // The handshake failed before the peer's listening address was known, so there is nothing
-            // in the pool to roll back.
-            (Err(_), None) => {}
+        // On failure, the handshake has already returned any peer it marked as connecting to the
+        // candidates.
+        let (peer_info, peer_schedule, connecting) = handshake_result?;
+        let addr = connecting.listener_addr();
+        let node_type = if bootstrap_peers::<N>(self.is_dev()).contains(&addr) {
+            NodeType::BootstrapClient
+        } else {
+            NodeType::Validator
+        };
+        // A block check reads the connected validators before their schedules, so the schedule
+        // is recorded before the validator counts as connected.
+        if node_type == NodeType::Validator {
+            self.upgrade_monitor.record_schedule(peer_info.address, peer_schedule.as_ref());
         }
+        let mut peer_pool = self.peer_pool.write();
 
-        // Abort the connection on failure whether or not the peer reached the pool.
-        handshake_result?;
+        // Validators may change their listening address, but not the Aleo address; traverse
+        // the peer pool, and retain previously connected (the prior Aleo address is known)
+        // candidate peers with the same Aleo address only if their listening address is the
+        // same; otherwise, it may be concluded that a known validator has changed their
+        // listening address, and thus the old entry should be removed as outdated.
+        peer_pool.retain(|_, peer| {
+            if let Peer::Candidate(peer) = peer
+                && let Some(old_aleo_addr) = peer.last_known_aleo_addr
+            {
+                old_aleo_addr != peer_info.address || peer.listener_addr == addr
+            } else {
+                true
+            }
+        });
+
+        let is_connected = match peer_pool.get_mut(&addr) {
+            Some(peer) => {
+                self.resolver.write().insert_peer(addr, peer_addr, Some(peer_info.address));
+                peer.upgrade_to_connected(
+                    peer_addr,
+                    peer_info.listener_port,
+                    peer_info.address,
+                    node_type,
+                    peer_info.version,
+                    peer_info.snarkos_sha,
+                    ConnectionMode::Gateway,
+                );
+                true
+            }
+            None => false,
+        };
+        // The upgrade status reads the peer pool, so the lock is released first. The connecting
+        // peer takes the same lock when dropped.
+        drop(peer_pool);
+        drop(connecting);
+
+        if is_connected && node_type == NodeType::Validator {
+            log_schedule_difference::<N>(addr, peer_schedule.as_ref());
+            self.update_upgrade_status();
+        }
+        info!("{CONTEXT} Connected to '{addr}'");
 
         Ok(connection)
     }
@@ -1850,16 +1815,15 @@ impl<N: Network> Gateway<N> {
         restrictions_id: Field<N>,
         genesis_hash: [u8; 32],
         stream: &'a mut TcpStream,
-    ) -> Result<(PeerInfo<N>, Option<ConsensusSchedule>), ConnectError> {
-        // Note who answered here last time, before the pool entry becomes a connecting one and stops
-        // carrying it.
+    ) -> Result<(PeerInfo<N>, Option<ConsensusSchedule>, ConnectingPeerGuard<'a, N>), ConnectError> {
+        // Introduce the peer into the peer pool.
+        let connecting = self.add_connecting_peer(peer_addr)?;
+
+        // Note who answered here last time.
         let expected_address = match self.peer_pool.read().get(&peer_addr) {
-            Some(Peer::Candidate(peer)) => peer.last_known_aleo_addr,
+            Some(Peer::Connecting(peer)) => peer.last_known_aleo_addr,
             _ => None,
         };
-
-        // Introduce the peer into the peer pool.
-        self.add_connecting_peer(peer_addr)?;
 
         let mut noise = NoiseSession::new(stream, Role::Initiator)?;
         let our_info =
@@ -1939,7 +1903,7 @@ impl<N: Network> Gateway<N> {
             return Err(reason.into_connect_error(peer_addr));
         }
 
-        Ok((peer_info, peer_trailer.schedule))
+        Ok((peer_info, peer_trailer.schedule, connecting))
     }
 
     /// The connection responder side of the Noise handshake.
@@ -1955,11 +1919,10 @@ impl<N: Network> Gateway<N> {
     async fn handshake_inner_responder_noise<'a>(
         &'a self,
         peer_addr: SocketAddr,
-        peer_ip: &mut Option<SocketAddr>,
         restrictions_id: Field<N>,
         genesis_hash: [u8; 32],
         stream: &'a mut TcpStream,
-    ) -> Result<(PeerInfo<N>, Option<ConsensusSchedule>), ConnectError> {
+    ) -> Result<(PeerInfo<N>, Option<ConsensusSchedule>, ConnectingPeerGuard<'a, N>), ConnectError> {
         /* Message 1: the peer's cleartext hint. Everything it claims is re-checked in message 3. */
 
         // The first message is read without deriving any keys, so that everything below costs the
@@ -1981,11 +1944,8 @@ impl<N: Network> Gateway<N> {
         }
 
         // The peer pool is the only thing mutated here, so it goes last: there is no point admitting
-        // a peer that one of the checks above was about to turn away. Recording the listening address
-        // only once that has succeeded also stops a peer claiming somebody else's port from getting
-        // their entry downgraded by failing this handshake.
-        self.add_connecting_peer(listener_addr)?;
-        *peer_ip = Some(listener_addr);
+        // a peer that one of the checks above was about to turn away.
+        let connecting = self.add_connecting_peer(listener_addr)?;
 
         /* Message 2: disclose ourselves, but do not sign anything yet. */
 
@@ -2020,14 +1980,14 @@ impl<N: Network> Gateway<N> {
             != (peer_info.version, peer_info.listener_port, peer_info.address)
         {
             warn!("{CONTEXT} Handshake with '{peer_addr}' failed (the handshake hint was contradicted)");
-            return self.reject_noise_handshake(peer_addr, noise, DisconnectReason::ProtocolViolation).await;
+            return Err(self.reject_noise_handshake(peer_addr, noise, DisconnectReason::ProtocolViolation).await);
         }
 
         // Everything below is a lookup or a comparison; only once all of it passes is the peer
         // worth the cost of a signature verification.
         if let Some(reason) = self.verify_peer_info(peer_addr, &peer_info, &peer_trailer, restrictions_id, genesis_hash)
         {
-            return self.reject_noise_handshake(peer_addr, noise, reason).await;
+            return Err(self.reject_noise_handshake(peer_addr, noise, reason).await);
         }
 
         /* Message 4: having checked the peer over, verify its proof and produce our own. */
@@ -2035,7 +1995,7 @@ impl<N: Network> Gateway<N> {
         if let Some(reason) =
             verify_binding_signature(peer_addr, peer_signature, peer_info.address, &peer_binding).await
         {
-            return self.reject_noise_handshake(peer_addr, noise, reason).await;
+            return Err(self.reject_noise_handshake(peer_addr, noise, reason).await);
         }
 
         let Ok(our_signature) = self.account.sign_bytes(&binding, &mut rand::rng()) else {
@@ -2045,19 +2005,24 @@ impl<N: Network> Gateway<N> {
 
         finish_noise_handshake(noise);
 
-        Ok((peer_info, peer_trailer.schedule))
+        Ok((peer_info, peer_trailer.schedule, connecting))
     }
 
-    /// Tells the initiator why it was turned away, and fails the handshake with that reason.
+    /// Tells the initiator why it was turned away. Returns the error that ends the handshake: the
+    /// reason, or the error that kept the initiator from hearing it.
     async fn reject_noise_handshake(
         &self,
         peer_addr: SocketAddr,
         mut noise: NoiseSession<&mut TcpStream>,
         reason: DisconnectReason,
-    ) -> Result<(PeerInfo<N>, Option<ConsensusSchedule>), ConnectError> {
-        noise.send(&encode_payload(&ResponderProof::<N>::Rejected { reason })?).await?;
+    ) -> ConnectError {
+        let sent: Result<(), ConnectError> = async {
+            noise.send(&encode_payload(&ResponderProof::<N>::Rejected { reason })?).await?;
+            Ok(())
+        }
+        .await;
 
-        Err(reason.into_connect_error(peer_addr))
+        sent.err().unwrap_or_else(|| reason.into_connect_error(peer_addr))
     }
 
     /// Verifies the metadata a peer disclosed during the Noise handshake. Returns a disconnect
