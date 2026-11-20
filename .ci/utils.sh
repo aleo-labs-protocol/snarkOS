@@ -689,6 +689,10 @@ function wait_for_stable_consensus_version() {
       if schedule=$(curl -s --max-time 5 "http://$localhost:$port/v2/$network_name/version" | jq -er "$filter" 2>/dev/null) &&
          [[ "$schedule" =~ ^[0-9]+\ [0-9]+$ ]]; then
         read -r final_version final_height <<< "$schedule"
+        # A devnet makes about one block every 2 s.
+        if (( final_height * 4 > max_wait )); then
+          max_wait=$(( final_height * 4 ))
+        fi
         log "Node #${node_index} schedules consensus version $final_version at height $final_height"
       else
         schedule=""
