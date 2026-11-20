@@ -176,7 +176,6 @@ impl<N: Network> StorageService<N> for BFTMemoryService<N> {
     }
 
     /// Returns a HashMap over the `(transmission ID, (transmission, certificate IDs))` entries.
-    #[cfg(any(test, feature = "test"))]
     fn as_hashmap(&self) -> HashMap<TransmissionID<N>, (Transmission<N>, IndexSet<Field<N>>)> {
         self.transmissions.read().clone().into_iter().collect()
     }

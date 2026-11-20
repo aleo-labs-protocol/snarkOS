@@ -1,7 +1,8 @@
 #!/bin/bash
 echo "================================================"
 echo " Attention - Building snarkOS from source code."
-echo " This will request root permissions with sudo."
+echo " This will request root permissions with sudo,"
+echo " to install dependencies"
 echo "================================================"
 
 # Install Ubuntu dependencies
@@ -12,6 +13,7 @@ sudo apt-get install -y \
 	curl \
 	clang \
 	gcc \
+	jq \
 	libssl-dev \
 	llvm \
 	lld \

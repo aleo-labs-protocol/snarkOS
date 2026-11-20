@@ -31,16 +31,6 @@ function exit_node()
 
 trap exit_node SIGINT
 
-echo "Checking for updates..."
-git stash
-rm Cargo.lock
-STATUS=$(git pull)
-
-if [ "$STATUS" != "Already up to date." ]; then
-  echo "Updated code found, cleaning the project"
-  cargo clean
-fi
-
 echo "Running an Aleo Outer Client node..."
 $COMMAND &
 wait

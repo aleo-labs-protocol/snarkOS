@@ -6,7 +6,7 @@ on:
     paths-ignore:
       - '**.md'
   push:
-    branches: [staging, canary, testnet, mainnet]
+    branches: [staging, 'release/**']
   workflow_dispatch:
 
 permissions:
@@ -60,6 +60,12 @@ jobs:
         with: { persist-credentials: false }
       # gh-actions is ours; check-shared-refs requires a @vN tag here, not a SHA.
       - uses: aleo-labs-protocol/gh-actions/.github/actions/check-shared-refs@v2
+      # An `include` name missing from its `name` axis adds a leg instead of failing.
+      - name: Check that each matrix name axis matches its include names
+        run: |
+          bad=$(yq '.jobs[].strategy.matrix | select(.name != null) | (.name - [.include[].name]) + ([.include[].name] - .name) | .[]' .github/workflows/ci.yml)
+          echo "$bad"
+          [ -z "$bad" ]
 
   fmt:
     runs-on: ubuntu-latest
@@ -133,19 +139,19 @@ jobs:
       # features, so it misses a feature one of them fails to declare.
       - run: cargo check -p snarkos-node-metrics --all-features
       - run: cargo check -p snarkos-display --all-features
-      # The fuzzing harness builds these two alone with `fuzz-helpers`, which
+      # The fuzzing harness builds these two alone with `test-helpers`, which
       # the workspace pass above only sees unified with everything else.
-      - run: cargo check -p snarkos-node-router-messages --features fuzz-helpers
-      - run: cargo check -p snarkos-node-bft-events --features fuzz-helpers
+      - run: cargo check -p snarkos-node-router-messages --features test-helpers
+      - run: cargo check -p snarkos-node-bft-events --features test-helpers
 
   # Each line of `runs` is one build. `cargo test -p a -p b` unifies the
   # features of a and b, and several crates enable features on their
   # dependencies that change what those dependencies do:
-  # `snarkos-node-router/test`, `snarkos-node-network/test` and
+  # `snarkos-node-router/test-helpers`, `snarkos-node-network/test-helpers` and
   # `snarkvm-ledger-block/test` skip checks, and `rocks` and `metrics` select
   # other code paths. Crates share a line only where that unification enables
-  # none of these on any crate. Helper features such as `test-helpers` and
-  # `mock` can still be unified.
+  # none of these on any crate. Other helper features, such as `mock` and the
+  # other crates' `test-helpers`, can still be unified.
   #
   # Cheap entries run on free hosted runners and do not wait for the fleet.
   test-hosted:
@@ -173,6 +179,11 @@ jobs:
       # gh-actions is ours; check-shared-refs requires a @vN tag here, not a SHA.
       - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
       - uses: ./.github/actions/job-home
+      # rust-cache hashes every installed toolchain into its key, and the
+      # image's `stable` differs between the runner images GitHub rolls out.
+      # Hosted only: on a box, other jobs use these toolchains.
+      - if: runner.environment == 'github-hosted'
+        run: rustup toolchain uninstall stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: runner.environment == 'github-hosted'
         with:
@@ -231,27 +242,35 @@ jobs:
     runs-on: [self-hosted, linux, x64, cpu]
     timeout-minutes: 90
     if: *fleet-if
+    env:
+      NEXTEST_TEST_THREADS: 16
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: services
-            runs: nextest run -p snarkos-node-consensus -p snarkos-node-rest -p snarkos-cli
+            runs: |
+              nextest run -p snarkos-node-consensus -p snarkos-cli
+              nextest run -p snarkos-node-rest
           - name: node
-            runs: nextest run -p snarkos-node -p snarkos-node-bft-storage-service --features snarkos-node-bft-storage-service/memory,snarkos-node-bft-storage-service/persistent
-          # `helpers::telemetry` compiles only under `metrics`, and nextest
-          # skips the tests in examples unless a command names one.
-          # `--no-tests=fail` overrides NEXTEST_NO_TESTS, so a command that
-          # stops matching any test fails.
+            runs: nextest run -p snarkos-node -p snarkos-node-bft-storage-service
+          # Both lines use `metrics`, which the `snarkos` binary enables by
+          # default. `helpers::telemetry` compiles only under it, and a line
+          # without it rebuilds the snarkvm and bft crates. nextest skips the
+          # tests in examples unless a command names one. `--no-tests=fail`
+          # overrides NEXTEST_NO_TESTS, so a command that stops matching any
+          # test fails.
           - name: bft
             runs: |
-              nextest run -p snarkos-node-bft
-              nextest run -p snarkos-node-bft --lib --features metrics --no-tests=fail -E test(/helpers::telemetry::/)
-              nextest run -p snarkos-node-bft --example simple_node --no-tests=fail
-          - name: router
-            runs: nextest run -p snarkos-node-router
-          - name: sync
-            runs: nextest run -p snarkos-node-sync
+              nextest run -p snarkos-node-bft --features metrics
+              nextest run -p snarkos-node-bft --features metrics --example simple_node --no-tests=fail
+          # One line for both would turn on `test-helpers` in
+          # `snarkos-node-sync` for its own tests. The two lines build the same
+          # snarkvm crates.
+          - name: router-sync
+            runs: |
+              nextest run -p snarkos-node-router
+              nextest run -p snarkos-node-sync
           # Builds RocksDB, whose bindings need libclang, which hosted runners lack.
           - name: ledger-distribution
             runs: nextest run -p snarkos-ledger-distribution
@@ -347,15 +366,21 @@ jobs:
         if: always()
         run: *stop-nodes
 
-  # Slower devnets. On every push to a release branch, and on demand.
+  # Slower devnets. On every push, on pull requests into a release branch, and
+  # on demand.
   devnet-merge:
     needs: [start-cpu-runners, build-snarkos]
     runs-on: [self-hosted, linux, x64, cpu]
     timeout-minutes: ${{ matrix.timeout }}
-    if: github.event_name != 'pull_request'
+    if: >-
+      !cancelled() && needs.build-snarkos.result == 'success' &&
+      contains(fromJSON('["success", "skipped"]'), needs.start-cpu-runners.result) &&
+      github.repository == 'aleo-labs-protocol/snarkOS' &&
+      (github.event_name != 'pull_request' || startsWith(github.base_ref, 'release/'))
     strategy:
       fail-fast: false
       matrix:
+        name: [dev-on-prod-restart, chaotic-minority-reset, chaotic-majority-restart, upgrade]
         include:
           - name: dev-on-prod-restart
             timeout: 45
@@ -377,24 +402,27 @@ jobs:
               export CARGO_TARGET_DIR="$SNARKOS_RELEASE_DIR/target"
               ./.ci/test_full_upgrade.sh
               ./.ci/test_partial_upgrade.sh
-    name: devnet (${{ matrix.name }})
+    # No expression: GitHub shows a skipped job's `name` unevaluated.
+    name: devnet-merge
     steps: *devnet-steps
 
-  # Devnets for releases only. On every push to `canary`, `testnet` or
-  # `mainnet`, and on demand.
+  # Devnets for releases only. On every push to a release branch, on pull
+  # requests into one, and on demand.
   devnet-release:
     needs: [start-cpu-runners, build-snarkos]
     runs-on: [self-hosted, linux, x64, cpu]
     timeout-minutes: ${{ matrix.timeout }}
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' &&
-       (github.ref == 'refs/heads/canary' ||
-        github.ref == 'refs/heads/testnet' ||
-        github.ref == 'refs/heads/mainnet'))
+      !cancelled() && needs.build-snarkos.result == 'success' &&
+      contains(fromJSON('["success", "skipped"]'), needs.start-cpu-runners.result) &&
+      github.repository == 'aleo-labs-protocol/snarkOS' &&
+      (github.event_name == 'workflow_dispatch' ||
+      startsWith(github.ref, 'refs/heads/release/') ||
+      startsWith(github.base_ref, 'release/'))
     strategy:
       fail-fast: false
       matrix:
+        name: [upgrade-required, chaotic-restart-all]
         include:
           - name: upgrade-required
             timeout: 30
@@ -403,12 +431,13 @@ jobs:
             timeout: 45
             delay: true
             runs: ./.ci/test_restart_all.sh
-    name: devnet (${{ matrix.name }})
+    name: devnet-release
     steps: *devnet-steps
 
-  # The release binary must compile in no test-only code. `fuzz-helpers` turns on
-  # proptest and snarkVM's `test-helpers`, and feature unification would carry
-  # them into the binary if any crate on its path ever enabled it.
+  # The release binary must compile in no test-only code. `test-helpers` in the
+  # event and message crates turns on proptest and snarkVM's `test-helpers`, and
+  # feature unification would carry them into the binary if any crate on its
+  # path ever enabled it.
   release-graph:
     runs-on: ubuntu-latest
     steps:
@@ -416,7 +445,7 @@ jobs:
         with: { persist-credentials: false }
       - run: |
           cargo tree -p snarkos -e normal,build,features --prefix none --locked > graph.txt
-          hits=$(grep -E '^[a-z0-9_-]+ feature "(fuzz-helpers|test-helpers|test)"$|^proptest ' graph.txt | sort -u || true)
+          hits=$(grep -E '^[a-z0-9_-]+ feature "(test-helpers|test)"$|^proptest ' graph.txt | sort -u || true)
           if [ -n "$hits" ]; then
             printf '%s\n' "$hits"
             echo "::error::the snarkos release build enables test-only code (above)"
@@ -432,10 +461,11 @@ jobs:
         with: { tool: cargo-machete@0.7.0 }
       - run: cargo machete
 
+  # Builds cold: the four caches would take about half of the repository's
+  # 10 GB and evict the entries the hosted test jobs restore from.
   windows:
     runs-on: windows-latest
-    permissions: { contents: read, actions: write }
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' || startsWith(github.base_ref, 'release/')
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     strategy:
@@ -445,13 +475,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          key: ${{ matrix.dir }}
-          save-if: ${{ github.ref == 'refs/heads/staging' }}
-      - uses: ./.github/actions/rust-cache-prune
-        if: github.ref == 'refs/heads/staging'
-        with: { key: '${{ matrix.dir }}' }
       - run: cargo check --examples --benches --tests
         working-directory: ${{ matrix.dir }}
 
@@ -479,14 +502,19 @@ jobs:
       - run: cargo hack clippy --workspace --each-feature --exclude-features cuda --locked -- -D warnings
 
   # The one job to require on protected branches. A skipped job counts as passed
-  # for a required check, so each job a pull request runs must succeed here.
+  # for a required check, so every job must succeed here. The exception is a
+  # merge or release job skipped outside a release branch, where it is not meant
+  # to run.
   ci-ok:
     if: always()
-    needs: [check-shared-refs, fmt, deny, shellcheck, source-checks, merge-fixup, machete, release-graph, lint, test-hosted, test, build-snarkos, devnet]
+    needs: [check-shared-refs, fmt, deny, shellcheck, source-checks, merge-fixup, machete, release-graph, lint, test-hosted, test, build-snarkos, devnet, devnet-merge, devnet-release, windows]
     runs-on: ubuntu-latest
     steps:
       - env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
+          NEEDS: ${{ toJSON(needs) }}
+          RELEASE: >-
+            ${{ github.event_name == 'workflow_dispatch' ||
+            startsWith(github.ref, 'refs/heads/release/') ||
+            startsWith(github.base_ref, 'release/') }}
         run: |
-          echo "$RESULTS"
-          for r in $RESULTS; do [ "$r" = success ] || exit 1; done
+          jq -e --argjson release "$RELEASE" 'to_entries | map(select(.value.result != "success" and ($release or .value.result != "skipped" or (.key | IN("devnet-merge", "devnet-release", "windows") | not)))) | if length == 0 then true else (map("\(.key): \(.value.result)") | join(", ") | halt_error) end' <<< "$NEEDS"

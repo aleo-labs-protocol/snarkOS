@@ -63,7 +63,7 @@ impl<N: Network> FromBytes for WorkerPing<N> {
     }
 }
 
-#[cfg(any(test, feature = "fuzz-helpers"))]
+#[cfg(any(test, feature = "test-helpers"))]
 pub mod prop_tests {
     #![cfg_attr(not(test), allow(unused_imports))]
     use crate::{WorkerPing, prop_tests::any_transmission_id};

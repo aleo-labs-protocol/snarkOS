@@ -7,8 +7,10 @@ Jobs run in one of two places:
 
 - **GitHub-hosted runners** for cheap jobs: formatting, `cargo deny`,
   shellcheck, the source checks, `cargo machete`, the Windows checks and the lighter crates'
-  tests. These restore `~/.cargo` and `target/` with `Swatinem/rust-cache`,
-  saved only from `staging`.
+  tests. The hosted test jobs restore `~/.cargo` and `target/` with
+  `Swatinem/rust-cache`, saved only from `staging`. The Windows checks build
+  cold. Their caches would take about half of the repository's 10 GB cache
+  limit and evict the test jobs' entries.
 - **The self-hosted `cpu` fleet** for heavy jobs: clippy, the heavier
   crates' tests, the `snarkos` build and the devnets. `start-cpu-runners`
   starts the boxes the run needs; they stop themselves when idle. Each box
@@ -18,19 +20,19 @@ Jobs run in one of two places:
 
 | Event | Runs |
 |---|---|
-| Pull request | `fmt`, `deny`, `shellcheck`, `source-checks`, `machete`, `lint`, `test`, `build-snarkos`, `devnet`, `ci-ok` |
-| Push to `staging`, `canary`, `testnet`, `mainnet`, or manual dispatch | the above, plus `devnet-merge`, `windows` |
-| Push to `canary`, `testnet`, `mainnet`, or manual dispatch | the above, plus `devnet-release` |
+| Pull request into `staging` | `fmt`, `deny`, `shellcheck`, `source-checks`, `machete`, `lint`, `test`, `build-snarkos`, `devnet`, `ci-ok` |
+| Push to `staging` | the above, plus `devnet-merge`, `windows` |
+| Pull request into `release/**`, push to `release/**`, or manual dispatch | the above, plus `devnet-release` |
 
 ## Jobs
 
-A job marked "merge" runs only on the second row of the table above, and a job
-marked "release" only on the third. The other jobs run on every event.
+A job marked "merge" runs on the second and third rows of the table above, and
+a job marked "release" only on the third. The other jobs run on every event.
 
 | Job | Runner | Trigger | Timeout (min) | What it runs |
 |---|---|---|---|---|
 | `start-cpu-runners` | hosted | all | | starts fleet boxes |
-| `check-shared-refs` | hosted | all | | checks that each `aleo-labs-protocol/gh-actions` ref is a release tag |
+| `check-shared-refs` | hosted | all | | checks that each `aleo-labs-protocol/gh-actions` ref is a release tag, and that each matrix `name` axis lists the same names as its `include` |
 | `fmt` | hosted | all | | `cargo fmt --check` on `FMT_TOOLCHAIN` |
 | `deny` | hosted | all | | `cargo deny --workspace check bans licenses sources`, plus `advisories` everywhere but `staging`, whose advisories [`bump-advisories.yml`](.github/workflows/bump-advisories.yml) bumps nightly |
 | `shellcheck` | hosted | all | | `.ci/*.sh`, `scripts/*.sh` |
@@ -39,34 +41,32 @@ marked "release" only on the third. The other jobs run on every event.
 | `test (light)` | hosted | all | 90 | `snarkos-account`, `-utilities`, `-node-tcp`, `-node-sync-locators`, `-node-network` |
 | `test (cdn)` | hosted | all | 90 | `snarkos-node-cdn` |
 | `test (messages)` | hosted | all | 90 | `snarkos-node-bft-events`, `-node-router-messages`, `-node-bft-ledger-service` |
-| `test (services)` | `cpu` | all | 90 | `snarkos-node-consensus`, `-node-rest`, `-cli` |
-| `test (node)` | `cpu` | all | 90 | `snarkos-node` with `snarkos-node-bft-storage-service` (features `memory,persistent`) |
-| `test (bft)` | `cpu` | all | 90 | `snarkos-node-bft`; its `helpers::telemetry` tests with `metrics`, as a second build |
-| `test (router)` | `cpu` | all | 90 | `snarkos-node-router` |
-| `test (sync)` | `cpu` | all | 90 | `snarkos-node-sync` |
+| `test (services)` | `cpu` | all | 90 | `snarkos-node-consensus`, `-cli`; then `-node-rest` |
+| `test (node)` | `cpu` | all | 90 | `snarkos-node`, `-node-bft-storage-service` |
+| `test (bft)` | `cpu` | all | 90 | `snarkos-node-bft` with `metrics` |
+| `test (router-sync)` | `cpu` | all | 90 | `snarkos-node-router`; then `-node-sync` |
 | `build-snarkos` | `cpu` | all | 60 | release `snarkos` with `test_network`, as an artifact |
 | `devnet (devnet)` | `cpu` | all | 40 | `test_db_backup.sh`, `test_devnet.sh` |
 | `devnet (simple-node)` | `cpu` | all | 60 | `test_simple_node.sh` |
-| `devnet (dev-on-prod-restart)` | `cpu` | merge | 45 | `test_dev_on_prod_restart.sh` |
-| `devnet (chaotic-minority-reset)` | `cpu` | merge | 45 | `test_reset_minority.sh`, with delays |
-| `devnet (chaotic-majority-restart)` | `cpu` | merge | 45 | `test_restart_majority.sh`, with delays |
-| `devnet (upgrade)` | `cpu` | merge | 90 | `test_full_upgrade.sh`, `test_partial_upgrade.sh` |
-| `devnet (upgrade-required)` | `cpu` | release | 30 | `test_upgrade_required.sh` |
-| `devnet (chaotic-restart-all)` | `cpu` | release | 45 | `test_restart_all.sh`, with delays |
+| `devnet-merge (dev-on-prod-restart)` | `cpu` | merge | 45 | `test_dev_on_prod_restart.sh` |
+| `devnet-merge (chaotic-minority-reset)` | `cpu` | merge | 45 | `test_reset_minority.sh`, with delays |
+| `devnet-merge (chaotic-majority-restart)` | `cpu` | merge | 45 | `test_restart_majority.sh`, with delays |
+| `devnet-merge (upgrade)` | `cpu` | merge | 90 | `test_full_upgrade.sh`, `test_partial_upgrade.sh` |
+| `devnet-release (upgrade-required)` | `cpu` | release | 30 | `test_upgrade_required.sh` |
+| `devnet-release (chaotic-restart-all)` | `cpu` | release | 45 | `test_restart_all.sh`, with delays |
 | `machete` | hosted | all | | `cargo machete` |
 | `windows` | hosted (Windows) | merge | | `cargo check --examples --benches --tests` in `account`, `cli`, `display`, `node` |
-| `ci-ok` | hosted | all | | fails unless every job a pull request runs succeeded |
+| `ci-ok` | hosted | all | | fails unless every job succeeded; a merge or release job may be skipped where it is not meant to run |
 
 A job with no timeout gets the GitHub default of six hours. Only hosted jobs
 have none, and a hosted job holds no fleet box.
 
 Protected branches require `ci-ok` alone. GitHub counts a skipped job as
 passed for a required check, and a fleet job is skipped when
-`start-cpu-runners` fails or the pull request comes from a fork; `ci-ok`
-fails in both cases.
+`start-cpu-runners` fails; `ci-ok` fails then.
 
 A pull request that changes only Markdown files starts no run, so it gets no
-`ci-ok` check. A push runs everything. Where a branch rule requires `ci-ok`,
+`ci-ok` check. Where a branch rule requires `ci-ok`,
 such a pull request cannot merge until a workflow reports that check for it.
 
 ## Test groups
@@ -74,20 +74,26 @@ such a pull request cannot merge until a workflow reports that check for it.
 Each line of a `test` entry is one cargo build. `cargo test -p a -p b` unifies
 the features of `a` and `b`, and several crates enable features on their
 dependencies that change what those dependencies do, such as
-`snarkos-node-router/test` and `snarkvm-ledger-block/test`. So crates share a
-line only where that unification enables no such feature on any crate. Helper
-features such as `test-helpers` and `mock` can still be unified, so a test may
+`snarkos-node-router/test-helpers` and `snarkvm-ledger-block/test`. So crates
+share a line only where that unification enables no such feature on any crate.
+Other helper features, such as `mock` and the other crates' `test-helpers`, can
+still be unified, so a test may
 compile in its line that would not under `cargo test -p <crate>` alone. Check
 this before moving a crate between lines, for example by comparing
 `cargo tree -e features` for the line against each crate alone.
 
-`test (bft)` has a second line for the tests in `helpers::telemetry`, which
-compile only under `metrics`. That line builds the library alone. It passes
+`test (bft)` runs with `metrics`, which the `snarkos` binary enables by
+default, so the tests in `helpers::telemetry` compile. The `each-feature` job
+checks the crate without `metrics`. The `simple_node` line passes
 `--no-tests=fail`, because the step otherwise lets a command match no tests.
 
-[`.config/nextest.toml`](.config/nextest.toml) sets two test threads. Each
-entry uploads nextest's JUnit reports as the artifact `junit-<entry>`, one file
-per line, with the time of each test.
+[`.config/nextest.toml`](.config/nextest.toml) sets two test threads, which
+the hosted entries use. The fleet entries run 16 tests at a time through
+`NEXTEST_TEST_THREADS`: most of their slow tests wait on timers rather than
+the CPU, and a box runs one job. `gateway::prop_tests::gateway_start` runs
+alone, because it asserts a fixed port that other tests may take. Each entry
+uploads nextest's JUnit reports as the artifact `junit-<entry>`, one file per
+line, with the time of each test.
 
 ## Devnets
 
@@ -112,12 +118,13 @@ To run the `.ci` scripts on macOS you may want to `brew install bash coreutils
 
 ## Forks
 
-A fork's pull request runs nothing on the fleet. Every self-hosted job checks
-that the head repository is this one. The fleet's `target/` and sccache
-persist between jobs, so anyone who can push a branch here can affect later
-builds there. That is the same trust as push access; do not widen the guard.
+A fork's pull request runs on the fleet once a team member approves its run.
+The run gets no secrets, so `start-cpu-runners` is skipped;
+`fork-pr-runners.yml` starts the boxes instead, and the fleet jobs accept the
+skipped start.
 
-The guard is not what holds. A pull request runs its own copy of `ci.yml`, so
-a fork can delete the guard and target the fleet directly. What holds is the
-repository setting that makes every external contributor's workflow run wait
-for approval. Read a fork's workflow changes before approving its run.
+The fleet's `target/` and sccache persist between jobs, so an approved run can
+affect later builds there. A pull request runs its own copy of `ci.yml`, so no
+guard in that file holds. What holds is the repository setting that makes every
+external contributor's workflow run wait for approval. Read a fork's changes
+before approving its run.

@@ -147,7 +147,7 @@ impl<N: Network> Router<N> {
     /// The minimum permitted interval between connection attempts for an IP; anything shorter is considered malicious.
     const CONNECTION_ATTEMPTS_SINCE_SECS: i64 = 10;
     /// The maximum amount of connection attempts within a 10 second threshold.
-    #[cfg(not(feature = "test"))]
+    #[cfg(not(feature = "test-helpers"))]
     const MAX_CONNECTION_ATTEMPTS: usize = 10;
     /// The time frame to enforce the `MESSAGE_LIMIT`.
     const MESSAGE_LIMIT_TIME_FRAME_IN_SECS: i64 = 5;

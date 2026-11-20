@@ -229,11 +229,13 @@ jobs:
 
       - name: Report a rejection or an orchestration failure
         if: failure() && steps.req.outcome == 'success'
+        env:
+          CHECK: ${{ steps.req.outputs.check }}
         run: |
           if [[ -f no-capacity ]]; then
             echo "**No capacity for the sync host**: EC2 had none to start it, so no run started and nothing was tested. Run the workflow again later." >> "$GITHUB_STEP_SUMMARY"
           elif [[ -s rejected.txt ]]; then
             echo "**Request rejected**: the sync host started no run: $(cat rejected.txt)" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "**Orchestration interrupted**: GitHub could not queue this run. The sync host may still be running it: look for its sync-test check before retrying." >> "$GITHUB_STEP_SUMMARY"
+            echo "**Orchestration interrupted**: GitHub could not queue this run. The sync host may still be running it: look for its $CHECK check before retrying." >> "$GITHUB_STEP_SUMMARY"
           fi

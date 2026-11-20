@@ -471,13 +471,6 @@ impl<N: Network> UpgradeMonitor<N> {
         );
     }
 
-    /// Holds the lock on the evidence until the returned guard is dropped, which pauses a handshake
-    /// where it records the peer's schedule.
-    #[cfg(feature = "test")]
-    pub fn lock_for_test(&self) -> impl Sized + '_ {
-        self.state.lock()
-    }
-
     /// Returns the path of the record of a required upgrade.
     pub fn record_path(&self) -> &Path {
         &self.record_path

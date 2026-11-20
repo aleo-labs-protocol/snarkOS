@@ -80,7 +80,6 @@ pub struct CoreLedgerService<N: Network, C: ConsensusStorage<N>> {
 }
 
 /// A transactional update to the ledger.
-#[cfg(feature = "ledger-write")]
 pub struct LedgerUpdate<'a, N: Network, C: ConsensusStorage<N>> {
     ledger: Ledger<N, C>,
     #[cfg(feature = "locktick")]
@@ -89,7 +88,6 @@ pub struct LedgerUpdate<'a, N: Network, C: ConsensusStorage<N>> {
     _lock: MutexGuard<'a, ()>,
 }
 
-#[cfg(feature = "ledger-write")]
 impl<'a, N: Network, C: ConsensusStorage<N>> LedgerUpdateService<N> for LedgerUpdate<'a, N, C> {
     fn check_block_subdag(
         &self,

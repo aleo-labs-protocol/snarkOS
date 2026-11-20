@@ -49,7 +49,7 @@ impl<N: Network> FromBytes for PuzzleResponse<N> {
     }
 }
 
-#[cfg(any(test, feature = "fuzz-helpers"))]
+#[cfg(any(test, feature = "test-helpers"))]
 pub mod prop_tests {
     #![cfg_attr(not(test), allow(unused_imports))]
     use crate::{MAX_SMALL_MESSAGE_SIZE, PuzzleResponse, challenge_response::prop_tests::any_genesis_header};

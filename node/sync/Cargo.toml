@@ -4,7 +4,7 @@ version = "4.13.1"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "A synchronization module for a decentralized operating system"
 homepage = "https://aleo.org"
-repository = "https://github.com/ProvableHQ/snarkOS"
+repository = "https://github.com/aleo-labs-protocol/snarkOS"
 keywords = [
   "aleo",
   "cryptography",
@@ -26,7 +26,7 @@ locktick = [
 serial = ["snarkos-node-bft-ledger-service/serial"]
 metrics = [ "dep:snarkos-node-metrics", "snarkos-node-network/metrics" ]
 cuda = [ "snarkvm/cuda", "snarkos-node-bft-ledger-service/cuda", "snarkos-node-router/cuda" ]
-test = [ "snarkos-node-sync-locators/test" ]
+test-helpers = [ "snarkos-node-sync-locators/test-helpers" ]
 
 [dependencies.anyhow]
 workspace = true
@@ -64,7 +64,6 @@ workspace = true
 
 [dependencies.snarkos-node-bft-ledger-service]
 workspace = true
-features = [ "ledger-write" ]
 
 [dependencies.snarkos-node-metrics]
 workspace = true
@@ -93,11 +92,11 @@ workspace = true
 
 [dev-dependencies.snarkos-node-bft-ledger-service]
 workspace = true
-features = [ "test" ]
+features = [ "test-helpers" ]
 
 [dev-dependencies.snarkos-node-sync-locators]
 workspace = true
-features = [ "test" ]
+features = [ "test-helpers" ]
 
 [dev-dependencies.snarkos-node-tcp]
 workspace = true

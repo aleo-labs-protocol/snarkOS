@@ -57,7 +57,7 @@ pub use puzzle_request::PuzzleRequest;
 mod puzzle_response;
 pub use puzzle_response::PuzzleResponse;
 
-#[cfg(any(test, feature = "fuzz-helpers"))]
+#[cfg(any(test, feature = "test-helpers"))]
 mod samples;
 
 mod unconfirmed_solution;
@@ -77,7 +77,7 @@ pub use snarkos_node_bft_events::{BlockResponseStatus, DataBlocks};
 /// spends nearly every execution failing the version byte at the head of a
 /// reader, so seeding from structurally valid messages is worth more than any
 /// amount of mutator tuning.
-#[cfg(any(test, feature = "fuzz-helpers"))]
+#[cfg(any(test, feature = "test-helpers"))]
 pub mod generators {
     pub use crate::{
         challenge_request::prop_tests as challenge_request,
@@ -151,8 +151,10 @@ impl<N: Network> Message<N> {
     /// The oldest message version that receives `BlockResponse` status replies and `Ping` floors.
     pub const STATUS_MESSAGE_VERSION: u32 = 34;
     /// The version of the network protocol; this is incremented for breaking changes between migration versions.
-    // Note. This should be incremented for each new `ConsensusVersion` that is added.
-    pub const VERSIONS: [(ConsensusVersion, u32); 18] = [
+    ///
+    /// Each new `ConsensusVersion` adds an entry. Minor releases add entries, and snarkOS does not treat this
+    /// as a breaking change.
+    pub const VERSIONS: &'static [(ConsensusVersion, u32)] = &[
         (ConsensusVersion::V5, 17),
         (ConsensusVersion::V7, 18),
         (ConsensusVersion::V8, 19),
@@ -398,7 +400,7 @@ mod tests {
             Message::<N>::VERSIONS.iter().find(|(_, version)| *version == latest_message_version).unwrap();
         assert_ne!(N::CONSENSUS_HEIGHT(*consensus_version).unwrap(), u32::MAX);
 
-        for (consensus_version, message_version) in Message::<N>::VERSIONS {
+        for &(consensus_version, message_version) in Message::<N>::VERSIONS {
             if message_version > latest_message_version {
                 assert_eq!(N::CONSENSUS_HEIGHT(consensus_version).unwrap(), u32::MAX);
             }

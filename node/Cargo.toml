@@ -4,7 +4,7 @@ version = "4.13.1"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "A node for a decentralized operating system"
 homepage = "https://aleo.org"
-repository = "https://github.com/ProvableHQ/snarkOS"
+repository = "https://github.com/aleo-labs-protocol/snarkOS"
 keywords = [
   "aleo",
   "cryptography",
@@ -18,7 +18,6 @@ edition = "2024"
 
 [features]
 default = [ ]
-timer = [ "aleo-std/timer" ]
 locktick = [
   "dep:locktick",
   "snarkos-node-bft/locktick",
@@ -42,10 +41,6 @@ metrics = [
   "snarkvm/metrics",
   "snarkvm/rocks"
 ]
-# The compile-time history features no longer select snarkVM code.
-# The names stay so existing build commands keep resolving.
-history = []
-history-staking-rewards = []
 cuda = [
   "snarkvm/cuda",
   "snarkos-account/cuda",
@@ -60,11 +55,8 @@ serial = [
   "snarkvm/serial",
   "snarkos-node-bft/serial"
 ]
-test = []
+test-helpers = []
 test_network = [ "snarkos-node-bft/test_network", "snarkos-node-consensus/test_network", "snarkos-utilities/test_network" ]
-
-[dependencies.aleo-std]
-workspace = true
 
 [dependencies.anyhow]
 workspace = true
@@ -180,7 +172,7 @@ workspace = true
 
 [dev-dependencies.snarkos-node-router]
 workspace = true
-features = [ "test" ]
+features = [ "test-helpers" ]
 
 [dev-dependencies.snarkvm]
 workspace = true
@@ -198,6 +190,5 @@ workspace = true
 
 [package.metadata.cargo-machete]
 ignored = [
-  "aleo-std", # Only the timer feature uses it
   "serde_json", # Need to set preserve_order feature
 ]
