@@ -908,6 +908,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
     /// Returns every deployed program with its latest edition, sorted by ID, and a `height`.
     /// Every program deployed at or before `height` is listed. The list may also include programs
     /// deployed after `height`, and an edition may be newer than it was at `height`.
+    /// Amendments (verifying-key changes that keep the edition) are not reflected.
     pub(crate) async fn get_programs_summary(State(rest): State<Self>) -> Result<ErasedJson, RestError> {
         let summarize = move || {
             // Read the height first. The ledger advances it only after the block's storage batch
@@ -921,11 +922,12 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
                 .map(|(id, edition)| ProgramSummary { id: id.to_string(), edition: *edition })
                 .collect();
             programs.sort_unstable_by(|a, b| a.id.cmp(&b.id));
-            ProgramsSummary { height, programs }
+            // `ErasedJson::new` serializes eagerly, so this keeps serialization off the async thread.
+            ErasedJson::new(ProgramsSummary { height, programs })
         };
 
         match tokio::task::spawn_blocking(summarize).await {
-            Ok(summary) => Ok(ErasedJson::new(summary)),
+            Ok(summary) => Ok(summary),
             Err(err) => Err(RestError::internal_server_error(anyhow!(err).context("Tokio error"))),
         }
     }

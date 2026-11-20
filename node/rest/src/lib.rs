@@ -809,11 +809,7 @@ mod route_tests {
     /// succession is never the thing that trips it.
     const TEST_RPS: u32 = 1_000;
 
-    /// Builds a `Rest` over an in-memory ledger containing only the genesis block.
-    ///
-    /// This constructs the struct directly rather than calling `Rest::start`, which would bind a
-    /// port and spawn a server. None of the routes exercised here touch `consensus`, `cdn_sync`,
-    /// `routing` or `block_sync`; those fields exist only to satisfy the type.
+    /// Builds a `Rest` over a genesis-only ledger.
     async fn sample_rest() -> CurrentRest {
         // `Ledger::load` reaches snarkVM's sequential-operation thread and blocks on the reply,
         // which panics if called from an async context. Production always drives these from a
@@ -831,7 +827,11 @@ mod route_tests {
         sample_rest_with(ledger).await
     }
 
-    /// Builds a `Rest` over the given ledger, as `sample_rest` does.
+    /// Builds a `Rest` over the given ledger.
+    ///
+    /// This constructs the struct directly rather than calling `Rest::start`, which would bind a
+    /// port and spawn a server. None of the routes exercised here touch `consensus`, `cdn_sync`,
+    /// `routing` or `block_sync`; those fields exist only to satisfy the type.
     async fn sample_rest_with(ledger: Ledger<CurrentNetwork, ConsensusMemory<CurrentNetwork>>) -> CurrentRest {
         let rng = &mut TestRng::default();
 
@@ -1404,13 +1404,7 @@ mod route_tests {
         for prefix in ["/mainnet", "/v1/mainnet", "/v2/mainnet"] {
             let (status, body) = get_versioned(&rest, &format!("{prefix}/programs/summary")).await;
             assert_eq!(status, StatusCode::OK, "{prefix}: {body}");
-
-            let summary: serde_json::Value = serde_json::from_str(&body).unwrap();
-            assert_eq!(summary["height"], 0);
-            let programs = summary["programs"].as_array().unwrap();
-            assert!(programs.contains(&serde_json::json!({"id": "credits.aleo", "edition": 0})), "{body}");
-            let ids: Vec<&str> = programs.iter().map(|program| program["id"].as_str().unwrap()).collect();
-            assert!(ids.is_sorted(), "{body}");
+            assert_eq!(body, r#"{"height":0,"programs":[{"id":"credits.aleo","edition":0}]}"#, "{prefix}");
         }
     }
 
