@@ -74,56 +74,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aleo-std"
-version = "1.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7c26e03c99bac238b3454ec6c654bc066a0e4e7eae00608ec76c2279bc8f2cf"
-dependencies = [
- "aleo-std-profiler",
- "aleo-std-time",
- "aleo-std-timed",
- "aleo-std-timer",
- "walkdir",
-]
-
-[[package]]
-name = "aleo-std-profiler"
-version = "1.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64476704cd7d71c43623839197bea87e477cfa03006853328fd5c9e07d8f48cc"
-
-[[package]]
-name = "aleo-std-time"
-version = "1.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61a095fa7b4400ec1de315603c16c1084ece0b7926cbb0333a1ba115732fc35b"
-dependencies = [
- "proc-macro2",
- "quote 1.0.47",
- "syn 1.0.109",
-]
-
-[[package]]
-name = "aleo-std-timed"
-version = "1.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a77792a0cf06cc8efdabf5cb355a2f1e9172ae3ab5d30147ff440e1c9e8a03d0"
-dependencies = [
- "proc-macro2",
- "quote 1.0.47",
- "syn 1.0.109",
-]
-
-[[package]]
-name = "aleo-std-timer"
-version = "1.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9fbc20b310af70d896f74cdccc2f12b5d6d9cd7edea5abfd823038279703b30"
-dependencies = [
- "colored 2.2.0",
-]
-
-[[package]]
 name = "alloca"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -891,16 +841,6 @@ name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
-
-[[package]]
-name = "colored"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
-dependencies = [
- "lazy_static",
- "windows-sys 0.59.0",
-]
 
 [[package]]
 name = "colored"
@@ -4918,7 +4858,7 @@ checksum = "f8b9ba61de2952acfe762d56c3f4743324465be961c685eb26c3ed49ef93d13f"
 dependencies = [
  "backtrace",
  "clap",
- "colored 3.1.1",
+ "colored",
  "const-str",
  "dotenvy",
  "indexmap 2.14.2",
@@ -5371,7 +5311,7 @@ dependencies = [
 name = "snarkos-account"
 version = "4.13.1"
 dependencies = [
- "colored 3.1.1",
+ "colored",
  "snarkvm",
 ]
 
@@ -5383,7 +5323,7 @@ dependencies = [
  "anyhow",
  "base64 0.23.1",
  "clap",
- "colored 3.1.1",
+ "colored",
  "console-subscriber",
  "crossterm",
  "indexmap 2.14.2",
@@ -5463,12 +5403,11 @@ dependencies = [
 name = "snarkos-node"
 version = "4.13.1"
 dependencies = [
- "aleo-std",
  "anyhow",
  "async-trait",
  "bytes",
  "cfg-if",
- "colored 3.1.1",
+ "colored",
  "deadline",
  "futures-util",
  "http 1.5.0",
@@ -6539,7 +6478,7 @@ version = "4.13.1"
 source = "git+https://github.com/aleo-labs-protocol/snarkVM.git?rev=bfbc357ab9b2189eb048d13f8ae62ca5e5824376#bfbc357ab9b2189eb048d13f8ae62ca5e5824376"
 dependencies = [
  "anyhow",
- "colored 3.1.1",
+ "colored",
  "indexmap 2.14.2",
  "locktick",
  "lru 0.19.0",
@@ -6632,7 +6571,7 @@ source = "git+https://github.com/aleo-labs-protocol/snarkVM.git?rev=bfbc357ab9b2
 dependencies = [
  "anyhow",
  "cfg-if",
- "colored 3.1.1",
+ "colored",
  "hex",
  "lazy_static",
  "locktick",
@@ -6700,7 +6639,7 @@ name = "snarkvm-synthesizer-process"
 version = "4.13.1"
 source = "git+https://github.com/aleo-labs-protocol/snarkVM.git?rev=bfbc357ab9b2189eb048d13f8ae62ca5e5824376#bfbc357ab9b2189eb048d13f8ae62ca5e5824376"
 dependencies = [
- "colored 3.1.1",
+ "colored",
  "indexmap 2.14.2",
  "itertools 0.15.0",
  "locktick",
@@ -6762,7 +6701,7 @@ source = "git+https://github.com/aleo-labs-protocol/snarkVM.git?rev=bfbc357ab9b2
 dependencies = [
  "anyhow",
  "bincode",
- "colored 3.1.1",
+ "colored",
  "dirs",
  "num-bigint",
  "rand 0.10.3",

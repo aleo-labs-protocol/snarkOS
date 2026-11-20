@@ -620,8 +620,6 @@ cargo run --release -- clean --dev <NODE_ID>
 By default, the metrics feature is turned on for some internal crates. It carries the validator
 telemetry described in [Validator Telemetry Metrics](#321-validator-telemetry-metrics).
 
-* **history** -
-  Enables a /history REST endpoint.
 * **telemetry** -
   Deprecated alias for **metrics**, kept so that existing build commands keep working.
   Validator telemetry is part of **metrics**.
