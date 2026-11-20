@@ -3,6 +3,8 @@
 disallowed-types = [
   { path = "parking_lot::Mutex", reason = "use snarkos_utilities::locks::parking_lot::Mutex" },
   { path = "parking_lot::RwLock", reason = "use snarkos_utilities::locks::parking_lot::RwLock" },
+  { path = "parking_lot::FairMutex", reason = "locktick cannot instrument it; use snarkos_utilities::locks::parking_lot::Mutex" },
+  { path = "parking_lot::ReentrantMutex", reason = "locktick cannot instrument it; use snarkos_utilities::locks::parking_lot::Mutex" },
   { path = "tokio::sync::Mutex", reason = "use snarkos_utilities::locks::tokio::Mutex" },
   { path = "tokio::sync::RwLock", reason = "use snarkos_utilities::locks::tokio::RwLock" },
   { path = "locktick::parking_lot::Mutex", reason = "use snarkos_utilities::locks::parking_lot::Mutex" },
