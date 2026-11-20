@@ -794,11 +794,12 @@ mod route_tests {
             committee::test_helpers::sample_committee,
             store::{StorageMode, helpers::memory::ConsensusMemory},
         },
-        prelude::MainnetV0,
+        prelude::{MainnetV0, PrivateKey, Program, store::ConsensusStore},
         utilities::TestRng,
     };
 
     use axum::body::to_bytes;
+    use std::str::FromStr;
     use tower::ServiceExt; // for `oneshot`
 
     type CurrentNetwork = MainnetV0;
@@ -809,7 +810,11 @@ mod route_tests {
     /// succession is never the thing that trips it.
     const TEST_RPS: u32 = 1_000;
 
-    /// Builds a `Rest` over a genesis-only ledger.
+    /// Builds a `Rest` over an in-memory ledger containing only the genesis block.
+    ///
+    /// This constructs the struct directly rather than calling `Rest::start`, which would bind a
+    /// port and spawn a server. None of the routes exercised here touch `consensus`, `cdn_sync`,
+    /// `routing` or `block_sync`; those fields exist only to satisfy the type.
     async fn sample_rest() -> CurrentRest {
         // `Ledger::load` reaches snarkVM's sequential-operation thread and blocks on the reply,
         // which panics if called from an async context. Production always drives these from a
@@ -827,11 +832,7 @@ mod route_tests {
         sample_rest_with(ledger).await
     }
 
-    /// Builds a `Rest` over the given ledger.
-    ///
-    /// This constructs the struct directly rather than calling `Rest::start`, which would bind a
-    /// port and spawn a server. None of the routes exercised here touch `consensus`, `cdn_sync`,
-    /// `routing` or `block_sync`; those fields exist only to satisfy the type.
+    /// Builds a `Rest` over the given ledger, as `sample_rest` does.
     async fn sample_rest_with(ledger: Ledger<CurrentNetwork, ConsensusMemory<CurrentNetwork>>) -> CurrentRest {
         let rng = &mut TestRng::default();
 
@@ -1398,24 +1399,7 @@ mod route_tests {
     }
 
     #[tokio::test]
-    async fn programs_summary_lists_credits_at_the_genesis_height() {
-        let rest = sample_rest().await;
-
-        for prefix in ["/mainnet", "/v1/mainnet", "/v2/mainnet"] {
-            let (status, body) = get_versioned(&rest, &format!("{prefix}/programs/summary")).await;
-            assert_eq!(status, StatusCode::OK, "{prefix}: {body}");
-            assert_eq!(
-                body, r#"{"height":0,"programs":[{"id":"credits.aleo","edition":0,"amendment_count":0}]}"#,
-                "{prefix}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn programs_summary_lists_a_deployed_program() {
-        use snarkvm::prelude::{PrivateKey, Program, store::ConsensusStore};
-        use std::str::FromStr;
-
+    async fn programs_summary_lists_deployed_programs() {
         // The mainnet genesis funds no key we hold, so build a genesis that does and deploy with
         // it. Ledger and VM calls panic in an async context.
         let ledger = tokio::task::spawn_blocking(|| {
@@ -1446,12 +1430,15 @@ mod route_tests {
         .expect("the ledger task panicked");
         let rest = sample_rest_with(ledger).await;
 
-        let (status, body) = get_versioned(&rest, "/v2/mainnet/programs/summary").await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(
-            body,
-            r#"{"height":1,"programs":[{"id":"aaa_summary.aleo","edition":0,"amendment_count":0},{"id":"credits.aleo","edition":0,"amendment_count":0}]}"#
-        );
+        for prefix in ["/mainnet", "/v1/mainnet", "/v2/mainnet"] {
+            let (status, body) = get_versioned(&rest, &format!("{prefix}/programs/summary")).await;
+            assert_eq!(status, StatusCode::OK, "{prefix}: {body}");
+            assert_eq!(
+                body,
+                r#"{"height":1,"programs":[{"program_id":"aaa_summary.aleo","edition":0,"amendment_count":0},{"program_id":"credits.aleo","edition":0,"amendment_count":0}]}"#,
+                "{prefix}"
+            );
+        }
     }
 
     /// The routes of the removed `history` feature, in history compatibility mode.

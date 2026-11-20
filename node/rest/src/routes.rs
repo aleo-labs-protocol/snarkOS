@@ -287,7 +287,7 @@ struct ProgramsSummary {
 /// A deployed program, its latest edition, and that edition's amendment count.
 #[derive(Serialize)]
 struct ProgramSummary {
-    id: String,
+    program_id: String,
     edition: u16,
     amendment_count: u64,
 }
@@ -911,35 +911,25 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
     /// list may also include programs deployed after `height`, and an edition or amendment count
     /// may be newer than it was at `height`.
     pub(crate) async fn get_programs_summary(State(rest): State<Self>) -> Result<ErasedJson, RestError> {
-        let summarize = move || {
+        let summarize = move || -> Result<ErasedJson, RestError> {
             // Read the height first. The ledger advances it only after the block's storage batch
-            // is written, so the scans below see every deployment and amendment up to it.
+            // is written, so the reads below see every deployment and amendment up to it.
             let height = rest.ledger.latest_height();
             let store = rest.ledger.vm().transaction_store();
-            let editions: Vec<_> =
-                store.program_ids_and_latest_editions().map(|(id, edition)| (*id, *edition)).collect();
-            // An edition's amendments have indices `0..count`, so counting entries gives the same
-            // number as `get_amendment_count`.
-            let mut amendment_counts = HashMap::<(ProgramID<N>, u16), u64>::new();
-            for (key, _) in store.amendment_transaction_ids() {
-                let (id, edition, _) = *key;
-                *amendment_counts.entry((id, edition)).or_default() += 1;
-            }
-            let mut programs: Vec<_> = editions
-                .into_iter()
-                .map(|(id, edition)| ProgramSummary {
-                    id: id.to_string(),
-                    edition,
-                    amendment_count: amendment_counts.get(&(id, edition)).copied().unwrap_or(0),
+            let mut programs = store
+                .program_ids_and_latest_editions()
+                .map(|(id, edition)| {
+                    let amendment_count = store.get_amendment_count(&id, *edition)?.unwrap_or(0);
+                    Ok(ProgramSummary { program_id: id.to_string(), edition: *edition, amendment_count })
                 })
-                .collect();
-            programs.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+                .collect::<Result<Vec<_>, RestError>>()?;
+            programs.sort_unstable_by(|a, b| a.program_id.cmp(&b.program_id));
             // `ErasedJson::new` serializes eagerly, so this keeps serialization off the async thread.
-            ErasedJson::new(ProgramsSummary { height, programs })
+            Ok(ErasedJson::new(ProgramsSummary { height, programs }))
         };
 
         match tokio::task::spawn_blocking(summarize).await {
-            Ok(summary) => Ok(summary),
+            Ok(summary) => summary,
             Err(err) => Err(RestError::internal_server_error(anyhow!(err).context("Tokio error"))),
         }
     }
