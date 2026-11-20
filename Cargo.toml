@@ -336,14 +336,6 @@ workspace = true
 [dependencies.snarkvm]
 workspace = true
 
-# snarkVM instruments its locks under its `locktick` Cargo feature, not under `cfg(locktick)`.
-# This entry turns that feature on in `cfg(locktick)` builds. It applies only to builds that
-# include this package: `cargo locktick-build -p snarkos-node`, for example, leaves snarkVM's
-# locks uninstrumented.
-[target.'cfg(locktick)'.dependencies.snarkvm]
-workspace = true
-features = [ "locktick" ]
-
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 tikv-jemallocator = "0.7"
 
