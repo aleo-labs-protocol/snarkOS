@@ -13,8 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(feature = "ledger-write")]
-use snarkvm::ledger::narwhal::Subdag;
 use snarkvm::{
     ledger::{
         Block,
@@ -22,13 +20,12 @@ use snarkvm::{
         PendingBlock,
         Transaction,
         committee::Committee,
-        narwhal::{BatchCertificate, Data, Transmission, TransmissionID},
+        narwhal::{BatchCertificate, Data, Subdag, Transmission, TransmissionID},
         puzzle::{Solution, SolutionID},
     },
     prelude::{Address, ConsensusVersion, Field, Network, Result},
 };
 
-#[cfg(feature = "ledger-write")]
 use indexmap::IndexMap;
 use std::ops::Range;
 
@@ -51,7 +48,6 @@ pub struct CommitteeNotFound {
 }
 
 /// Allows performing updates to the ledger and prevents concurrent updates while the object is alive.
-#[cfg(feature = "ledger-write")]
 pub trait LedgerUpdateService<N: Network> {
     /// Checks the given block is valid subdag.
     fn check_block_subdag(
@@ -162,7 +158,6 @@ pub trait LedgerService<N: Network>: std::fmt::Debug + Send + Sync {
     /// Start a transactional update to the ledger.
     ///
     /// Note: This may block and should only be called from a blocking task.
-    #[cfg(feature = "ledger-write")]
     fn begin_ledger_update<'a>(&'a self) -> Result<Box<dyn LedgerUpdateService<N> + 'a>, BeginLedgerUpdateError>;
 
     /// Checks that the subDAG in a given block is valid, but does not fully verify the block.
