@@ -4,7 +4,7 @@ version = "4.13.1"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "A node router for a decentralized operating system"
 homepage = "https://aleo.org"
-repository = "https://github.com/ProvableHQ/snarkOS"
+repository = "https://github.com/aleo-labs-protocol/snarkOS"
 keywords = [
   "aleo",
   "cryptography",
@@ -70,7 +70,6 @@ workspace = true
 
 [dependencies.snarkos-node-bft-ledger-service]
 workspace = true
-features = [ "ledger", "ledger-write", "prover" ]
 
 [dependencies.snarkos-node-network]
 workspace = true
@@ -130,7 +129,7 @@ version = "0.3"
 
 [dev-dependencies.snarkos-node-bft-ledger-service]
 workspace = true
-features = [ "ledger-write", "test-helpers" ]
+features = [ "test-helpers" ]
 
 [dev-dependencies.snarkos-node-sync]
 path = "../sync"

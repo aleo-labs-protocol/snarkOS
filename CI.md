@@ -7,8 +7,10 @@ Jobs run in one of two places:
 
 - **GitHub-hosted runners** for cheap jobs: formatting, `cargo deny`,
   shellcheck, the source checks, `cargo machete`, the Windows checks and the lighter crates'
-  tests. These restore `~/.cargo` and `target/` with `Swatinem/rust-cache`,
-  saved only from `staging`.
+  tests. The hosted test jobs restore `~/.cargo` and `target/` with
+  `Swatinem/rust-cache`, saved only from `staging`. The Windows checks build
+  cold. Their caches would take about half of the repository's 10 GB cache
+  limit and evict the test jobs' entries.
 - **The self-hosted `cpu` fleet** for heavy jobs: clippy, the heavier
   crates' tests, the `snarkos` build and the devnets. `start-cpu-runners`
   starts the boxes the run needs; they stop themselves when idle. Each box
@@ -18,14 +20,14 @@ Jobs run in one of two places:
 
 | Event | Runs |
 |---|---|
-| Pull request | `fmt`, `deny`, `shellcheck`, `source-checks`, `machete`, `lint`, `test`, `build-snarkos`, `devnet`, `ci-ok` |
-| Push to `staging`, `canary`, `testnet`, `mainnet`, or manual dispatch | the above, plus `devnet-merge`, `windows` |
-| Push to `canary`, `testnet`, `mainnet`, or manual dispatch | the above, plus `devnet-release` |
+| Pull request into `staging` | `fmt`, `deny`, `shellcheck`, `source-checks`, `machete`, `lint`, `test`, `build-snarkos`, `devnet`, `ci-ok` |
+| Push to `staging` | the above, plus `devnet-merge`, `windows` |
+| Pull request into `release/**`, push to `release/**`, or manual dispatch | the above, plus `devnet-release` |
 
 ## Jobs
 
-A job marked "merge" runs only on the second row of the table above, and a job
-marked "release" only on the third. The other jobs run on every event.
+A job marked "merge" runs on the second and third rows of the table above, and
+a job marked "release" only on the third. The other jobs run on every event.
 
 | Job | Runner | Trigger | Timeout (min) | What it runs |
 |---|---|---|---|---|
@@ -54,18 +56,17 @@ marked "release" only on the third. The other jobs run on every event.
 | `devnet (chaotic-restart-all)` | `cpu` | release | 45 | `test_restart_all.sh`, with delays |
 | `machete` | hosted | all | | `cargo machete` |
 | `windows` | hosted (Windows) | merge | | `cargo check --examples --benches --tests` in `account`, `cli`, `display`, `node` |
-| `ci-ok` | hosted | all | | fails unless every job a pull request runs succeeded |
+| `ci-ok` | hosted | all | | fails unless every job succeeded; a merge or release job may be skipped where it is not meant to run |
 
 A job with no timeout gets the GitHub default of six hours. Only hosted jobs
 have none, and a hosted job holds no fleet box.
 
 Protected branches require `ci-ok` alone. GitHub counts a skipped job as
 passed for a required check, and a fleet job is skipped when
-`start-cpu-runners` fails or the pull request comes from a fork; `ci-ok`
-fails in both cases.
+`start-cpu-runners` fails; `ci-ok` fails then.
 
 A pull request that changes only Markdown files starts no run, so it gets no
-`ci-ok` check. A push runs everything. Where a branch rule requires `ci-ok`,
+`ci-ok` check. Where a branch rule requires `ci-ok`,
 such a pull request cannot merge until a workflow reports that check for it.
 
 ## Test groups
@@ -113,12 +114,13 @@ To run the `.ci` scripts on macOS you may want to `brew install bash coreutils
 
 ## Forks
 
-A fork's pull request runs nothing on the fleet. Every self-hosted job checks
-that the head repository is this one. The fleet's `target/` and sccache
-persist between jobs, so anyone who can push a branch here can affect later
-builds there. That is the same trust as push access; do not widen the guard.
+A fork's pull request runs on the fleet once a team member approves its run.
+The run gets no secrets, so `start-cpu-runners` is skipped;
+`fork-pr-runners.yml` starts the boxes instead, and the fleet jobs accept the
+skipped start.
 
-The guard is not what holds. A pull request runs its own copy of `ci.yml`, so
-a fork can delete the guard and target the fleet directly. What holds is the
-repository setting that makes every external contributor's workflow run wait
-for approval. Read a fork's workflow changes before approving its run.
+The fleet's `target/` and sccache persist between jobs, so an approved run can
+affect later builds there. A pull request runs its own copy of `ci.yml`, so no
+guard in that file holds. What holds is the repository setting that makes every
+external contributor's workflow run wait for approval. Read a fork's changes
+before approving its run.

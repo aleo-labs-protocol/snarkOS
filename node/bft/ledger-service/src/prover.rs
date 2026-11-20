@@ -13,9 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::LedgerService;
-#[cfg(feature = "ledger-write")]
-use crate::{BeginLedgerUpdateError, LedgerUpdateService};
+use crate::{BeginLedgerUpdateError, LedgerService, LedgerUpdateService};
 use snarkvm::{
     ledger::{
         Block,
@@ -179,7 +177,6 @@ impl<N: Network> LedgerService<N> for ProverLedgerService<N> {
     }
 
     /// Adds the given block as the next block in the ledger.
-    #[cfg(feature = "ledger-write")]
     fn begin_ledger_update<'a>(&'a self) -> Result<Box<dyn LedgerUpdateService<N> + 'a>, BeginLedgerUpdateError> {
         Err(BeginLedgerUpdateError::NotSupportedForProver)
     }

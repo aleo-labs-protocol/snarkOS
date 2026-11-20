@@ -4,7 +4,7 @@ version = "4.13.1"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "A ledger service for the memory pool in a decentralized operating system"
 homepage = "https://aleo.org"
-repository = "https://github.com/ProvableHQ/snarkOS"
+repository = "https://github.com/aleo-labs-protocol/snarkOS"
 keywords = [
   "aleo",
   "cryptography",
@@ -18,28 +18,24 @@ edition = "2024"
 
 [features]
 default = [ ]
-ledger = [ "ledger-write", "parking_lot", "rand", "rayon", "tokio", "tracing" ]
-ledger-write = [ ]
 locktick = [
   "dep:locktick",
   "snarkvm/locktick",
   "snarkos-utilities/locktick"
 ]
 metrics = [ "dep:snarkos-node-metrics", "snarkvm/metrics" ]
-mock = [ "ledger-write", "parking_lot", "tracing" ]
-prover = [ ]
+mock = [ ]
 cuda = [ "snarkvm/cuda" ]
 serial = [
   "snarkvm/serial",
   "snarkos-node-metrics?/serial"
 ]
-test-helpers = [ "mock", "translucent" ]
+test-helpers = [ "mock" ]
 test_network = [
   "snarkvm/dev-committee",
   "snarkvm/dev_genesis_state_root",
   "snarkos-utilities/test_network"
 ]
-translucent = [ "ledger" ]
 
 [dependencies.anyhow]
 workspace = true
@@ -65,15 +61,12 @@ workspace = true
 
 [dependencies.parking_lot]
 workspace = true
-optional = true
 
 [dependencies.rand]
 workspace = true
-optional = true
 
 [dependencies.rayon]
 workspace = true
-optional = true
 
 [dependencies.snarkvm]
 workspace = true
@@ -82,14 +75,12 @@ features = [ "console", "ledger", "synthesizer" ]
 [dependencies.tokio]
 workspace = true
 features = [ "macros", "rt-multi-thread" ]
-optional = true
 
 [dependencies.thiserror]
 workspace = true
 
 [dependencies.tracing]
 workspace = true
-optional = true
 features = [ "log" ]
 
 [dev-dependencies.snarkos-utilities]

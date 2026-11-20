@@ -4,7 +4,7 @@ version = "4.13.1"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "A storage service for the memory pool in a decentralized operating system"
 homepage = "https://aleo.org"
-repository = "https://github.com/ProvableHQ/snarkOS"
+repository = "https://github.com/aleo-labs-protocol/snarkOS"
 keywords = [
   "aleo",
   "cryptography",
@@ -19,8 +19,8 @@ edition = "2024"
 [features]
 default = [ ]
 locktick = [ "dep:locktick", "snarkvm/locktick" ]
-memory = [ "parking_lot", "tracing" ]
-persistent = [ "parking_lot", "tracing" ]
+memory = [ "dep:parking_lot", "dep:tracing" ]
+persistent = [ "dep:parking_lot", "dep:tracing" ]
 test-helpers = [ "memory", "snarkvm/test-helpers" ]
 
 [dependencies.anyhow]

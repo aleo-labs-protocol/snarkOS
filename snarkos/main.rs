@@ -174,7 +174,7 @@ fn main() {
         Err(_) => {
             print_error!(
                 "This is most likely a bug!\n\
-                Please report it to the snarkOS developers: https://github.com/ProvableHQ/snarkOS/issues/new?template=bug.md"
+                Please report it to the snarkOS developers: https://github.com/aleo-labs-protocol/snarkOS/issues/new?template=bug.md"
             );
 
             exit(1);

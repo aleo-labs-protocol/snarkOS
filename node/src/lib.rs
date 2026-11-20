@@ -116,7 +116,7 @@ pub fn notification_message() -> String {
     - IMPORTANT: EXPECT MULTIPLE NETWORK RESETS.
     - If participating, BE PREPARED TO RESET YOUR NODE AT ANY TIME.
     - When a reset occurs, RUN THE FOLLOWING TO RESET YOUR NODE:
-        - git checkout mainnet && git pull
+        - ./scripts/checkout-latest-release.sh mainnet
         - cargo install --locked --path .
         - snarkos clean
         - snarkos start --nodisplay --client

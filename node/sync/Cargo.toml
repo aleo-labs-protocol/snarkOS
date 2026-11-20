@@ -4,7 +4,7 @@ version = "4.13.1"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "A synchronization module for a decentralized operating system"
 homepage = "https://aleo.org"
-repository = "https://github.com/ProvableHQ/snarkOS"
+repository = "https://github.com/aleo-labs-protocol/snarkOS"
 keywords = [
   "aleo",
   "cryptography",
@@ -64,7 +64,6 @@ workspace = true
 
 [dependencies.snarkos-node-bft-ledger-service]
 workspace = true
-features = [ "ledger-write" ]
 
 [dependencies.snarkos-node-metrics]
 workspace = true

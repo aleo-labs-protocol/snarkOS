@@ -3,6 +3,8 @@ on:
   push:
     tags:
       - 'v*.*.*'
+      # A release candidate gets no binaries: `snarkos update` in older releases would install them.
+      - '!v*-rc.*'
 
 env:
   RUST_BACKTRACE: 1
@@ -46,6 +48,7 @@ jobs:
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         if: startsWith(github.ref, 'refs/tags/')
         with:
+          make_latest: legacy
           files: |
             aleo-${{ steps.get_version.outputs.version }}-x86_64-unknown-linux-gnu.zip
         env:
@@ -95,6 +98,7 @@ jobs:
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         if: startsWith(github.ref, 'refs/tags/')
         with:
+          make_latest: legacy
           files: |
             aleo-${{ steps.get_version.outputs.version }}-aarch64-apple-darwin.zip
         env:
@@ -140,6 +144,7 @@ jobs:
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         if: startsWith(github.ref, 'refs/tags/')
         with:
+          make_latest: legacy
           files: |
             aleo-${{ steps.get_version.outputs.version }}-x86_64-pc-windows-msvc.zip
         env:
