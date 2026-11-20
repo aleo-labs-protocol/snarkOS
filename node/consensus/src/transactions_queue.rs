@@ -201,6 +201,14 @@ impl<N: Network> TransactionsQueueInner<N> {
     pub fn pop(&mut self) -> Option<(N::TransactionID, Transaction<N>)> {
         self.priority_queue.pop().or_else(|| self.fifo_queue.pop_lru())
     }
+
+    /// Removes every transaction, and returns how many were removed.
+    pub fn clear(&mut self) -> usize {
+        let num_transactions = self.len();
+        self.fifo_queue.clear();
+        self.priority_queue = Default::default();
+        num_transactions
+    }
 }
 
 struct PriorityQueue<N: Network> {

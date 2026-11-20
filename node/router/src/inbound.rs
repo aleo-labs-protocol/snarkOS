@@ -77,6 +77,12 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
         }
     }
 
+    /// Returns `true` if the node turns deployments away, during a deployment freeze. The router then
+    /// drops an unconfirmed deployment before deserializing it or recording it as seen.
+    fn turns_away_deployments(&self) -> bool {
+        false
+    }
+
     /// Handles the inbound message from the peer. The returned value indicates whether
     /// the connection is still active, and errors cause a disconnect once they are
     /// propagated to the caller.
@@ -306,6 +312,18 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
                         "syncing",
                     );
                     trace!("Skipped processing unconfirmed transaction '{}' (node is syncing)", message.transaction_id);
+                    return Ok(true);
+                }
+                // During a deployment freeze, drop a deployment before deserializing it. It is not recorded
+                // as seen, so the same peer can send it again after the freeze.
+                if message.is_deployment() && self.turns_away_deployments() {
+                    #[cfg(feature = "metrics")]
+                    metrics::increment_counter_1(
+                        metrics::router::UNCONFIRMED_TRANSACTIONS_INBOUND,
+                        "outcome",
+                        "frozen",
+                    );
+                    trace!("Skipping a deployment 'UnconfirmedTransaction' from '{peer_ip}' (deployments are frozen)");
                     return Ok(true);
                 }
                 // Update the timestamp for the unconfirmed transaction.

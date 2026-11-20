@@ -1411,6 +1411,14 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             Err(other_rejection) => return Err(other_rejection.into()),
         };
 
+        // Turn deployments away while they are frozen, before any other check, and before the
+        // transaction reaches the memory pool or is broadcast.
+        if tx.is_deploy()
+            && let Err(error) = check_deployment_not_frozen(rest.deployment_freeze.policy(&rest.ledger))
+        {
+            return Err(RestError::unprocessable_entity(error));
+        }
+
         // If the transaction exceeds the transaction size limit, return an error.
         // The buffer is initially roughly sized to hold a `transfer_public`,
         // most transactions will be smaller and this reduces unnecessary allocations.

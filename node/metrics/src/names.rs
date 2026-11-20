@@ -184,8 +184,9 @@ pub mod router {
     pub const EVENTS: &str = "snarkos_router_events_total";
     /// Inbound `UnconfirmedTransaction` messages that passed the router's limit on all inbound messages
     /// per peer (`MESSAGE_LIMIT`; there is no transaction-specific limit), labeled by
-    /// `outcome`: `syncing` (dropped while the node is behind), `seen` (dropped by the per-peer
-    /// inbound cache) or `dispatched` (handed to the node-type handler).
+    /// `outcome`: `syncing` (dropped while the node is behind), `frozen` (a deployment dropped
+    /// during a deployment freeze), `seen` (dropped by the per-peer inbound cache) or `dispatched`
+    /// (handed to the node-type handler).
     pub const UNCONFIRMED_TRANSACTIONS_INBOUND: &str = "snarkos_router_unconfirmed_transactions_inbound_total";
     /// Calls that propagate an `UnconfirmedTransaction`, labeled by `site`: `rest`, `client_unverified`
     /// (the client relays without verification because a state root is unknown), `client_verified`,
