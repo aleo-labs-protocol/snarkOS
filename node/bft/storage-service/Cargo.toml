@@ -19,8 +19,8 @@ edition = "2024"
 [features]
 default = [ ]
 locktick = [ "dep:locktick", "snarkvm/locktick" ]
-memory = [ "parking_lot", "tracing" ]
-persistent = [ "parking_lot", "tracing" ]
+memory = [ "dep:parking_lot", "dep:tracing" ]
+persistent = [ "dep:parking_lot", "dep:tracing" ]
 test = [ "memory", "snarkvm/test-helpers" ]
 
 [dependencies.anyhow]
