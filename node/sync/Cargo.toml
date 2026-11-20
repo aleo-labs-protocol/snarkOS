@@ -76,6 +76,9 @@ workspace = true
 [dependencies.tracing]
 workspace = true
 
+[dev-dependencies.async-trait]
+workspace = true
+
 [dev-dependencies.snarkos-node-bft-ledger-service]
 workspace = true
 features = [ "test-helpers" ]

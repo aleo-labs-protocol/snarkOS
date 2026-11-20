@@ -570,6 +570,7 @@ impl<N: Network> BlockSync<N> {
             for (block_requests, sync_peers) in batches {
                 for requests in block_requests.chunks(DataBlocks::<N>::MAXIMUM_NUMBER_OF_BLOCKS as usize) {
                     if !self.send_block_requests(communication, &sync_peers, requests).await {
+                        self.mark_unsent_requests_as_failed(&block_requests);
                         break;
                     }
                     tokio::time::sleep(BLOCK_REQUEST_BATCH_DELAY).await;
@@ -1180,6 +1181,25 @@ impl<N: Network> BlockSync<N> {
         Ok(())
     }
 
+    /// Marks the given requests that are not in the requests map as failed, so they are re-issued.
+    ///
+    /// Re-issued heights were already taken off `failed_requests`, and a full requests map keeps
+    /// `construct_requests` from reaching them again.
+    fn mark_unsent_requests_as_failed(&self, requests: &[(u32, PrepareSyncRequest<N>)]) {
+        let mut failed_requests = self.failed_requests.lock();
+        let in_flight = self.requests.read();
+        let mut heights = vec![];
+        for (height, (hash, previous_hash, _)) in requests {
+            if !in_flight.contains_key(height) {
+                failed_requests.insert(*height, (*hash, *previous_hash));
+                heights.push(*height);
+            }
+        }
+        if !heights.is_empty() {
+            debug!("Marked unsent block requests at heights {} as failed", rangify_heights(heights));
+        }
+    }
+
     /// Inserts the given block response, after checking that the request exists and the response is well-formed.
     /// On success, this function removes the peer IP from the request sync peers and inserts the response.
     fn insert_block_response(&self, peer_ip: SocketAddr, block: Block<N>) -> Result<(), InsertBlockResponseError<N>> {
@@ -1703,13 +1723,17 @@ mod tests {
         prelude::{Field, TestRng},
     };
 
+    use async_trait::async_trait;
     use indexmap::{IndexSet, indexset};
     use rand::RngExt;
     use snarkos_utilities::locks::parking_lot::RwLock;
     use std::{
         collections::BTreeSet,
+        io,
         net::{IpAddr, Ipv4Addr},
+        sync::atomic::{AtomicBool, Ordering},
     };
+    use tokio::sync::oneshot;
 
     type CurrentNetwork = snarkvm::prelude::MainnetV0;
 
@@ -2433,5 +2457,84 @@ mod tests {
         let mut iter = new_sync_ips.iter();
         assert_ne!(iter.next().unwrap().0, &peer_ip1);
         assert_ne!(iter.next().unwrap().0, &peer_ip1);*/
+    }
+
+    fn delivered() -> Option<oneshot::Receiver<io::Result<()>>> {
+        let (tx, rx) = oneshot::channel();
+        tx.send(Ok(())).unwrap();
+        Some(rx)
+    }
+
+    /// Delivers the first block request, and rejects every later one as sent to an unknown peer.
+    #[derive(Default)]
+    struct DeliverOnce(AtomicBool);
+
+    #[async_trait]
+    impl CommunicationService for DeliverOnce {
+        type Message = ();
+
+        fn prepare_block_request(_: u32, _: u32) {}
+
+        async fn send(&self, _: SocketAddr, _: ()) -> Option<oneshot::Receiver<io::Result<()>>> {
+            if self.0.swap(true, Ordering::Relaxed) { None } else { delivered() }
+        }
+    }
+
+    /// Delivers block requests, and disconnects the peer right after.
+    struct DisconnectOnSend<'a>(&'a BlockSync<CurrentNetwork>);
+
+    #[async_trait]
+    impl CommunicationService for DisconnectOnSend<'_> {
+        type Message = ();
+
+        fn prepare_block_request(_: u32, _: u32) {}
+
+        async fn send(&self, peer_ip: SocketAddr, _: ()) -> Option<oneshot::Receiver<io::Result<()>>> {
+            self.0.remove_peer(&peer_ip);
+            delivered()
+        }
+    }
+
+    /// Returns a sync pool with one peer, and failed requests for three chunks of heights from 3.
+    fn sample_sync_with_failed_requests()
+    -> (BlockSync<CurrentNetwork>, FailedRequests<<CurrentNetwork as Network>::BlockHash>) {
+        let chunk = DataBlocks::<CurrentNetwork>::MAXIMUM_NUMBER_OF_BLOCKS as u32;
+        let locators = sample_block_locators(3 + 3 * chunk);
+        let sync = sample_sync_at_height(0);
+        sync.update_peer_locators(sample_peer_ip(1), &locators).unwrap();
+
+        let failed: FailedRequests<_> =
+            (3..3 + 3 * chunk).map(|h| (h, (locators.get_hash(h), locators.get_hash(h - 1)))).collect();
+        *sync.failed_requests.lock() = failed.clone();
+        (sync, failed)
+    }
+
+    #[tokio::test]
+    async fn test_reissue_unsent_block_requests() {
+        let (sync, mut failed) = sample_sync_with_failed_requests();
+        let chunk = DataBlocks::<CurrentNetwork>::MAXIMUM_NUMBER_OF_BLOCKS as u32;
+
+        sync.try_issuing_block_requests(&DeliverOnce::default()).await;
+
+        // The first chunk is in flight; the rest are failed again, with their hashes.
+        let sent: Vec<_> = (3..3 + chunk).collect();
+        assert_eq!(sync.requests.read().keys().copied().collect::<Vec<_>>(), sent);
+        failed.retain(|h, _| !sent.contains(h));
+        assert_eq!(*sync.failed_requests.lock(), failed);
+
+        // They are re-issued.
+        let (requests, _) = sync.prepare_block_requests().pop().unwrap();
+        assert_eq!(requests.iter().map(|(h, _)| *h).collect::<Vec<_>>(), failed.keys().copied().collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn test_reissue_block_requests_skipped_for_disconnected_peer() {
+        let (sync, failed) = sample_sync_with_failed_requests();
+
+        sync.try_issuing_block_requests(&DisconnectOnSend(&sync)).await;
+
+        // The first chunk was failed by the disconnect, and the rest by the skip.
+        assert!(sync.requests.read().is_empty());
+        assert_eq!(*sync.failed_requests.lock(), failed);
     }
 }

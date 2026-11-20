@@ -5693,6 +5693,7 @@ name = "snarkos-node-sync"
 version = "4.13.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "futures",
  "indexmap 2.14.2",
  "itertools 0.15.0",
