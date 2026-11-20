@@ -40,11 +40,11 @@ cuda = [
   "snarkos-node-bft-ledger-service/cuda",
   "snarkos-node-sync/cuda"
 ]
-test = [
+test-helpers = [
   # "snarkvm/test" this breaks some of the tests
   "snarkvm/test-helpers",
-  "snarkos-node-bft-ledger-service/test",
-  "snarkos-node-bft-storage-service/test"
+  "snarkos-node-bft-ledger-service/test-helpers",
+  "snarkos-node-bft-storage-service/test-helpers"
 ]
 test_network = [
   "snarkos-node-bft-ledger-service/test_network",
@@ -195,11 +195,11 @@ workspace = true
 
 [dev-dependencies.snarkos-node-bft]
 path = "."
-features = [ "test" ]
+features = [ "test-helpers" ]
 
 [dev-dependencies.snarkos-node-sync]
 workspace = true
-features = [ "test" ]
+features = [ "test-helpers" ]
 
 [dev-dependencies.snarkos-utilities]
 workspace = true

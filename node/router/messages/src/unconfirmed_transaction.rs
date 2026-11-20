@@ -73,7 +73,7 @@ impl<N: Network> FromBytes for UnconfirmedTransaction<N> {
     }
 }
 
-#[cfg(any(test, feature = "fuzz-helpers"))]
+#[cfg(any(test, feature = "test-helpers"))]
 pub mod prop_tests {
     #![cfg_attr(not(test), allow(unused_imports))]
     use crate::{Transaction, UnconfirmedTransaction, samples::sample_fee_public_transaction};

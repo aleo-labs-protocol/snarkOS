@@ -183,7 +183,7 @@ impl<N: Network> FromBytes for DataBlocks<N> {
     }
 }
 
-#[cfg(any(test, feature = "fuzz-helpers"))]
+#[cfg(any(test, feature = "test-helpers"))]
 pub mod prop_tests {
     #![cfg_attr(not(test), allow(unused_imports))]
     use crate::{BlockRequest, BlockResponse, DataBlocks, block_request::prop_tests::any_block_request};

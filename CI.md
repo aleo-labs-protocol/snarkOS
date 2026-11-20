@@ -41,7 +41,7 @@ a job marked "release" only on the third. The other jobs run on every event.
 | `test (light)` | hosted | all | 90 | `snarkos-account`, `-utilities`, `-node-tcp`, `-node-sync-locators`, `-node-network` |
 | `test (cdn)` | hosted | all | 90 | `snarkos-node-cdn` |
 | `test (messages)` | hosted | all | 90 | `snarkos-node-bft-events`, `-node-router-messages`, `-node-bft-ledger-service` |
-| `test (services)` | `cpu` | all | 90 | `snarkos-node-consensus`, `-node-rest`, `-cli` |
+| `test (services)` | `cpu` | all | 90 | `snarkos-node-consensus`, `-cli`; then `-node-rest` |
 | `test (node)` | `cpu` | all | 90 | `snarkos-node` with `snarkos-node-bft-storage-service` (features `memory,persistent`) |
 | `test (bft)` | `cpu` | all | 90 | `snarkos-node-bft` with `metrics` |
 | `test (router-sync)` | `cpu` | all | 90 | `snarkos-node-router`; then `-node-sync` |
@@ -74,9 +74,10 @@ such a pull request cannot merge until a workflow reports that check for it.
 Each line of a `test` entry is one cargo build. `cargo test -p a -p b` unifies
 the features of `a` and `b`, and several crates enable features on their
 dependencies that change what those dependencies do, such as
-`snarkos-node-router/test` and `snarkvm-ledger-block/test`. So crates share a
-line only where that unification enables no such feature on any crate. Helper
-features such as `test-helpers` and `mock` can still be unified, so a test may
+`snarkos-node-router/test-helpers` and `snarkvm-ledger-block/test`. So crates
+share a line only where that unification enables no such feature on any crate.
+Other helper features, such as `mock` and the other crates' `test-helpers`, can
+still be unified, so a test may
 compile in its line that would not under `cargo test -p <crate>` alone. Check
 this before moving a crate between lines, for example by comparing
 `cargo tree -e features` for the line against each crate alone.

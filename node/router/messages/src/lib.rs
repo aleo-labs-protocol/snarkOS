@@ -57,7 +57,7 @@ pub use puzzle_request::PuzzleRequest;
 mod puzzle_response;
 pub use puzzle_response::PuzzleResponse;
 
-#[cfg(any(test, feature = "fuzz-helpers"))]
+#[cfg(any(test, feature = "test-helpers"))]
 mod samples;
 
 mod unconfirmed_solution;
@@ -77,7 +77,7 @@ pub use snarkos_node_bft_events::DataBlocks;
 /// spends nearly every execution failing the version byte at the head of a
 /// reader, so seeding from structurally valid messages is worth more than any
 /// amount of mutator tuning.
-#[cfg(any(test, feature = "fuzz-helpers"))]
+#[cfg(any(test, feature = "test-helpers"))]
 pub mod generators {
     pub use crate::{
         challenge_request::prop_tests as challenge_request,

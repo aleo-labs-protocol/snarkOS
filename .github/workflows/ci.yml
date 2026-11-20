@@ -133,19 +133,19 @@ jobs:
       # features, so it misses a feature one of them fails to declare.
       - run: cargo check -p snarkos-node-metrics --all-features
       - run: cargo check -p snarkos-display --all-features
-      # The fuzzing harness builds these two alone with `fuzz-helpers`, which
+      # The fuzzing harness builds these two alone with `test-helpers`, which
       # the workspace pass above only sees unified with everything else.
-      - run: cargo check -p snarkos-node-router-messages --features fuzz-helpers
-      - run: cargo check -p snarkos-node-bft-events --features fuzz-helpers
+      - run: cargo check -p snarkos-node-router-messages --features test-helpers
+      - run: cargo check -p snarkos-node-bft-events --features test-helpers
 
   # Each line of `runs` is one build. `cargo test -p a -p b` unifies the
   # features of a and b, and several crates enable features on their
   # dependencies that change what those dependencies do:
-  # `snarkos-node-router/test`, `snarkos-node-network/test` and
+  # `snarkos-node-router/test-helpers`, `snarkos-node-network/test-helpers` and
   # `snarkvm-ledger-block/test` skip checks, and `rocks` and `metrics` select
   # other code paths. Crates share a line only where that unification enables
-  # none of these on any crate. Helper features such as `test-helpers` and
-  # `mock` can still be unified.
+  # none of these on any crate. Other helper features, such as `mock` and the
+  # other crates' `test-helpers`, can still be unified.
   #
   # Cheap entries run on free hosted runners and do not wait for the fleet.
   test-hosted:
@@ -241,7 +241,9 @@ jobs:
       matrix:
         include:
           - name: services
-            runs: nextest run -p snarkos-node-consensus -p snarkos-node-rest -p snarkos-cli
+            runs: |
+              nextest run -p snarkos-node-consensus -p snarkos-cli
+              nextest run -p snarkos-node-rest
           - name: node
             runs: nextest run -p snarkos-node -p snarkos-node-bft-storage-service --features snarkos-node-bft-storage-service/memory,snarkos-node-bft-storage-service/persistent
           # Both lines use `metrics`, which the `snarkos` binary enables by
@@ -254,8 +256,9 @@ jobs:
             runs: |
               nextest run -p snarkos-node-bft --features metrics
               nextest run -p snarkos-node-bft --features metrics --example simple_node --no-tests=fail
-          # One line for both would turn on `test` in `snarkos-node-sync` for
-          # its own tests. The two lines build the same snarkvm crates.
+          # One line for both would turn on `test-helpers` in
+          # `snarkos-node-sync` for its own tests. The two lines build the same
+          # snarkvm crates.
           - name: router-sync
             runs: |
               nextest run -p snarkos-node-router
@@ -420,9 +423,10 @@ jobs:
     name: devnet (${{ matrix.name }})
     steps: *devnet-steps
 
-  # The release binary must compile in no test-only code. `fuzz-helpers` turns on
-  # proptest and snarkVM's `test-helpers`, and feature unification would carry
-  # them into the binary if any crate on its path ever enabled it.
+  # The release binary must compile in no test-only code. `test-helpers` in the
+  # event and message crates turns on proptest and snarkVM's `test-helpers`, and
+  # feature unification would carry them into the binary if any crate on its
+  # path ever enabled it.
   release-graph:
     runs-on: ubuntu-latest
     steps:
@@ -430,7 +434,7 @@ jobs:
         with: { persist-credentials: false }
       - run: |
           cargo tree -p snarkos -e normal,build,features --prefix none --locked > graph.txt
-          hits=$(grep -E '^[a-z0-9_-]+ feature "(fuzz-helpers|test-helpers|test)"$|^proptest ' graph.txt | sort -u || true)
+          hits=$(grep -E '^[a-z0-9_-]+ feature "(test-helpers|test)"$|^proptest ' graph.txt | sort -u || true)
           if [ -n "$hits" ]; then
             printf '%s\n' "$hits"
             echo "::error::the snarkos release build enables test-only code (above)"

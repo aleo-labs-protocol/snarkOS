@@ -57,7 +57,7 @@ impl<N: Network> FromBytes for BatchCertified<N> {
     }
 }
 
-#[cfg(any(test, feature = "fuzz-helpers"))]
+#[cfg(any(test, feature = "test-helpers"))]
 pub mod prop_tests {
     #![cfg_attr(not(test), allow(unused_imports))]
     use crate::{BatchCertified, certificate_response::prop_tests::any_batch_certificate};

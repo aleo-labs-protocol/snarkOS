@@ -17,7 +17,6 @@ license = "Apache-2.0"
 edition = "2024"
 
 [features]
-test = [ ]
 test-helpers = [
   "snarkos-node-bft-ledger-service/mock",
   "snarkvm/test-helpers"
@@ -130,19 +129,15 @@ version = "0.3"
 
 [dev-dependencies.snarkos-node-bft-ledger-service]
 workspace = true
-features = [ "test" ]
+features = [ "test-helpers" ]
 
 [dev-dependencies.snarkos-node-sync]
 path = "../sync"
-features = [ "test" ]
+features = [ "test-helpers" ]
 
 [dev-dependencies.snarkos-node-router]
 path = "."
-features = [ "test", "test-helpers" ]
-
-[dev-dependencies.snarkos-node-router-messages]
-workspace = true
-features = [ "test" ]
+features = [ "test-helpers" ]
 
 [dev-dependencies.snarkvm]
 workspace = true

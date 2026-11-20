@@ -60,7 +60,7 @@ serial = [
   "snarkvm/serial",
   "snarkos-node-bft/serial"
 ]
-test = []
+test-helpers = []
 test_network = [ "snarkos-node-bft/test_network", "snarkos-node-consensus/test_network", "snarkos-utilities/test_network" ]
 
 [dependencies.aleo-std]
@@ -180,7 +180,7 @@ workspace = true
 
 [dev-dependencies.snarkos-node-router]
 workspace = true
-features = [ "test" ]
+features = [ "test-helpers" ]
 
 [dev-dependencies.snarkvm]
 workspace = true
