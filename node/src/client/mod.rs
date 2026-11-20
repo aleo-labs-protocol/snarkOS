@@ -140,7 +140,6 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
         history_json: bool,
         history_programs: Vec<ProgramID<N>>,
         archival: bool,
-        force_history_change: bool,
         account: Account<N>,
         trusted_peers: &[SocketAddr],
         genesis: Block<N>,
@@ -164,11 +163,14 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
         if history_json {
             ledger.vm().finalize_store().set_record_history_json(true);
         }
-        ledger
+        if let Some(warning) = ledger
             .vm()
             .finalize_store()
-            .configure_history(history_programs, archival, force_history_change)
-            .with_context(|| "Failed to configure program history")?;
+            .configure_history(history_programs, archival)
+            .with_context(|| "Failed to configure program history")?
+        {
+            warn!("{warning}");
+        }
 
         // Initialize the ledger service.
         let ledger_service = Arc::new(CoreLedgerService::<N, C>::new(ledger.clone(), signal_handler.clone()));

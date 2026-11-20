@@ -47,9 +47,8 @@ version = "1.0.4"
 default-features = false
 
 [workspace.dependencies.snarkvm]
-#path = "../snarkVM"
 git = "https://github.com/aleo-labs-protocol/snarkVM.git"
-rev = "8c5567d43844d8cbda1cfbd311419a8f9e5bdbd1" #feat/program-mapping-history
+rev = "f1d4b5a6a358d260546c2c918813948795838aeb" #feat/program-mapping-history
 #version = "=4.12.0"
 default-features = false
 

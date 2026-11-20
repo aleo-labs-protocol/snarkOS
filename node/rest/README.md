@@ -29,8 +29,9 @@ snarkos start --client --archival
 With `--history-programs`, dependencies must be selected explicitly. `--archival` includes them automatically.
 These modes are mutually exclusive. Both work without `--history-json` and can be combined with it to also write the legacy credits snapshots.
 Neither can be combined with `--history-compat-mode`.
-The ledger stores the recording mode and selected programs. A restart with different settings fails before block import.
-Use `--force-history-change` to change them explicitly. The next block closes archival coverage when needed.
+The ledger stores the recording mode and selected programs. You can change them on restart.
+The node warns about the previous and new settings and when new coverage begins.
+Existing ranges remain available. Missing blocks are not backfilled.
 
 Key versions and deletion markers are stored in the same ledger RocksDB database. Recording starts with a baseline at the first indexed block, then records changes per committed block. History is available only across contiguous indexed coverage. Gaps are unavailable. Existing history requires replay from genesis or an earlier valid checkpoint; enabling either mode does not backfill a synced ledger.
 
@@ -44,4 +45,6 @@ GET /program/{program}/history/ranges
 
 A missing key in covered history returns `null`. Missing coverage or mapping returns `404`.
 The ranges route returns inclusive `[start, end]` pairs in height order, or `[]` when no history exists.
+For history recorded at blocks 1 through 10 and 500 through 1000, it returns `[[1,10],[500,1000]]`.
+A key-history query for blocks 11 through 499 returns `404`.
 This mode does not evaluate historical views or expose state between transactions in the same block.
