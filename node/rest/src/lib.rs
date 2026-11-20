@@ -1174,7 +1174,7 @@ mod route_tests {
         // v1 replaces every error status with a 500 by design, so a rate-limited caller cannot
         // learn what happened from the status. The message has to say so instead; it previously
         // read only "Failed to convert error", which is what made `--rest-rps` rejections look
-        // like missing data. See ProvableHQ/snarkOS#4443.
+        // like missing data. See aleo-labs-protocol/snarkOS#4443.
         let (status, body) = send(&router, "/mainnet/block/height/latest").await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert!(body.contains("429"), "the v1 rate limit message does not name the status: {body}");
@@ -1187,7 +1187,7 @@ mod route_tests {
 
         // The ledger holds only the genesis block. `get_block` wraps the ledger's "Missing block
         // hash" in its own context, which used to hide the marker from the error mapping and
-        // produce a 500 for a height the node simply did not have. See ProvableHQ/snarkOS#4337.
+        // produce a 500 for a height the node simply did not have. See aleo-labs-protocol/snarkOS#4337.
         let (status, _) = get_versioned(&rest, "/v2/mainnet/block/1").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
 
@@ -1345,7 +1345,7 @@ mod route_tests {
         // This pins current behavior rather than endorsing it: the singular state root route
         // answers a height it does not have with `200 null`, while the range route and most other
         // routes report a missing resource as a 404. Changing it needs a version bump, so it is
-        // recorded here to keep the inconsistency visible. See ProvableHQ/snarkOS#4097.
+        // recorded here to keep the inconsistency visible. See aleo-labs-protocol/snarkOS#4097.
         for prefix in ["/mainnet", "/v2/mainnet"] {
             let (status, body) = get_versioned(&rest, &format!("{prefix}/stateRoot/1")).await;
             assert_eq!(status, StatusCode::OK, "{prefix} changed the missing state root status");
