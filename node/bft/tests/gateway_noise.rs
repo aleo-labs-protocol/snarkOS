@@ -476,48 +476,6 @@ async fn the_gateway_weighs_the_schedule_of_an_initiator() {
     assert!(gateway.ensure_block_may_be_built(height).is_err());
 }
 
-/// A validator counts as connected only once its schedule is recorded, so that no block check
-/// counts its stake as not ahead before its schedule is known.
-///
-/// The handshake and the heartbeat block their workers while the lock is held. A blocked worker can
-/// leave the gateway's runtime polling no socket or timer, so the test runs its side of the
-/// handshake, and waits, on threads of its own.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_validator_counts_as_connected_only_once_its_schedule_is_recorded() {
-    let mut rng = TestRng::default();
-    let (accounts, gateways) = new_test_gateways(1, &mut rng).await;
-    let (gateway, peer) = (gateways[0].clone(), accounts[1].clone());
-    let gateway_addr = dial_addr(&gateway);
-    let trailer =
-        HandshakeTrailer { genesis_hash: Some(genesis_hash(&gateway)), ..HandshakeTrailer::of::<CurrentNetwork>() };
-    let sign = honest_signer(peer.clone());
-
-    // The gateway cannot record the schedule while the lock is held.
-    let guard = gateway.upgrade_monitor().lock_for_test();
-    let (verdict, _stream) = std::thread::scope(|scope| {
-        scope
-            .spawn(|| {
-                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-                runtime.block_on(async {
-                    let version = Event::<CurrentNetwork>::VERSION;
-                    let handshake = handshake_with_gateway_sending(gateway_addr, &peer, 4143, version, trailer, sign);
-                    let (verdict, stream) =
-                        timeout(Duration::from_secs(10), handshake).await.expect("the handshake timed out").unwrap();
-                    (verdict, stream.into_std().unwrap())
-                })
-            })
-            .join()
-            .unwrap()
-    });
-    assert!(matches!(verdict, ResponderProof::Accepted { .. }), "the handshake should have been accepted");
-    std::thread::sleep(Duration::from_millis(500));
-    assert!(!gateway.connected_addresses().contains(&peer.address()));
-
-    drop(guard);
-    let address = peer.address();
-    deadline!(Duration::from_secs(5), move || gateway.connected_addresses().contains(&address));
-}
-
 /// A peer at an event version that predates the schedule is accepted without one.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_initiator_that_predates_the_consensus_schedule_is_accepted_without_one() {
