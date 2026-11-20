@@ -19,6 +19,7 @@ edition = "2024"
 [features]
 locktick = [ "dep:locktick", "snarkos-node-tcp/locktick" ]
 metrics = [ ]
+# Gate code with `cfg(any(test, feature = "test"))`: the unit tests build without this feature.
 test = [ ]
 
 [dependencies.anyhow]
@@ -67,10 +68,6 @@ features = [ "io-util", "net" ]
 [dependencies.tokio-util]
 workspace = true
 features = [ "codec" ]
-
-[dev-dependencies.snarkos-node-network]
-path = "."
-features = [ "test" ]
 
 [dev-dependencies.snarkvm]
 workspace = true

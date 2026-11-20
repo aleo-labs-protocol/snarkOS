@@ -6,7 +6,7 @@ on:
     paths-ignore:
       - '**.md'
   push:
-    branches: [staging, canary, testnet, mainnet]
+    branches: [staging, 'release/**']
   workflow_dispatch:
 
 permissions:
@@ -254,10 +254,12 @@ jobs:
             runs: |
               nextest run -p snarkos-node-bft --features metrics
               nextest run -p snarkos-node-bft --features metrics --example simple_node --no-tests=fail
-          - name: router
-            runs: nextest run -p snarkos-node-router
-          - name: sync
-            runs: nextest run -p snarkos-node-sync
+          # One line for both would turn on `test` in `snarkos-node-sync` for
+          # its own tests. The two lines build the same snarkvm crates.
+          - name: router-sync
+            runs: |
+              nextest run -p snarkos-node-router
+              nextest run -p snarkos-node-sync
           # Builds RocksDB, whose bindings need libclang, which hosted runners lack.
           - name: ledger-distribution
             runs: nextest run -p snarkos-ledger-distribution
@@ -353,12 +355,17 @@ jobs:
         if: always()
         run: *stop-nodes
 
-  # Slower devnets. On every push to a release branch, and on demand.
+  # Slower devnets. On every push, on pull requests into a release branch, and
+  # on demand.
   devnet-merge:
     needs: [start-cpu-runners, build-snarkos]
     runs-on: [self-hosted, linux, x64, cpu]
     timeout-minutes: ${{ matrix.timeout }}
-    if: github.event_name != 'pull_request'
+    if: >-
+      !cancelled() && needs.build-snarkos.result == 'success' &&
+      contains(fromJSON('["success", "skipped"]'), needs.start-cpu-runners.result) &&
+      github.repository == 'aleo-labs-protocol/snarkOS' &&
+      (github.event_name != 'pull_request' || startsWith(github.base_ref, 'release/'))
     strategy:
       fail-fast: false
       matrix:
@@ -386,18 +393,19 @@ jobs:
     name: devnet (${{ matrix.name }})
     steps: *devnet-steps
 
-  # Devnets for releases only. On every push to `canary`, `testnet` or
-  # `mainnet`, and on demand.
+  # Devnets for releases only. On every push to a release branch, on pull
+  # requests into one, and on demand.
   devnet-release:
     needs: [start-cpu-runners, build-snarkos]
     runs-on: [self-hosted, linux, x64, cpu]
     timeout-minutes: ${{ matrix.timeout }}
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' &&
-       (github.ref == 'refs/heads/canary' ||
-        github.ref == 'refs/heads/testnet' ||
-        github.ref == 'refs/heads/mainnet'))
+      !cancelled() && needs.build-snarkos.result == 'success' &&
+      contains(fromJSON('["success", "skipped"]'), needs.start-cpu-runners.result) &&
+      github.repository == 'aleo-labs-protocol/snarkOS' &&
+      (github.event_name == 'workflow_dispatch' ||
+      startsWith(github.ref, 'refs/heads/release/') ||
+      startsWith(github.base_ref, 'release/'))
     strategy:
       fail-fast: false
       matrix:
@@ -442,7 +450,7 @@ jobs:
   # 10 GB and evict the entries the hosted test jobs restore from.
   windows:
     runs-on: windows-latest
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' || startsWith(github.base_ref, 'release/')
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     strategy:
@@ -479,14 +487,19 @@ jobs:
       - run: cargo hack clippy --workspace --each-feature --exclude-features cuda --locked -- -D warnings
 
   # The one job to require on protected branches. A skipped job counts as passed
-  # for a required check, so each job a pull request runs must succeed here.
+  # for a required check, so every job must succeed here. The exception is a
+  # merge or release job skipped outside a release branch, where it is not meant
+  # to run.
   ci-ok:
     if: always()
-    needs: [check-shared-refs, fmt, deny, shellcheck, source-checks, merge-fixup, machete, release-graph, lint, test-hosted, test, build-snarkos, devnet]
+    needs: [check-shared-refs, fmt, deny, shellcheck, source-checks, merge-fixup, machete, release-graph, lint, test-hosted, test, build-snarkos, devnet, devnet-merge, devnet-release, windows]
     runs-on: ubuntu-latest
     steps:
       - env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
+          NEEDS: ${{ toJSON(needs) }}
+          RELEASE: >-
+            ${{ github.event_name == 'workflow_dispatch' ||
+            startsWith(github.ref, 'refs/heads/release/') ||
+            startsWith(github.base_ref, 'release/') }}
         run: |
-          echo "$RESULTS"
-          for r in $RESULTS; do [ "$r" = success ] || exit 1; done
+          jq -e --argjson release "$RELEASE" 'to_entries | map(select(.value.result != "success" and ($release or .value.result != "skipped" or (.key | IN("devnet-merge", "devnet-release", "windows") | not)))) | if length == 0 then true else (map("\(.key): \(.value.result)") | join(", ") | halt_error) end' <<< "$NEEDS"
