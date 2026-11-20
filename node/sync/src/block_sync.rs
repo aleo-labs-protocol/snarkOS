@@ -505,9 +505,10 @@ impl<N: Network> BlockSync<N> {
     }
 
     /// Returns up to `max_num_sync_ips` of `sync_peers`, randomly sampled, that are still connected,
-    /// are not `at_limit`, and serve `heights`, or `None` if none do or fewer than
-    /// min(`max_num_sync_ips`, connected and not `at_limit`) do. Call it while holding
-    /// `prepare_requests_lock`.
+    /// are not `at_limit`, and serve `heights`, or `None` if fewer than
+    /// min(`max_num_sync_ips`, `sync_peers.len()`) do. A chunk that needs cross-checking thus waits
+    /// for peers at the limit, and is prepared again without a peer that disconnected or stopped
+    /// serving it, rather than going to fewer peers. Call it while holding `prepare_requests_lock`.
     fn select_sync_ips(
         &self,
         sync_peers: &IndexMap<SocketAddr, BlockLocators<N>>,
@@ -516,17 +517,14 @@ impl<N: Network> BlockSync<N> {
         at_limit: impl Fn(&SocketAddr) -> bool,
     ) -> Option<IndexSet<SocketAddr>> {
         let locators = self.locators.read();
-        let available = |ip: &&SocketAddr| locators.contains_key(*ip) && !at_limit(ip);
-        let num_available = sync_peers.keys().filter(available).count();
         let sync_ips: IndexSet<_> = sync_peers
             .keys()
-            .filter(available)
-            .filter(|ip| locators[*ip].can_serve(heights.clone()))
+            .filter(|ip| !at_limit(ip) && locators.get(*ip).is_some_and(|peer| peer.can_serve(heights.clone())))
             .copied()
             .sample(&mut rand::rng(), max_num_sync_ips)
             .into_iter()
             .collect();
-        (sync_ips.len() >= max_num_sync_ips.min(num_available).max(1)).then_some(sync_ips)
+        (sync_ips.len() >= max_num_sync_ips.min(sync_peers.len()).max(1)).then_some(sync_ips)
     }
 
     /// Removes the `inserted` requests of a chunk that will not be sent, and queues the chunk's
@@ -1513,9 +1511,12 @@ impl<N: Network> BlockSync<N> {
             return;
         }
         since.warned_at = Some(now);
+        let hint = match self.connection_mode {
+            ConnectionMode::Router => "Connect to a peer that serves it with `--peers`, or restore a ledger snapshot.",
+            ConnectionMode::Gateway => "Restore a ledger snapshot, or sync from the CDN.",
+        };
         warn!(
-            "Block sync cannot progress: the peers ahead of this node no longer serve block {}. \
-            Connect to a peer that serves it with `--peers`, or restore a ledger snapshot.",
+            "Block sync cannot progress: the peers ahead of this node no longer serve block {}. {hint}",
             since.height.saturating_add(1)
         );
     }
@@ -3224,6 +3225,8 @@ mod tests {
         assert!(max_num_sync_ips > 1);
         let sync_ips = sync.select_sync_ips(&sync_peers, 1_001..1_004, max_num_sync_ips, |_| false).unwrap();
         assert_eq!(sync_ips.len(), 2);
+        // The chunk does not go to peer A alone while peer B is at its limit.
+        assert!(sync.select_sync_ips(&sync_peers, 1_001..1_004, max_num_sync_ips, |ip| *ip == peer_b).is_none());
 
         // Above peer A's cap, peer B alone serves the chunk.
         insert_requests_to(&sync, peer_b, 1_001..1_004);
@@ -3610,7 +3613,8 @@ mod tests {
 
     /// Tests that a chunk is prepared again instead of waiting for the limit when a peer it was
     /// prepared for no longer serves it: peer A is capped, B serves the chunk, and C no longer does.
-    /// A capped peer that has disconnected does not defer a chunk either.
+    /// The chunk prepared again waits for A rather than going to B alone. A capped peer that has
+    /// disconnected does not defer a chunk.
     #[tokio::test]
     async fn test_block_request_limit_defers_only_for_capped_servers() {
         let sync = sample_sync_at_height(1_000);
@@ -3631,15 +3635,85 @@ mod tests {
         assert_eq!(sync.send_block_requests(&service, &sync_peers, &chunk, limit).await, ChunkOutcome::NotSent);
         tokio::time::timeout(Duration::from_secs(1), sync.wait_for_peer_update()).await.unwrap();
         let (reissued, reissue_peers) = sync.prepare_block_requests().into_iter().next().unwrap();
+        assert_eq!(reissue_peers.len(), 2);
+        let slot = *sync.sent_block_requests.lock()[&peer_a].front().unwrap() + limit.unwrap().1;
+        let outcome = sync.send_block_requests(&service, &reissue_peers, &reissued, limit).await;
+        assert_eq!(outcome, ChunkOutcome::Deferred(slot));
+        sync.sent_block_requests.lock().remove(&peer_a);
+        let (reissued, reissue_peers) = sync.prepare_block_requests().into_iter().next().unwrap();
         assert_eq!(sync.send_block_requests(&service, &reissue_peers, &reissued, limit).await, ChunkOutcome::Sent);
-        assert_eq!(*service.sent.lock().unwrap(), vec![(peer_b, 1_001, 1_006)]);
+        let mut sent = service.sent.lock().unwrap().clone();
+        sent.sort();
+        assert_eq!(sent, vec![(peer_a, 1_001, 1_006), (peer_b, 1_001, 1_006)]);
 
         // Peer A alone serves the next chunk, is capped, and disconnects.
+        sync.sent_block_requests.lock().insert(peer_a, vec![Instant::now(); max_requests_of(&service)].into());
         let only_a: IndexMap<_, _> = [(peer_a, sync_peers[&peer_a].clone())].into_iter().collect();
         sync.remove_peer(&peer_a);
         let _ = tokio::time::timeout(Duration::ZERO, sync.wait_for_peer_update()).await;
         let outcome = sync.send_block_requests(&service, &only_a, &requests[5..10], limit).await;
         assert_eq!(outcome, ChunkOutcome::NotSent);
         tokio::time::timeout(Duration::from_secs(1), sync.wait_for_peer_update()).await.unwrap();
+    }
+
+    /// Tests that a chunk that needs cross-checking waits for the peers at their block request
+    /// limit instead of going to fewer peers, that the request loop is told when the first of them
+    /// frees up, and that the chunk then goes to all of them.
+    #[tokio::test]
+    async fn test_cross_checked_chunk_waits_for_capped_peers() {
+        let sync = sample_sync_at_height(1_000);
+        add_peers(&sync, 1, 3, 100_000, 0);
+        // No peer has a hash for these heights, so each chunk goes to all three.
+        let (requests, sync_peers) = sync.prepare_block_requests().pop().unwrap();
+        let (_, (_, _, max_num_sync_ips)) = requests[0];
+        assert_eq!((sync_peers.len(), max_num_sync_ips), (3, 3));
+
+        let service = RecordingService::default();
+        let at = Instant::now();
+        for id in 1..=2 {
+            sync.sent_block_requests.lock().insert(sample_peer_ip(id), vec![at; max_requests_of(&service)].into());
+        }
+        let next_request_slot = sync.try_issuing_block_requests(&service).await;
+        assert_eq!(next_request_slot, Some(at + service.block_request_limit.unwrap().1));
+        assert!(service.sent.lock().unwrap().is_empty());
+        assert!((1_001..1_006).all(|height| sync.failed_requests.lock().contains_key(&height)));
+
+        sync.sent_block_requests.lock().clear();
+        sync.try_issuing_block_requests(&service).await;
+        let sent = service.sent.lock().unwrap().clone();
+        assert!((1..=3).all(|id| sent.contains(&(sample_peer_ip(id), 1_001, 1_006))));
+    }
+
+    /// Tests that a chunk for one peer goes to any free one, and that a chunk for several does not
+    /// go to fewer while some are at their block request limit or have disconnected.
+    #[test]
+    fn test_select_sync_ips_keeps_redundancy() {
+        let sync = sample_sync_at_height(1_000);
+        add_peers(&sync, 1, 3, 100_000, 0);
+        let sync_peers: IndexMap<_, _> =
+            (1..=3).map(|id| (sample_peer_ip(id), sample_block_locators(100_000))).collect();
+        let heights = 1_001..1_006;
+        let capped = |ip: &SocketAddr| *ip != sample_peer_ip(3);
+        assert_eq!(sync.select_sync_ips(&sync_peers, heights.clone(), 1, capped), Some(indexset![sample_peer_ip(3)]));
+        assert!(sync.select_sync_ips(&sync_peers, heights.clone(), 3, capped).is_none());
+        assert_eq!(sync.select_sync_ips(&sync_peers, heights.clone(), 3, |_| false).unwrap().len(), 3);
+
+        sync.remove_peer(&sample_peer_ip(1));
+        assert!(sync.select_sync_ips(&sync_peers, heights.clone(), 3, |_| false).is_none());
+        assert!(sync.select_sync_ips(&sync_peers, heights, 1, |_| false).is_some());
+    }
+
+    /// Tests that peers whose floors are above a chunk do not hold it back: it goes to the one peer
+    /// that serves it.
+    #[tokio::test]
+    async fn test_floors_do_not_hold_back_a_chunk() {
+        let sync = sample_sync_at_height(1_000);
+        add_peers(&sync, 1, 2, 100_000, 1_050);
+        add_peers(&sync, 3, 1, 100_000, 0);
+        let service = RecordingService::default();
+        sync.try_issuing_block_requests(&service).await;
+        let sent = service.sent.lock().unwrap().clone();
+        assert!(sent.contains(&(sample_peer_ip(3), 1_001, 1_006)));
+        assert!(sent.iter().all(|(peer_ip, _, _)| *peer_ip == sample_peer_ip(3)));
     }
 }

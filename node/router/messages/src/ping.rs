@@ -37,11 +37,11 @@ pub const MAX_PING_LOCATOR_HEIGHT: u32 = 500_000_000;
 
 /// The maximum size of a `Ping` frame, kept next to `write_le` below since that is what actually
 /// defines the fixed part of this layout (4 + 1 + 1 bytes, plus the message ID that
-/// `Message::write_le` prepends). Unlike every other message type, `Ping` has no fixed shape:
-/// `block_locators` grows with the height of the chain, carrying up to `NUM_RECENT_BLOCKS` recent
-/// entries plus one checkpoint per `CHECKPOINT_INTERVAL` blocks (see
-/// `snarkos_node_sync_locators::block_locators`), each a `(u32, BlockHash)` pair - 4 bytes plus a
-/// 32-byte field element.
+/// `Message::write_le` prepends and, with marker 2, a trailing 4-byte `oldest_retained`). Unlike
+/// every other message type, `Ping` has no fixed shape: `block_locators` grows with the height of
+/// the chain, carrying up to `NUM_RECENT_BLOCKS` recent entries plus one checkpoint per
+/// `CHECKPOINT_INTERVAL` blocks (see `snarkos_node_sync_locators::block_locators`), each a
+/// `(u32, BlockHash)` pair - 4 bytes plus a 32-byte field element.
 ///
 /// This is a policy cap rather than the wire format's own ceiling: the format can express
 /// `MAX_CHECKPOINTS` checkpoints, a chain of 4.29 billion blocks and ~14.75 MiB, but locator size
