@@ -149,8 +149,10 @@ impl<N: Network> From<DisconnectReason> for Message<N> {
 
 impl<N: Network> Message<N> {
     /// The version of the network protocol; this is incremented for breaking changes between migration versions.
-    // Note. This should be incremented for each new `ConsensusVersion` that is added.
-    pub const VERSIONS: [(ConsensusVersion, u32); 17] = [
+    ///
+    /// Each new `ConsensusVersion` adds an entry. Minor releases add entries, and snarkOS does not treat this
+    /// as a breaking change.
+    pub const VERSIONS: &'static [(ConsensusVersion, u32)] = &[
         (ConsensusVersion::V5, 17),
         (ConsensusVersion::V7, 18),
         (ConsensusVersion::V8, 19),
@@ -391,7 +393,7 @@ mod tests {
             Message::<N>::VERSIONS.iter().find(|(_, version)| *version == latest_message_version).unwrap();
         assert_ne!(N::CONSENSUS_HEIGHT(*consensus_version).unwrap(), u32::MAX);
 
-        for (consensus_version, message_version) in Message::<N>::VERSIONS {
+        for &(consensus_version, message_version) in Message::<N>::VERSIONS {
             if message_version > latest_message_version {
                 assert_eq!(N::CONSENSUS_HEIGHT(consensus_version).unwrap(), u32::MAX);
             }
