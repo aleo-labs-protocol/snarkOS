@@ -20,16 +20,13 @@
 //! once and instantiated per service rather than restated in each one. Behavior specific to a single
 //! service - the persistent one's cache, the in-memory one's locking - stays in its own module.
 
-use crate::StorageService;
-#[cfg(feature = "memory")]
-use crate::memory::BFTMemoryService;
-#[cfg(feature = "persistent")]
-use crate::persistent::BFTPersistentStorage;
-#[cfg(feature = "persistent")]
-use snarkvm::ledger::store::StorageMode;
+use crate::{StorageService, memory::BFTMemoryService, persistent::BFTPersistentStorage};
 use snarkvm::{
     console::network::MainnetV0,
-    ledger::narwhal::{BatchHeader, Data, Transmission, TransmissionID},
+    ledger::{
+        narwhal::{BatchHeader, Data, Transmission, TransmissionID},
+        store::StorageMode,
+    },
     prelude::{Field, Network, PrivateKey, Rng, TestRng, Uniform},
 };
 
@@ -548,7 +545,5 @@ macro_rules! storage_service_tests {
     };
 }
 
-#[cfg(feature = "memory")]
 storage_service_tests!(memory, BFTMemoryService::<CurrentNetwork>::new());
-#[cfg(feature = "persistent")]
 storage_service_tests!(persistent, BFTPersistentStorage::<CurrentNetwork>::open(StorageMode::new_test(None)).unwrap());

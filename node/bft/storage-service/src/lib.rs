@@ -16,19 +16,17 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::type_complexity)]
 
-#[cfg(feature = "memory")]
+#[cfg(any(test, feature = "test-helpers"))]
 pub mod memory;
-#[cfg(feature = "memory")]
+#[cfg(any(test, feature = "test-helpers"))]
 pub use memory::*;
 
-#[cfg(feature = "persistent")]
 pub mod persistent;
-#[cfg(feature = "persistent")]
 pub use persistent::*;
 
 pub mod traits;
 pub use traits::*;
 
 // The expectations shared by every service, which need every service to assert them against.
-#[cfg(all(test, any(feature = "memory", feature = "persistent")))]
+#[cfg(test)]
 mod tests;
