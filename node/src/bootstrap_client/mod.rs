@@ -158,7 +158,7 @@ impl<N: Network> BootstrapClient<N> {
     /// we are capable of obtaining it from the network.
     pub async fn get_or_update_committee(&self) -> anyhow::Result<Option<HashSet<Address<N>>>> {
         // Development testing may include a list of committee Aleo addresses loaded from the environment.
-        if cfg!(feature = "test") || self.is_dev() {
+        if cfg!(feature = "test-helpers") || self.is_dev() {
             match std::env::var("TEST_COMMITTEE_ADDRS") {
                 Ok(aleo_addrs) => {
                     let dev_committee =

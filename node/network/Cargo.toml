@@ -19,7 +19,7 @@ edition = "2024"
 [features]
 locktick = [ "dep:locktick", "snarkos-node-tcp/locktick" ]
 metrics = [ ]
-test = [ ]
+test-helpers = [ ]
 
 [dependencies.anyhow]
 workspace = true
@@ -70,7 +70,7 @@ features = [ "codec" ]
 
 [dev-dependencies.snarkos-node-network]
 path = "."
-features = [ "test" ]
+features = [ "test-helpers" ]
 
 [dev-dependencies.snarkvm]
 workspace = true

@@ -18,7 +18,7 @@ edition = "2024"
 
 [features]
 default = [ ]
-test = [ ]
+test-helpers = [ ]
 
 [dependencies.anyhow]
 workspace = true

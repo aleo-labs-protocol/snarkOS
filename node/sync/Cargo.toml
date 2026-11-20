@@ -26,7 +26,7 @@ locktick = [
 serial = ["snarkos-node-bft-ledger-service/serial"]
 metrics = [ "dep:snarkos-node-metrics", "snarkos-node-network/metrics" ]
 cuda = [ "snarkvm/cuda", "snarkos-node-bft-ledger-service/cuda", "snarkos-node-router/cuda" ]
-test = [ "snarkos-node-sync-locators/test" ]
+test-helpers = [ "snarkos-node-sync-locators/test-helpers" ]
 
 [dependencies.anyhow]
 workspace = true
@@ -90,11 +90,11 @@ workspace = true
 
 [dev-dependencies.snarkos-node-bft-ledger-service]
 workspace = true
-features = [ "test" ]
+features = [ "test-helpers" ]
 
 [dev-dependencies.snarkos-node-sync-locators]
 workspace = true
-features = [ "test" ]
+features = [ "test-helpers" ]
 
 [dev-dependencies.snarkos-node-tcp]
 workspace = true

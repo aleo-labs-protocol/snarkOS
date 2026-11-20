@@ -98,7 +98,7 @@ impl FromBytes for PeerResponse {
     }
 }
 
-#[cfg(any(test, feature = "fuzz-helpers"))]
+#[cfg(any(test, feature = "test-helpers"))]
 pub mod prop_tests {
     #![cfg_attr(not(test), allow(unused_imports))]
     use crate::PeerResponse;

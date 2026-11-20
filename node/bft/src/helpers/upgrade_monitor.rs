@@ -473,7 +473,7 @@ impl<N: Network> UpgradeMonitor<N> {
 
     /// Holds the lock on the evidence until the returned guard is dropped, which pauses a handshake
     /// where it records the peer's schedule.
-    #[cfg(feature = "test")]
+    #[cfg(feature = "test-helpers")]
     pub fn lock_for_test(&self) -> impl Sized + '_ {
         self.state.lock()
     }

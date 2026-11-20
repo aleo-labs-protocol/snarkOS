@@ -313,7 +313,7 @@ impl<N: Network> StorageService<N> for BFTPersistentStorage<N> {
     }
 
     /// Returns a HashMap over the `(transmission ID, (transmission, certificate IDs))` entries.
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(any(test, feature = "test-helpers"))]
     fn as_hashmap(&self) -> HashMap<TransmissionID<N>, (Transmission<N>, IndexSet<Field<N>>)> {
         self.transmissions.iter_confirmed().map(|(k, v)| (k.into_owned(), (*v).clone())).collect()
     }
