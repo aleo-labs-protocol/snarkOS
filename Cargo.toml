@@ -277,10 +277,8 @@ name = "snarkos"
 path = "snarkos/main.rs"
 
 [features]
-default = [ "snarkos-cli/metrics", "dep:snarkos-node-metrics", "snarkos-node/metrics", "snarkos-node-cdn/metrics" ]
-# Deprecated alias for the metrics feature, which now carries the validator telemetry.
-# Retained so that build commands naming this feature keep resolving.
-telemetry = [ "snarkos-node/metrics" ]
+default = [ "metrics" ]
+metrics = [ "snarkos-cli/metrics", "dep:snarkos-node-metrics", "snarkos-node/metrics", "snarkos-node-cdn/metrics" ]
 cuda = [
   "snarkos-account/cuda",
   "snarkos-cli/cuda",
