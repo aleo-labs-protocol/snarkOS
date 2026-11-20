@@ -480,19 +480,37 @@ async fn the_gateway_weighs_the_schedule_of_an_initiator() {
 /// counts its stake as not ahead before its schedule is known.
 ///
 /// The handshake and the heartbeat block their workers while the lock is held, so the test keeps
-/// workers to spare.
+/// workers to spare. A blocked worker can also leave the gateway's runtime polling no socket or
+/// timer, so nothing the test waits for while it holds the lock runs on that runtime.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_validator_counts_as_connected_only_once_its_schedule_is_recorded() {
     let mut rng = TestRng::default();
     let (accounts, gateways) = new_test_gateways(1, &mut rng).await;
     let (gateway, peer) = (gateways[0].clone(), accounts[1].clone());
+    let gateway_addr = dial_addr(&gateway);
+    let trailer =
+        HandshakeTrailer { genesis_hash: Some(genesis_hash(&gateway)), ..HandshakeTrailer::of::<CurrentNetwork>() };
+    let sign = honest_signer(peer.clone());
 
     // The gateway cannot record the schedule while the lock is held.
     let guard = gateway.upgrade_monitor().lock_for_test();
-    let sign = honest_signer(peer.clone());
-    let (verdict, _stream) = handshake_with_gateway(&gateway, &peer, 4143, sign).await.unwrap();
+    let (verdict, _stream) = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                runtime.block_on(async {
+                    let version = Event::<CurrentNetwork>::VERSION;
+                    let handshake = handshake_with_gateway_sending(gateway_addr, &peer, 4143, version, trailer, sign);
+                    let (verdict, stream) =
+                        timeout(Duration::from_secs(10), handshake).await.expect("the handshake timed out").unwrap();
+                    (verdict, stream.into_std().unwrap())
+                })
+            })
+            .join()
+            .unwrap()
+    });
     assert!(matches!(verdict, ResponderProof::Accepted { .. }), "the handshake should have been accepted");
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    std::thread::sleep(Duration::from_millis(500));
     assert!(!gateway.connected_addresses().contains(&peer.address()));
 
     drop(guard);
