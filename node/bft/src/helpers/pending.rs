@@ -285,11 +285,19 @@ mod tests {
     use snarkvm::{ledger::narwhal::TransmissionID, prelude::TestRng};
 
     use rand::RngExt;
-    use std::{thread, time::Duration};
 
     type CurrentNetwork = snarkvm::prelude::MainnetV0;
 
     const ITERATIONS: usize = 100;
+
+    impl<T: Copy + Clone + PartialEq + Eq + Hash, V: Clone> Pending<T, V> {
+        /// Moves the timestamp of every callback `secs` seconds into the past.
+        pub(crate) fn backdate_callbacks(&self, secs: i64) {
+            for (_, timestamp, _) in self.pending.write().values_mut().flat_map(|peers| peers.values_mut()).flatten() {
+                *timestamp -= secs;
+            }
+        }
+    }
 
     #[test]
     fn test_pending() {
@@ -412,22 +420,22 @@ mod tests {
         assert!(pending.insert(solution_id_1, addr_1, Some((callback_sender_1, true))));
         assert!(pending.insert(solution_id_1, addr_2, Some((callback_sender_2, true))));
 
-        // Sleep for a few seconds.
-        thread::sleep(Duration::from_secs(CALLBACK_EXPIRATION_IN_SECS as u64 - 1));
+        // Age the callbacks by `CALLBACK_EXPIRATION_IN_SECS - 1` seconds.
+        pending.backdate_callbacks(CALLBACK_EXPIRATION_IN_SECS - 1);
 
         assert!(pending.insert(solution_id_1, addr_3, Some((callback_sender_3, true))));
 
         // Check that the number of callbacks has not changed.
         assert_eq!(pending.num_callbacks(solution_id_1), 3);
 
-        // Wait for 2 seconds.
-        thread::sleep(Duration::from_secs(2));
+        // Age the callbacks by 2 seconds.
+        pending.backdate_callbacks(2);
 
         // Ensure that the expired callbacks have been removed.
         assert_eq!(pending.num_callbacks(solution_id_1), 1);
 
-        // Wait for ` CALLBACK_EXPIRATION_IN_SECS` seconds.
-        thread::sleep(Duration::from_secs(CALLBACK_EXPIRATION_IN_SECS as u64));
+        // Age the callbacks by `CALLBACK_EXPIRATION_IN_SECS` seconds.
+        pending.backdate_callbacks(CALLBACK_EXPIRATION_IN_SECS);
 
         // Ensure that the expired callbacks have been removed.
         assert_eq!(pending.num_callbacks(solution_id_1), 0);
@@ -508,8 +516,8 @@ mod tests {
         assert_eq!(pending.num_callbacks(solution_id_2), 1);
         assert_eq!(pending.len(), 2);
 
-        // Wait for ` CALLBACK_EXPIRATION_IN_SECS + 1` seconds.
-        thread::sleep(Duration::from_secs(CALLBACK_EXPIRATION_IN_SECS as u64 + 1));
+        // Age the callbacks by `CALLBACK_EXPIRATION_IN_SECS + 1` seconds.
+        pending.backdate_callbacks(CALLBACK_EXPIRATION_IN_SECS + 1);
 
         // Expire the pending callbacks.
         pending.clear_expired_callbacks();
