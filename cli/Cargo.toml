@@ -175,10 +175,5 @@ features = [ "derive" ]
 workspace = true
 features = [ "test-helpers" ]
 
-[target."cfg(target_family = \"unix\")".dependencies.nix]
-version = "0.31"
-default-features = false
-features = [ "resource" ]
-
 [target.'cfg(unix)'.dependencies]
 rlimit = "0.11"
