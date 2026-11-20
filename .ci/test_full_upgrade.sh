@@ -265,12 +265,13 @@ function derive_consensus_env_from_version() {
     # Same consensus horizon → same pattern
     heights_current="$(build_consensus_heights "$lcv_current")"
   else
-    # The release validators must not reach the stop height of the new version before every
-    # validator is upgraded. Each validator step takes at most a window of WAIT_BETWEEN_UPGRADES
-    # seconds; the restart of the release validator counts twice, as it also waits up to 60 s for
-    # a heartbeat of validator 0. The last 20 blocks cover the restarts themselves.
-    local validator_steps=$(( total_validators + 2 ))
-    local gap=$(( REQUIRED_UPGRADE_SAFETY_MARGIN + validator_steps * WAIT_BETWEEN_UPGRADES / SECONDS_PER_BLOCK + 20 ))
+    # The new version activates after every upgrade, and the release validators must not reach
+    # its stop height before they are upgraded. The gap counts one rejoin window of
+    # WAIT_BETWEEN_UPGRADES seconds per restart, one more for the wait of up to 60 s for a
+    # heartbeat of validator 0 before the release validator restarts, and 20 blocks for the stops
+    # and restarts themselves.
+    local windows=$(( total_validators + total_clients + 3 ))
+    local gap=$(( REQUIRED_UPGRADE_SAFETY_MARGIN + windows * WAIT_BETWEEN_UPGRADES / SECONDS_PER_BLOCK + 20 ))
     heights_current="$(build_consensus_heights_with_big_last "$lcv_current" "$gap")"
     new_version_height="${heights_current##*,}"
   fi
@@ -282,7 +283,7 @@ function derive_consensus_env_from_version() {
   export CONSENSUS_VERSION_HEIGHTS_RELEASE="$heights_release"
   export CONSENSUS_VERSION_HEIGHTS_CURRENT="$heights_current"
   export EXPECTED_MAX_CONSENSUS_VERSION="$lcv_current"
-  # Empty unless the PR binary has a newer consensus version.
+  # Empty when both binaries have the same latest consensus version.
   export NEW_VERSION_HEIGHT="$new_version_height"
 
   log "Derived EXPECTED_MAX_CONSENSUS_VERSION=${EXPECTED_MAX_CONSENSUS_VERSION}"
@@ -591,7 +592,7 @@ if [ -n "$NEW_VERSION_HEIGHT" ]; then
   if ! (is_integer "$current_height"); then
     current_height=0
   fi
-  max_wait=$(( (target_height - current_height) * 2 * SECONDS_PER_BLOCK + 120 ))
+  max_wait=$(( (target_height > current_height ? target_height - current_height : 0) * 2 * SECONDS_PER_BLOCK + 120 ))
   log "Waiting up to ${max_wait}s for every node to reach height ${target_height}, past the activation of consensus version ${EXPECTED_MAX_CONSENSUS_VERSION} at height ${NEW_VERSION_HEIGHT}..."
   if ! wait_for_heights 0 "$total_nodes" "$target_height" "$network_name" "$max_wait" 5; then
     log "❌ Test failed! Not every node reached height ${target_height} within ${max_wait}s."
@@ -637,7 +638,13 @@ done
 
 log "Upgrade test passed: all nodes upgraded to PR snarkos, the network kept advancing, and every node's consensus version matches the configured schedule."
 
-if check_logs "$log_dir" "$total_validators" "$total_clients" "$MAX_VALIDATOR_LOG_SIZE_BYTES" "$MAX_CLIENT_LOG_SIZE_BYTES"; then
+# A release validator logs this ERROR once two upgraded validators schedule the new version.
+expected_errors=""
+if [ -n "$NEW_VERSION_HEIGHT" ]; then
+  expected_errors="This node stops before building block [0-9]+, [0-9]+ blocks before that height; upgrade snarkOS before then"
+fi
+
+if check_logs "$log_dir" "$total_validators" "$total_clients" "$MAX_VALIDATOR_LOG_SIZE_BYTES" "$MAX_CLIENT_LOG_SIZE_BYTES" "" "$expected_errors"; then
   exit 0
 else
   exit 1
