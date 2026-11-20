@@ -23,9 +23,11 @@ use snarkos_account::Account;
 use snarkos_node::{
     BootstrapClient,
     bft::events::{
+        CertificateRequest,
         ConsensusSchedule,
         DisconnectReason,
         Event,
+        EventCodec,
         HANDSHAKE_DOMAIN,
         HandshakeHint,
         HandshakeTrailer,
@@ -33,6 +35,7 @@ use snarkos_node::{
         PeerInfo,
         ResponderInfo,
         ResponderProof,
+        ValidatorsRequest,
     },
     network::{
         PeerPoolHandling,
@@ -42,13 +45,15 @@ use snarkos_node::{
 };
 use snarkvm::{
     ledger::narwhal::Data,
-    prelude::{FromBytes, MainnetV0 as CurrentNetwork, TestRng, ToBytes},
+    prelude::{Field, FromBytes, MainnetV0 as CurrentNetwork, TestRng, ToBytes},
 };
 
 use std::{net::SocketAddr, time::Duration};
 
 use deadline::deadline;
-use tokio::net::TcpStream;
+use futures_util::{SinkExt, TryStreamExt};
+use tokio::{net::TcpStream, time::timeout};
+use tokio_util::codec::Framed;
 
 /// Spawns a bootstrap client in development mode, so that its committee lookup stays local.
 async fn new_test_bootstrap_client() -> BootstrapClient<CurrentNetwork> {
@@ -127,6 +132,32 @@ async fn a_validator_completes_a_noise_handshake_with_a_bootstrap_client() {
     deadline!(Duration::from_secs(5), move || {
         client_.get_connected_peers().iter().any(|peer| peer.aleo_addr == address)
     });
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bootstrap_client_answers_a_validator_that_sends_other_events_first() {
+    let client = new_test_bootstrap_client().await;
+    let rng = &mut TestRng::default();
+    let validator = Account::<CurrentNetwork>::new(rng).unwrap();
+
+    let version = Event::<CurrentNetwork>::VERSION;
+    let Some((ResponderProof::Accepted { .. }, session)) = handshake_with(&client, &validator, version).await.unwrap()
+    else {
+        panic!("expected the handshake to be accepted");
+    };
+
+    let mut stream = session.into_inner();
+    let mut framed = Framed::new(&mut stream, EventCodec::<CurrentNetwork>::default());
+    // A CertificateRequest has the ID of the router's PeerRequest, so the bootstrap client must not
+    // read it as one.
+    framed.send(Event::CertificateRequest(CertificateRequest::new(Field::from_u64(1)))).await.unwrap();
+    framed.send(Event::ValidatorsRequest(ValidatorsRequest)).await.unwrap();
+
+    let answer = timeout(Duration::from_secs(5), framed.try_next())
+        .await
+        .expect("the bootstrap client did not answer in time")
+        .expect("the bootstrap client closed the connection instead of answering");
+    assert!(matches!(answer, Some(Event::ValidatorsResponse(_))), "{answer:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
