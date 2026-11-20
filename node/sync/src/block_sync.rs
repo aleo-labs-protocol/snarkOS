@@ -1879,8 +1879,12 @@ impl<N: Network> BlockSync<N> {
             .filter(|(_, _, peer_height)| *peer_height > current_height)
             .collect();
         // Leave out the peers at their block request limit while enough others are candidates.
+        // Capping never hides a hash conflict: candidates that disagree are all kept.
         let num_uncapped = candidates.iter().filter(|(peer_ip, _, _)| !capped.contains_key(*peer_ip)).count();
-        if num_uncapped >= REDUNDANCY_FACTOR.min(candidates.len()) {
+        if num_uncapped < candidates.len()
+            && num_uncapped >= REDUNDANCY_FACTOR.min(candidates.len())
+            && !locators_conflict_from(candidates.iter().map(|(_, peer, _)| &peer.locators), latest_ledger_height)
+        {
             candidates.retain(|(peer_ip, _, _)| !capped.contains_key(*peer_ip));
         }
         let candidate_locators: IndexMap<_, _> = candidates
@@ -2056,6 +2060,14 @@ fn sync_range(height: u32, others: &[(u32, u32)], threshold: usize) -> (u32, Vec
         }
     }
     (end, kept)
+}
+
+/// Returns `true` if two of `locators` give different hashes for a height at or above `height`.
+fn locators_conflict_from<'a, N: Network>(locators: impl Iterator<Item = &'a BlockLocators<N>>, height: u32) -> bool {
+    let mut hashes = HashMap::new();
+    locators
+        .flat_map(|locators| locators.recents.iter().chain(&locators.checkpoints))
+        .any(|(at, hash)| *at >= height && *hashes.entry(*at).or_insert(*hash) != *hash)
 }
 
 /// If any peer is detected to be dishonest in this function, it will not set the hash or previous hash,
@@ -3708,5 +3720,38 @@ mod tests {
         sync.try_issuing_block_requests(&service).await;
         assert!(service.sent.lock().unwrap().contains(&(sample_peer_ip(3), 1_001, 1_006)));
         assert_eq!(service.num_sent_to(sample_peer_ip(1)) + service.num_sent_to(sample_peer_ip(2)), 0);
+    }
+
+    /// Returns sample locators up to `tip` with a different hash at `forged`.
+    fn locators_forged_at(tip: u32, forged: u32) -> BlockLocators<CurrentNetwork> {
+        let mut locators = sample_block_locators(tip);
+        *locators.recents.get_mut(&forged).unwrap() = Field::<CurrentNetwork>::from_u32(u32::MAX).into();
+        locators
+    }
+
+    /// Tests that locators conflict only where two of them hash a height differently.
+    #[test]
+    fn test_locators_conflict_from() {
+        let (near, far, forged) =
+            (sample_block_locators(10_050), sample_block_locators(100_000), locators_forged_at(10_050, 9_990));
+        assert!(!locators_conflict_from([&near, &far].into_iter(), 0));
+        assert!(locators_conflict_from([&near, &far, &forged].into_iter(), 9_990));
+        assert!(!locators_conflict_from([&near, &forged].into_iter(), 9_991));
+    }
+
+    /// Tests that a capped peer whose locators conflict with another candidate's is kept, so that
+    /// the requests stop below the conflict as they would without the cap.
+    #[test]
+    fn test_capping_keeps_conflicting_peers() {
+        let sync = sample_sync_at_height(9_950);
+        add_peers(&sync, 1, 2, 100_000, 0);
+        add_peers(&sync, 3, 1, 10_050, 0);
+        let forged = sample_peer_ip(4);
+        sync.update_peer_locators(forged, &locators_forged_at(10_050, 9_990), Some(0)).unwrap();
+        let capped: HashMap<_, _> = [(forged, Instant::now())].into_iter().collect();
+
+        let (requests, sync_peers) = sync.prepare_block_requests_avoiding(&capped).pop().unwrap();
+        assert!(sync_peers.contains_key(&forged));
+        assert_eq!(heights_of(&requests), (9_951..9_990).collect::<Vec<_>>());
     }
 }
