@@ -306,7 +306,7 @@ for ((node_index = penultimate_index; node_index < total_validators; node_index+
   fi
 done
 
-if check_logs "$log_dir" "$total_validators" 0 "$MAX_VALIDATOR_LOG_SIZE_BYTES" "" "$expected_errors"; then
+if check_logs "$log_dir" "$total_validators" 0 "$MAX_VALIDATOR_LOG_SIZE_BYTES" "" "" "$expected_errors"; then
   exit 0
 else
   exit 1
