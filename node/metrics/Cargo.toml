@@ -23,7 +23,6 @@ locktick = [
   "snarkvm/locktick"
 ]
 metrics = [ "snarkvm/metrics" ]
-serial = [ "snarkvm/serial" ]
 
 [dependencies.locktick]
 workspace = true
