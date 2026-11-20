@@ -39,7 +39,7 @@ marked "release" only on the third. The other jobs run on every event.
 | `test (light)` | hosted | all | 90 | `snarkos-account`, `-utilities`, `-node-tcp`, `-node-sync-locators`, `-node-network` |
 | `test (cdn)` | hosted | all | 90 | `snarkos-node-cdn` |
 | `test (messages)` | hosted | all | 90 | `snarkos-node-bft-events`, `-node-router-messages`, `-node-bft-ledger-service` |
-| `test (services)` | `cpu` | all | 90 | `snarkos-node-consensus`, `-node-rest`, `-cli` |
+| `test (services)` | `cpu` | all | 90 | `snarkos-node-consensus`, `-cli`; then `-node-rest` |
 | `test (node)` | `cpu` | all | 90 | `snarkos-node` with `snarkos-node-bft-storage-service` (features `memory,persistent`) |
 | `test (bft)` | `cpu` | all | 90 | `snarkos-node-bft` with `metrics` |
 | `test (router-sync)` | `cpu` | all | 90 | `snarkos-node-router`; then `-node-sync` |
