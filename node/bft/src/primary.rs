@@ -51,7 +51,12 @@ use crate::{
 
 use snarkos_account::Account;
 use snarkos_node_bft_events::PrimaryPing;
-use snarkos_node_bft_ledger_service::{LedgerService, deserialize_transaction_strict};
+use snarkos_node_bft_ledger_service::{
+    LedgerService,
+    check_deployment_not_frozen,
+    deserialize_transaction_strict,
+    is_deployment,
+};
 #[cfg(test)]
 use snarkos_node_network::ConnectionMode;
 use snarkos_node_network::PeerPoolHandling;
@@ -698,6 +703,9 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
         // provided by one worker (FIFO) is no longer guaranteed with multiple workers.
         debug_assert_eq!(MAX_WORKERS, 1);
 
+        // Read the deployment freeze policy once for the proposal.
+        let deployment_freeze = self.ledger.deployment_freeze_policy();
+
         // Note: a drained transmission is held only in `transmissions` or the local variables below,
         // so an early return (e.g. `?`) in this loop drops every transmission drained so far.
         'outer: for worker in self.workers().iter() {
@@ -716,6 +724,18 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
                     // Reinsert the transmission into the worker.
                     worker.insert_front(id, transmission);
                     continue 'outer;
+                }
+
+                // Do not propose a deployment while deployments are frozen. It is dropped from the
+                // ready queue, before any other check and before its spend is computed (which would
+                // build its stack). Consensus forgets having seen it, so it can be sent again after the
+                // freeze.
+                if let Transmission::Transaction(transaction) = &transmission
+                    && is_deployment(transaction)
+                    && let Err(e) = check_deployment_not_frozen(deployment_freeze)
+                {
+                    trace!("Proposing - Skipping and discarding transaction '{}' - {e}", fmt_id(id));
+                    continue;
                 }
 
                 // Check if the ledger already contains the transmission.
@@ -2270,8 +2290,12 @@ mod tests {
     use snarkos_node_bft_storage_service::BFTMemoryService;
     use snarkos_node_sync::BlockSync;
     use snarkvm::{
-        ledger::committee::{Committee, MIN_VALIDATOR_STAKE},
+        ledger::{
+            committee::{Committee, MIN_VALIDATOR_STAKE},
+            test_helpers::sample_deployment_transaction,
+        },
         prelude::{Address, Signature},
+        synthesizer::process::deployment_freeze::FreezeWindow,
     };
 
     use bytes::Bytes;
@@ -2307,6 +2331,7 @@ mod tests {
         primary_with_ledger(account_index, accounts, MockLedgerService::new_at_height(committee, height))
     }
 
+    // Returns a primary over the given ledger.
     fn primary_with_ledger(
         account_index: usize,
         accounts: &[(SocketAddr, Account<CurrentNetwork>)],
@@ -2564,6 +2589,41 @@ mod tests {
         // Try to propose a batch again. This time, it should succeed.
         assert!(primary.propose_batch().await.is_ok());
         assert!(primary.proposed_batch.read().is_proposed());
+    }
+
+    /// While deployments are frozen, a deployment in the ready queue is dropped instead of proposed.
+    #[test_log::test(tokio::test)]
+    async fn test_propose_batch_drops_frozen_deployments() {
+        let mut rng = TestRng::default();
+        let (accounts, committee) = sample_committee(&mut rng);
+        let height = CurrentNetwork::CONSENSUS_HEIGHT(ConsensusVersion::V1).unwrap();
+        let ledger = MockLedgerService::new_at_height(committee, height)
+            .with_deployment_freeze(FreezeWindow { start: 20, end: 30 });
+        let primary = primary_with_ledger(0, &accounts, ledger);
+
+        // A peer's batch can bring a deployment into the ready queue during a freeze, as can a
+        // transmission that consensus reinserts.
+        let deployment = sample_deployment_transaction(2, 0, false, true, &mut rng);
+        let id = deployment.id();
+        let deployment = Data::Object(deployment);
+        let deployment_id = TransmissionID::Transaction(id, deployment.to_checksum::<CurrentNetwork>().unwrap());
+        primary.workers()[0].process_transmission_from_peer(
+            accounts[1].0,
+            deployment_id,
+            Transmission::Transaction(deployment),
+        );
+        // An execution is not affected.
+        let (transaction_id, transaction) = sample_unconfirmed_transaction(&mut rng);
+        primary.workers()[0].process_unconfirmed_transaction(transaction_id, transaction).await.unwrap();
+        assert_eq!(primary.workers()[0].num_transmissions(), 2);
+
+        // The deployment is dropped from the ready queue and left out of the proposal.
+        assert!(primary.propose_batch().await.unwrap());
+        let proposed_batch = primary.proposed_batch.read();
+        let transmissions = proposed_batch.as_proposal().unwrap().transmissions();
+        assert_eq!(transmissions.len(), 1);
+        assert!(!transmissions.contains_key(&deployment_id));
+        assert_eq!(primary.workers()[0].num_transmissions(), 0);
     }
 
     /// A transmission that storage only knows as aborted was already decided by a block, and storage

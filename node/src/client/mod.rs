@@ -22,6 +22,7 @@ use crate::{
 };
 
 use snarkos_account::Account;
+use snarkos_node_bft_ledger_service::{DeploymentFreezeCache, check_deployment_not_frozen};
 use snarkos_node_network::{ConnectionMode, NodeType};
 use snarkos_node_rest::{Rest, RestVerificationLimits};
 use snarkos_node_router::{
@@ -123,6 +124,8 @@ pub struct Client<N: Network, C: ConsensusStorage<N>> {
     ping: Arc<Ping<N>>,
     /// The signal handling logic.
     signal_handler: Arc<SignalHandler>,
+    /// The deployment freeze policy, read at most once per block.
+    deployment_freeze: Arc<DeploymentFreezeCache<N>>,
 }
 
 impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
@@ -198,6 +201,7 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
             num_verifying_executions: Default::default(),
             handles: Default::default(),
             signal_handler: signal_handler.clone(),
+            deployment_freeze: ledger_service.deployment_freeze().clone(),
         };
 
         // Perform sync with CDN (if enabled).
@@ -219,6 +223,7 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
                     cdn_sync.clone(),
                     sync,
                     rest_verification_limits,
+                    node.deployment_freeze.clone(),
                 )
                 .await?,
             );
@@ -431,6 +436,13 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
                 if queue_is_empty || counter_is_full {
                     sleep(Duration::from_millis(50)).await;
                     continue;
+                }
+
+                // Drop deployments queued before a freeze passed. They are neither checked nor propagated.
+                if let Err(error) = check_deployment_not_frozen(node.deployment_freeze.policy(&node.ledger)) {
+                    let mut deploy_queue = node.deploy_queue.lock();
+                    debug!("Dropping {} queued deployments - {error}", deploy_queue.len());
+                    deploy_queue.clear();
                 }
 
                 // Try to verify deployments.

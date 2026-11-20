@@ -341,6 +341,11 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Client<N, C> {
         match &transaction {
             Transaction::<N>::Fee(..) => (), // Fee Transactions are not valid.
             Transaction::<N>::Deploy(..) => {
+                // Turn deployments away while they are frozen: they are neither queued nor propagated.
+                if let Err(error) = check_deployment_not_frozen(self.deployment_freeze.policy(&self.ledger)) {
+                    trace!("[UnconfirmedTransaction] Ignoring a deployment from '{peer_ip}' - {error}");
+                    return true; // Maintain the connection.
+                }
                 let mut deploy_queue = self.deploy_queue.lock();
                 if !deploy_queue.contains(&transaction.id()) {
                     deploy_queue.put(transaction.id(), (peer_ip, serialized, transaction));
@@ -355,5 +360,70 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Client<N, C> {
         }
 
         true // Maintain the connection
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{NodeInterface, rest::RestVerificationLimits};
+    use snarkos_account::Account;
+    use snarkos_node_router::Inbound;
+    use snarkos_utilities::{NodeDataDir, SignalHandler};
+    use snarkvm::{
+        ledger::{
+            block::Block,
+            store::{StorageMode, helpers::memory::ConsensusMemory},
+        },
+        prelude::{FromBytes, MainnetV0, TestRng},
+        synthesizer::process::deployment_freeze::FreezeWindow,
+    };
+
+    use std::str::FromStr;
+
+    type CurrentNetwork = MainnetV0;
+
+    async fn sample_client() -> Client<CurrentNetwork, ConsensusMemory<CurrentNetwork>> {
+        Client::new(
+            "127.0.0.1:0".parse().unwrap(),
+            None,
+            10,
+            RestVerificationLimits::max::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>(),
+            None,
+            false,
+            Account::<CurrentNetwork>::from_str("APrivateKey1zkp2oVPTci9kKcUprnbzMwq95Di1MQERpYBhEeqvkrDirK1").unwrap(),
+            &[],
+            Block::<CurrentNetwork>::from_bytes_le(CurrentNetwork::genesis_bytes()).unwrap(),
+            None,
+            StorageMode::new_test(None),
+            NodeDataDir::new_test(None),
+            false,
+            None,
+            SignalHandler::new(None),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// A client neither queues nor propagates a deployment from a peer during a freeze.
+    #[tokio::test]
+    async fn test_client_ignores_frozen_deployments_from_peers() {
+        let client = sample_client().await;
+        let rng = &mut TestRng::default();
+        let deployment = snarkvm::ledger::test_helpers::sample_deployment_transaction(2, 0, false, true, rng);
+        let serialized = UnconfirmedTransaction::from(deployment.clone());
+        let peer_ip = SocketAddr::from(([127, 0, 0, 1], 4130));
+
+        // During a freeze, the deployment is not queued for verification and propagation.
+        client.deployment_freeze.set_policy_at(client.ledger.latest_hash(), Some(FreezeWindow { start: 20, end: 30 }));
+        assert!(client.unconfirmed_transaction(peer_ip, serialized.clone(), deployment.clone()).await);
+        assert!(client.deploy_queue.lock().is_empty());
+
+        // After a thaw or expiry, it is queued again.
+        client.deployment_freeze.set_policy_at(client.ledger.latest_hash(), None);
+        assert!(client.unconfirmed_transaction(peer_ip, serialized, deployment).await);
+        assert_eq!(client.deploy_queue.lock().len(), 1);
+
+        client.shut_down().await;
     }
 }

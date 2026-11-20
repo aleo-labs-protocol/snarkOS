@@ -102,6 +102,9 @@ workspace = true
 [dependencies.snarkos-node-rest]
 workspace = true
 
+[dependencies.snarkos-node-bft-ledger-service]
+workspace = true
+
 [dependencies.snarkos-node-router]
 workspace = true
 
@@ -162,6 +165,10 @@ workspace = true
 
 [dev-dependencies.tempfile]
 workspace = true
+
+[dev-dependencies.snarkos-node-bft-ledger-service]
+workspace = true
+features = [ "mock" ]
 
 [package.metadata.cargo-machete]
 ignored = [

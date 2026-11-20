@@ -202,6 +202,7 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
                     cdn_sync.clone(),
                     sync,
                     rest_verification_limits,
+                    ledger_service.deployment_freeze().clone(),
                 )
                 .await?,
             );
