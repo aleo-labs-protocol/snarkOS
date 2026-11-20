@@ -632,16 +632,25 @@ function wait_for_heights() {
   : "${max_wait:=300}"
   : "${poll_interval:=5}"
 
-  local start
-  start=$(now) 
-  
+  local start elapsed
+  start=$(now)
+  # `check_heights` logs progress only for an elapsed time that is a positive multiple of 60.
+  local logged_minutes=0
+  local report
+
   while (( $(elapsed_since "$start") < max_wait )); do
-    if check_heights "$start_index" "$end_index" "$min_height" "$network_name" "$elapsed"; then
+    elapsed=$(elapsed_since "$start")
+    report=0
+    if (( elapsed / 60 > logged_minutes )); then
+      logged_minutes=$((elapsed / 60))
+      report=$((logged_minutes * 60))
+    fi
+    if check_heights "$start_index" "$end_index" "$min_height" "$network_name" "$report"; then
       return 0
     fi
 
     # Continue waiting
-    sleep 5
+    sleep "$poll_interval"
   done
   return 1
 }
