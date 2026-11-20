@@ -79,7 +79,6 @@ use snarkvm::{
 use crate::helpers::now;
 
 use indexmap::{IndexMap, IndexSet};
-#[cfg(not(feature = "serial"))]
 use rayon::prelude::*;
 use std::{
     collections::BTreeMap,

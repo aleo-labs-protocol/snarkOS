@@ -32,7 +32,6 @@ use locktick::parking_lot::{Mutex, RwLock};
 use lru::LruCache;
 #[cfg(not(feature = "locktick"))]
 use parking_lot::{Mutex, RwLock};
-#[cfg(not(feature = "serial"))]
 use rayon::prelude::*;
 use std::{
     cmp,

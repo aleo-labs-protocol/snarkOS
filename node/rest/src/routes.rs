@@ -46,7 +46,6 @@ use serde_json::json;
 use serde_with::skip_serializing_none;
 use std::{collections::HashMap, fs, str::FromStr};
 
-#[cfg(not(feature = "serial"))]
 use rayon::prelude::*;
 use version::VersionInfo;
 

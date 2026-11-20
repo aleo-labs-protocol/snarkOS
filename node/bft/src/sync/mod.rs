@@ -40,7 +40,6 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use locktick::{parking_lot::Mutex, tokio::Mutex as TMutex};
 #[cfg(not(feature = "locktick"))]
 use parking_lot::Mutex;
-#[cfg(not(feature = "serial"))]
 use rayon::prelude::*;
 use std::{
     collections::{HashMap, HashSet, VecDeque},

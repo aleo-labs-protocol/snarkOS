@@ -302,17 +302,6 @@ locktick = [
   "snarkos-node-tcp/locktick",
   "snarkvm/locktick"
 ]
-serial = [
-  "snarkos-cli/serial",
-  "snarkos-node/serial",
-  "snarkos-node-bft/serial",
-  "snarkos-node-consensus/serial",
-  "snarkos-node-metrics/serial",
-  "snarkos-node-rest/serial",
-  "snarkos-node-router/serial",
-  "snarkos-node-sync/serial",
-  "snarkvm/serial"
-]
 test_targets = [ "snarkos-cli/test_targets" ]
 test_consensus_heights = [ "snarkos-cli/test_consensus_heights" ]
 test_network = [ "snarkos-cli/test_network", "snarkos-node/test_network" ]

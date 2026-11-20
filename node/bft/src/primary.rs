@@ -82,7 +82,6 @@ use locktick::{
 };
 #[cfg(not(feature = "locktick"))]
 use parking_lot::{Mutex, RwLock};
-#[cfg(not(feature = "serial"))]
 use rayon::prelude::*;
 use std::{
     collections::{HashMap, HashSet},

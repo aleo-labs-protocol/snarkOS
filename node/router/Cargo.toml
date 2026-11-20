@@ -29,7 +29,6 @@ locktick = [
 ]
 metrics = [ "dep:snarkos-node-metrics", "snarkos-node-network/metrics" ]
 cuda = [ "snarkvm/cuda", "snarkos-account/cuda" ]
-serial = [ "snarkos-node-bft-ledger-service/serial" ]
 
 [dependencies.anyhow]
 workspace = true
