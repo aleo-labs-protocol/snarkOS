@@ -22,16 +22,45 @@ Jobs run in one of two places:
 | Event | Runs |
 |---|---|
 | Pull request into `staging` | `fmt`, `deny`, `shellcheck`, `source-checks`, `machete`, `lint`, `lint-locktick`, `test`, `build-snarkos`, `devnet`, `ci-ok` |
-| Push to `staging` | the above, plus `devnet-merge`, `windows` |
-| Pull request into `release/**`, push to `release/**`, or manual dispatch | the above, plus `devnet-release` |
+| Schedule, on `staging`, every six hours at 47 minutes past | the above, plus `devnet-merge`, `windows`, `each-feature` |
+| Pull request into `release/**` | the first row, plus `devnet-merge`, `windows`, `devnet-release` |
+| Push to `release/**`, or manual dispatch | the first row, plus `devnet-merge`, `windows`, `each-feature`, `devnet-release` |
+
+A push to `staging` starts no run. The schedule checks `staging`'s head
+instead, so `staging` is checked after each merge and not before it.
+
+## The schedule
+
+The `schedule-gate` job runs first in a scheduled run. It decides whether the
+run checks the head of `staging`:
+
+- A head that an earlier scheduled run passed, failed or is still running is
+  skipped. Every other job in the run is then skipped, and so is `ci-ok`.
+- A head whose earlier scheduled runs were all cancelled is checked again.
+- A re-run of a scheduled run always checks its head. To retry a failed
+  head, re-run the scheduled run's jobs.
+
+A day with no merge into `staging` costs only the hosted minutes of
+`schedule-gate` and `notify`.
+
+The `notify` job posts to Slack when the scheduled run turns red, and once when
+it is green again. A run the gate skipped changes nothing. The channel is the
+repository variable `CI_SLACK_CHANNEL`, `#ci` by default.
+
+A schedule fires only in the default branch's copy of `ci.yml`.
+`snarkOS-internal` mirrors `staging` with this file, so its schedule fires too.
+There the gate is skipped, and so is every job after it.
 
 ## Jobs
 
-A job marked "merge" runs on the second and third rows of the table above, and
-a job marked "release" only on the third. The other jobs run on every event.
+A job marked "merge" runs on the schedule, on pull requests into and pushes to
+`release/**`, and on manual dispatch. A job marked "release" runs on the last
+two rows of the table above. `each-feature` runs on no pull request. The other
+jobs run on every event.
 
 | Job | Runner | Trigger | Timeout (min) | What it runs |
 |---|---|---|---|---|
+| `schedule-gate` | hosted | schedule | 10 | decides whether a scheduled run checks `staging`'s head |
 | `check-shared-refs` | hosted | all | | checks that each `aleo-labs-protocol/gh-actions` ref is a release tag, and that each matrix `name` axis lists the same names as its `include` |
 | `fmt` | hosted | all | | `cargo fmt --check` on `FMT_TOOLCHAIN` |
 | `deny` | hosted | all | | `cargo deny --workspace check bans licenses sources`, plus `advisories` everywhere but `staging`, whose advisories [`bump-advisories.yml`](.github/workflows/bump-advisories.yml) bumps nightly |
@@ -57,7 +86,9 @@ a job marked "release" only on the third. The other jobs run on every event.
 | `devnet-release (chaotic-restart-all)` | `cpu` | release | 45 | `test_restart_all.sh`, with delays |
 | `machete` | hosted | all | | `cargo machete` |
 | `windows` | hosted (Windows) | merge | | `cargo check --examples --benches --tests` in `account`, `cli`, `display`, `node` |
-| `ci-ok` | hosted | all | | fails unless every job succeeded; a merge or release job may be skipped where it is not meant to run |
+| `each-feature` | `cpu` | merge, no pull request | 120 | `cargo hack clippy --each-feature` over the workspace, without `cuda` |
+| `ci-ok` | hosted | all | | fails unless every job succeeded; a job may be skipped where it is not meant to run |
+| `notify` | hosted | schedule | 10 | posts to Slack when the scheduled run turns red or green |
 
 A job with no timeout gets the GitHub default of six hours. Only hosted jobs
 have none, and a hosted job holds no fleet box.
