@@ -12,9 +12,10 @@ Jobs run in one of two places:
   cold. Their caches would take about half of the repository's 10 GB cache
   limit and evict the test jobs' entries.
 - **The self-hosted `cpu` fleet** for heavy jobs: clippy, the heavier
-  crates' tests, the `snarkos` build and the devnets. `start-cpu-runners`
-  starts the boxes the run needs; they stop themselves when idle. Each box
-  keeps a persistent `target/` and sccache, so builds there are incremental.
+  crates' tests, the `snarkos` build and the devnets. The org's fleet starter
+  starts the boxes when GitHub queues their jobs; they stop themselves when
+  idle. Each box keeps a persistent `target/` and sccache, so builds there are
+  incremental.
 
 ## Triggers
 
@@ -31,7 +32,6 @@ a job marked "release" only on the third. The other jobs run on every event.
 
 | Job | Runner | Trigger | Timeout (min) | What it runs |
 |---|---|---|---|---|
-| `start-cpu-runners` | hosted | all | | starts fleet boxes |
 | `check-shared-refs` | hosted | all | | checks that each `aleo-labs-protocol/gh-actions` ref is a release tag, and that each matrix `name` axis lists the same names as its `include` |
 | `fmt` | hosted | all | | `cargo fmt --check` on `FMT_TOOLCHAIN` |
 | `deny` | hosted | all | | `cargo deny --workspace check bans licenses sources`, plus `advisories` everywhere but `staging`, whose advisories [`bump-advisories.yml`](.github/workflows/bump-advisories.yml) bumps nightly |
@@ -63,8 +63,7 @@ A job with no timeout gets the GitHub default of six hours. Only hosted jobs
 have none, and a hosted job holds no fleet box.
 
 Protected branches require `ci-ok` alone. GitHub counts a skipped job as
-passed for a required check, and a fleet job is skipped when
-`start-cpu-runners` fails; `ci-ok` fails then.
+passed for a required check, so `ci-ok` checks each job's result itself.
 
 A pull request that changes only Markdown files starts no run, so it gets no
 `ci-ok` check. Where a branch rule requires `ci-ok`,
@@ -120,9 +119,8 @@ To run the `.ci` scripts on macOS you may want to `brew install bash coreutils
 ## Forks
 
 A fork's pull request runs on the fleet once a team member approves its run.
-The run gets no secrets, so `start-cpu-runners` is skipped;
-`fork-pr-runners.yml` starts the boxes instead, and the fleet jobs accept the
-skipped start.
+GitHub then queues its fleet jobs, and the fleet starter boots boxes for them
+as for any other run.
 
 The fleet's `target/` and sccache persist between jobs, so an approved run can
 affect later builds there. A pull request runs its own copy of `ci.yml`, so no
