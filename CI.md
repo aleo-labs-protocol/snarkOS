@@ -31,25 +31,31 @@ instead, so `staging` is checked after each merge and not before it.
 
 ## The schedule
 
-The `schedule-gate` job runs first in a scheduled run. It decides whether the
-run checks the head of `staging`:
+The `schedule-due` job runs first in a scheduled run. It decides whether the
+head of `staging` is due a check:
 
-- A head that an earlier scheduled run passed, failed or is still running is
-  skipped. Every other job in the run is then skipped, and so is `ci-ok`.
-- A head whose earlier scheduled runs were all cancelled is checked again.
-- A re-run of a scheduled run always checks its head. To retry a failed
-  head, re-run the scheduled run's jobs.
+- The head is not due if an earlier scheduled run on it gave a verdict: the
+  run passed or failed, and its `fmt` job ran. Every other job in the run is
+  then skipped, and so is `ci-ok`. The job's summary names that run.
+- A cancelled run, a run that was not due, and a run where `schedule-due`
+  failed give no verdict. A head with only such runs is due.
+- A failed head is not checked again on the next tick. To retry it, re-run
+  the scheduled run's jobs. A re-run is always due.
+- If the GitHub API fails, the head is due.
+
+Scheduled runs have concurrency groups of their own. Two on one commit run
+one after the other, and no push or pull request run cancels one.
 
 A day with no merge into `staging` costs only the hosted minutes of
-`schedule-gate` and `notify`.
+`schedule-due` and `notify`.
 
 The `notify` job posts to Slack when the scheduled run turns red, and once when
-it is green again. A run the gate skipped changes nothing. The channel is the
+it is green again. A run that was not due changes nothing. The channel is the
 repository variable `CI_SLACK_CHANNEL`, `#ci` by default.
 
 A schedule fires only in the default branch's copy of `ci.yml`.
 `snarkOS-internal` mirrors `staging` with this file, so its schedule fires too.
-There the gate is skipped, and so is every job after it.
+There `schedule-due` is skipped, and so is every job after it.
 
 ## Jobs
 
@@ -60,7 +66,7 @@ jobs run on every event.
 
 | Job | Runner | Trigger | Timeout (min) | What it runs |
 |---|---|---|---|---|
-| `schedule-gate` | hosted | schedule | 10 | decides whether a scheduled run checks `staging`'s head |
+| `schedule-due` | hosted | schedule | 10 | decides whether `staging`'s head is due a check |
 | `check-shared-refs` | hosted | all | | checks that each `aleo-labs-protocol/gh-actions` ref is a release tag, and that each matrix `name` axis lists the same names as its `include` |
 | `fmt` | hosted | all | | `cargo fmt --check` on `FMT_TOOLCHAIN` |
 | `deny` | hosted | all | | `cargo deny --workspace check bans licenses sources`, plus `advisories` everywhere but `staging`, whose advisories [`bump-advisories.yml`](.github/workflows/bump-advisories.yml) bumps nightly |
