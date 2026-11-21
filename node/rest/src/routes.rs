@@ -37,7 +37,7 @@ use snarkvm::{
     },
 };
 
-use axum::{Json, extract::rejection::JsonRejection};
+use axum::{Json, extract::rejection::JsonRejection, response::IntoResponse};
 
 use anyhow::{Context, anyhow};
 use indexmap::IndexMap;
@@ -906,15 +906,34 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
 
     /// GET /<network>/programs/summary
     ///
-    /// Returns every deployed program with its latest edition and that edition's amendment count,
-    /// sorted by ID, and a `height`. Every program deployed at or before `height` is listed. The
-    /// list may also include programs deployed after `height`, and an edition or amendment count
-    /// may be newer than it was at `height`.
-    pub(crate) async fn get_programs_summary(State(rest): State<Self>) -> Result<ErasedJson, RestError> {
-        let summarize = move || -> Result<ErasedJson, RestError> {
+    /// Returns the deployed programs with their latest edition and that edition's amendment count,
+    /// sorted by ID, and a `height`. The list may include programs deployed after `height`, and an
+    /// edition or amendment count may be newer than it was at `height`. A storage read error during
+    /// the scan can shorten the list, since snarkVM's map iterator stops silently on a decode error.
+    /// The response is built once per height and cached.
+    pub(crate) async fn get_programs_summary(State(rest): State<Self>) -> Result<Response, RestError> {
+        let body = rest.programs_summary_body().await?;
+        Ok(([(CONTENT_TYPE, HeaderValue::from_static("application/json"))], body).into_response())
+    }
+
+    /// Returns the `programs/summary` JSON body for the latest height, building it at most once.
+    pub(crate) async fn programs_summary_body(&self) -> Result<Bytes, RestError> {
+        if let Some(body) = self.programs_summary.get(self.ledger.latest_height()) {
+            return Ok(body);
+        }
+
+        let rest = self.clone();
+        let build = move || -> Result<Bytes, RestError> {
+            // Lock inside the blocking task, so a disconnected client cannot release it mid-build.
+            let _build = rest.programs_summary.build.lock();
             // Read the height first. The ledger advances it only after the block's storage batch
             // is written, so the reads below see every deployment and amendment up to it.
             let height = rest.ledger.latest_height();
+            // Another request may have built it while this one waited for the lock.
+            if let Some(body) = rest.programs_summary.get(height) {
+                return Ok(body);
+            }
+
             let store = rest.ledger.vm().transaction_store();
             let mut programs = store
                 .program_ids_and_latest_editions()
@@ -924,12 +943,16 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
                 })
                 .collect::<Result<Vec<_>, RestError>>()?;
             programs.sort_unstable_by(|a, b| a.program_id.cmp(&b.program_id));
-            // `ErasedJson::new` serializes eagerly, so this keeps serialization off the async thread.
-            Ok(ErasedJson::new(ProgramsSummary { height, programs }))
+            let body = Bytes::from(
+                serde_json::to_vec(&ProgramsSummary { height, programs })
+                    .map_err(|err| RestError::internal_server_error(anyhow!(err)))?,
+            );
+            *rest.programs_summary.latest.lock() = Some((height, body.clone()));
+            Ok(body)
         };
 
-        match tokio::task::spawn_blocking(summarize).await {
-            Ok(summary) => summary,
+        match tokio::task::spawn_blocking(build).await {
+            Ok(body) => body,
             Err(err) => Err(RestError::internal_server_error(anyhow!(err).context("Tokio error"))),
         }
     }

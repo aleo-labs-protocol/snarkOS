@@ -47,7 +47,7 @@ use snarkvm::{
 
 use anyhow::{Context, Result, ensure};
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{ConnectInfo, DefaultBodyLimit, Query, State},
     http::{
         HeaderName,
@@ -204,6 +204,22 @@ impl VerificationLane {
     }
 }
 
+/// The latest `programs/summary` response body, built at most once per block height.
+#[derive(Default)]
+pub(crate) struct ProgramsSummaryCache {
+    /// The height and serialized JSON body of the latest summary.
+    latest: Mutex<Option<(u32, Bytes)>>,
+    /// Held while building a summary, so only one build runs at a time.
+    build: Mutex<()>,
+}
+
+impl ProgramsSummaryCache {
+    /// Returns the cached body if it was built at `height`.
+    fn get(&self, height: u32) -> Option<Bytes> {
+        self.latest.lock().as_ref().filter(|(h, _)| *h == height).map(|(_, body)| body.clone())
+    }
+}
+
 /// A REST API server for the ledger.
 #[derive(Clone)]
 pub struct Rest<N: Network, C: ConsensusStorage<N>, R: Routing<N>> {
@@ -223,6 +239,8 @@ pub struct Rest<N: Network, C: ConsensusStorage<N>, R: Routing<N>> {
     verification_slots: Arc<VerificationSlots>,
     /// A cache containing recently requested blocks.
     block_cache: Arc<Mutex<LruCache<N::BlockHash, ErasedJson>>>,
+    /// The latest `programs/summary` body, shared by all route prefixes.
+    programs_summary: Arc<ProgramsSummaryCache>,
     /// The upstream for the routes of the removed `history` feature, if `--history-compat-mode` is set.
     history_compat: Option<Arc<HistoryCompat>>,
 }
@@ -262,6 +280,7 @@ impl<N: Network, C: 'static + ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> 
             handles: Default::default(),
             verification_slots: Arc::new(VerificationSlots::new(rest_verification_limits)),
             block_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(BLOCK_CACHE_SIZE).unwrap()))),
+            programs_summary: Default::default(),
             history_compat,
         };
         // Spawn the server.
@@ -851,6 +870,7 @@ mod route_tests {
                 num_verifying_solutions: 1,
             })),
             block_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(BLOCK_CACHE_SIZE).unwrap()))),
+            programs_summary: Default::default(),
             history_compat: None,
         }
     }
@@ -1439,6 +1459,34 @@ mod route_tests {
                 "{prefix}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn programs_summary_is_cached_per_height() {
+        let rest = sample_rest().await;
+        let first = rest.programs_summary_body().await.unwrap();
+        let second = rest.programs_summary_body().await.unwrap();
+        // The same allocation: the second request reused the cached body instead of rescanning.
+        assert_eq!(first.as_ptr(), second.as_ptr());
+    }
+
+    #[tokio::test]
+    async fn programs_summary_builds_once_for_concurrent_requests() {
+        let rest = sample_rest().await;
+
+        // Hold the build lock until both requests are waiting on it.
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let cache = rest.programs_summary.clone();
+        let holder = tokio::task::spawn_blocking(move || {
+            let _build = cache.build.lock();
+            locked_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(500));
+        });
+        locked_rx.await.unwrap();
+
+        let (first, second) = tokio::join!(rest.programs_summary_body(), rest.programs_summary_body());
+        holder.await.unwrap();
+        assert_eq!(first.unwrap().as_ptr(), second.unwrap().as_ptr());
     }
 
     /// The routes of the removed `history` feature, in history compatibility mode.
