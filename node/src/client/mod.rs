@@ -63,7 +63,7 @@ use std::{
             Ordering::{Acquire, Relaxed},
         },
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     task::JoinHandle,
@@ -175,7 +175,9 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
         .await?;
 
         // Initialize the sync module.
-        let sync = Arc::new(BlockSync::new(ledger_service.clone(), ConnectionMode::Router));
+        let sync = Arc::new(
+            BlockSync::new(ledger_service.clone(), ConnectionMode::Router).with_trusted_peers_only(trusted_peers_only),
+        );
 
         // Set up the ping logic.
         let locators = sync.get_block_locators()?;
@@ -276,12 +278,15 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
         // Start the block request generation loop (outgoing).
         let self_ = self.clone();
         self.spawn(async move {
+            let mut next_request_slot = None;
             while !self_.signal_handler.is_stopped() {
-                // Wait for peer updates or timeout
-                let _ = timeout(Self::MAX_SYNC_INTERVAL, self_.sync.wait_for_peer_update()).await;
+                // Wait for peer updates, a peer's block request limit to allow a request, or timeout.
+                let deadline = Instant::now() + Self::MAX_SYNC_INTERVAL;
+                let deadline = next_request_slot.map_or(deadline, |slot: Instant| slot.min(deadline));
+                let _ = tokio::time::timeout_at(deadline.into(), self_.sync.wait_for_peer_update()).await;
 
                 // Perform the sync routine.
-                self_.try_issuing_block_requests().await;
+                next_request_slot = self_.try_issuing_block_requests().await;
             }
 
             info!("Stopped block request generation");
@@ -325,8 +330,8 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
     }
 
     /// Client-side version of `snarkvm_node_bft::Sync::try_block_sync()`.
-    async fn try_issuing_block_requests(&self) {
-        self.sync.try_issuing_block_requests(self.router()).await;
+    async fn try_issuing_block_requests(&self) -> Option<Instant> {
+        self.sync.try_issuing_block_requests(self.router()).await
     }
 
     /// Initializes solution verification.

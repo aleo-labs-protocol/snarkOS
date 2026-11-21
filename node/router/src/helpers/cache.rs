@@ -69,7 +69,7 @@ impl<N: Network> Default for Cache<N> {
 }
 
 impl<N: Network> Cache<N> {
-    const INBOUND_BLOCK_REQUEST_INTERVAL: i64 = 60;
+    const INBOUND_BLOCK_REQUEST_INTERVAL: i64 = crate::BLOCK_REQUEST_INTERVAL_IN_SECS;
     const INBOUND_PUZZLE_REQUEST_INTERVAL: i64 = 60;
     const INBOUND_UNCONFIRMED_SOLUTION_INTERVAL: i64 = 60;
 

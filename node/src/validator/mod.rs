@@ -149,7 +149,9 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         .await?;
 
         // Initialize the block synchronization logic.
-        let sync = Arc::new(BlockSync::new(ledger_service.clone(), ConnectionMode::Gateway));
+        let sync = Arc::new(
+            BlockSync::new(ledger_service.clone(), ConnectionMode::Gateway).with_trusted_peers_only(trusted_peers_only),
+        );
         let locators = sync.get_block_locators()?;
         let ping = Arc::new(Ping::new(router.clone(), locators));
 

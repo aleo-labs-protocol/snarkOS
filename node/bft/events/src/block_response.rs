@@ -22,13 +22,49 @@ use snarkvm::{
     utilities::io_error,
 };
 
+use bytes::Bytes;
 use std::borrow::Cow;
+
+/// Whether a block response carries the requested blocks, and if not, why.
+///
+/// A status other than `Blocks` is only sent to peers whose protocol version supports it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum BlockResponseStatus {
+    /// The response carries the requested blocks.
+    Blocks,
+    /// The sender no longer serves the start of the range; it serves heights from `oldest_retained`.
+    Pruned { oldest_retained: u32 },
+    /// The range reaches past the sender's latest block, at `latest_height`.
+    NotYet { latest_height: u32 },
+}
+
+impl BlockResponseStatus {
+    const NOT_YET_TAG: u8 = 1;
+    const PRUNED_TAG: u8 = 0;
+
+    /// Ensures that a reply of this status does not contradict the request it answers.
+    pub fn ensure_consistent_with(&self, peer_ip: SocketAddr, request: &BlockRequest) -> Result<()> {
+        let BlockRequest { start_height, end_height } = *request;
+        match *self {
+            Self::Blocks => Ok(()),
+            Self::Pruned { oldest_retained } if start_height >= oldest_retained => bail!(
+                "Peer '{peer_ip}' sent a contradictory block response ({start_height}..{end_height} pruned below {oldest_retained})"
+            ),
+            Self::NotYet { latest_height } if end_height - 1 <= latest_height => bail!(
+                "Peer '{peer_ip}' sent a contradictory block response ({start_height}..{end_height} not yet at {latest_height})"
+            ),
+            _ => Ok(()),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockResponse<N: Network> {
     /// The original block request.
     pub request: BlockRequest,
-    /// The blocks.
+    /// Whether the response carries the blocks.
+    pub status: BlockResponseStatus,
+    /// The blocks, empty unless the status is `Blocks`.
     pub blocks: Data<DataBlocks<N>>,
     /// The consensus version at the height of the *last* block in this response.
     /// This enables detecting if the current node, or the peer, missed an upgrade. Its value is `None` for messages with version < 2.
@@ -52,12 +88,37 @@ impl<N: Network> EventTrait for BlockResponse<N> {
 impl<N: Network> BlockResponse<N> {
     // Constructs a new block response.
     pub fn new(request: BlockRequest, blocks: DataBlocks<N>, latest_consensus_version: ConsensusVersion) -> Self {
-        Self { request, blocks: Data::Object(blocks), latest_consensus_version: Some(latest_consensus_version) }
+        Self {
+            request,
+            status: BlockResponseStatus::Blocks,
+            blocks: Data::Object(blocks),
+            latest_consensus_version: Some(latest_consensus_version),
+        }
+    }
+
+    /// Constructs a block response without blocks, which explains why with `status`.
+    pub fn unavailable(request: BlockRequest, status: BlockResponseStatus) -> Self {
+        // The serialized empty `DataBlocks`, which is a block count of 0.
+        let blocks = Data::Buffer(Bytes::from_static(&[0]));
+        Self { request, status, blocks, latest_consensus_version: None }
     }
 }
 
 impl<N: Network> ToBytes for BlockResponse<N> {
     fn write_le<W: io::Write>(&self, mut writer: W) -> io::Result<()> {
+        // A status reply starts with `u32::MAX`, which is never a valid start height.
+        let status = match self.status {
+            BlockResponseStatus::Blocks => None,
+            BlockResponseStatus::Pruned { oldest_retained } => Some((BlockResponseStatus::PRUNED_TAG, oldest_retained)),
+            BlockResponseStatus::NotYet { latest_height } => Some((BlockResponseStatus::NOT_YET_TAG, latest_height)),
+        };
+        if let Some((tag, value)) = status {
+            u32::MAX.write_le(&mut writer)?;
+            self.request.write_le(&mut writer)?;
+            tag.write_le(&mut writer)?;
+            return value.write_le(&mut writer);
+        }
+
         // Block responses without a consesnsus version have message version `1`, other have to `2` (or greater in the future).
         let Some(latest_consensus_version) = self.latest_consensus_version else {
             return Err(io_error("Can only serialize block responses of version 2 or greater"));
@@ -83,6 +144,18 @@ impl<N: Network> FromBytes for BlockResponse<N> {
     fn read_le<R: io::Read>(mut reader: R) -> io::Result<Self> {
         let start_height = u32::read_le(&mut reader)?;
 
+        if start_height == u32::MAX {
+            let request = BlockRequest::read_le(&mut reader)?;
+            let tag = u8::read_le(&mut reader)?;
+            let value = u32::read_le(&mut reader)?;
+            let status = match tag {
+                BlockResponseStatus::PRUNED_TAG => BlockResponseStatus::Pruned { oldest_retained: value },
+                BlockResponseStatus::NOT_YET_TAG => BlockResponseStatus::NotYet { latest_height: value },
+                _ => return Err(io_error(format!("Invalid block response status {tag}"))),
+            };
+            return Ok(Self::unavailable(request, status));
+        }
+
         // An invalid start height as the first four bytes indicates that this message
         // contains the consensus version of the last block.
         let contains_consensus_version = start_height == 0;
@@ -101,7 +174,7 @@ impl<N: Network> FromBytes for BlockResponse<N> {
         let latest_consensus_version =
             if contains_consensus_version { Some(FromBytes::read_le(&mut reader)?) } else { None };
 
-        Ok(Self { request, blocks, latest_consensus_version })
+        Ok(Self { request, status: BlockResponseStatus::Blocks, blocks, latest_consensus_version })
     }
 }
 
@@ -186,7 +259,13 @@ impl<N: Network> FromBytes for DataBlocks<N> {
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod prop_tests {
     #![cfg_attr(not(test), allow(unused_imports))]
-    use crate::{BlockRequest, BlockResponse, DataBlocks, block_request::prop_tests::any_block_request};
+    use crate::{
+        BlockRequest,
+        BlockResponse,
+        BlockResponseStatus,
+        DataBlocks,
+        block_request::prop_tests::any_block_request,
+    };
 
     use snarkos_utilities::test_fixture::cached_fixture;
     use snarkvm::{
@@ -196,7 +275,7 @@ pub mod prop_tests {
     };
 
     use bytes::{Buf, BufMut, BytesMut};
-    use proptest::prelude::{BoxedStrategy, ProptestConfig, Strategy, any};
+    use proptest::prelude::{BoxedStrategy, ProptestConfig, Strategy, any, prop_oneof};
     use std::sync::OnceLock;
     use test_strategy::proptest;
 
@@ -222,6 +301,23 @@ pub mod prop_tests {
     }
 
     pub fn any_block_response() -> BoxedStrategy<BlockResponse<CurrentNetwork>> {
+        prop_oneof![any_blocks_response(), any_status_response()].boxed()
+    }
+
+    /// A response without blocks, of any status other than `Blocks`.
+    pub fn any_status_response() -> BoxedStrategy<BlockResponse<CurrentNetwork>> {
+        (any_block_request(), any::<bool>(), any::<u32>())
+            .prop_map(|(request, pruned, value)| {
+                let status = match pruned {
+                    true => BlockResponseStatus::Pruned { oldest_retained: value },
+                    false => BlockResponseStatus::NotYet { latest_height: value },
+                };
+                BlockResponse::unavailable(request, status)
+            })
+            .boxed()
+    }
+
+    pub fn any_blocks_response() -> BoxedStrategy<BlockResponse<CurrentNetwork>> {
         (any_block_request(), any::<u64>())
             .prop_map(|(request, seed)| {
                 // Generate blocks that match the requests range.
@@ -239,7 +335,7 @@ pub mod prop_tests {
     }
 
     #[proptest(ProptestConfig { cases: 10, ..ProptestConfig::default() })]
-    fn block_response_roundtrip(#[strategy(any_block_response())] block_response: BlockResponse<CurrentNetwork>) {
+    fn block_response_roundtrip(#[strategy(any_blocks_response())] block_response: BlockResponse<CurrentNetwork>) {
         let mut bytes = BytesMut::default().writer();
         block_response.write_le(&mut bytes).unwrap();
         let decoded = BlockResponse::<CurrentNetwork>::read_le(&mut bytes.into_inner().reader()).unwrap();
@@ -284,6 +380,77 @@ pub mod prop_tests {
         assert_eq!(response.request, request);
         assert_eq!(response.latest_consensus_version, None);
         assert_eq!(response.blocks.deserialize_blocking().unwrap(), blocks);
+    }
+
+    #[proptest]
+    fn status_response_roundtrip(#[strategy(any_status_response())] block_response: BlockResponse<CurrentNetwork>) {
+        let bytes = block_response.to_bytes_le().unwrap();
+        assert_eq!(bytes.len(), 17);
+        assert_eq!(BlockResponse::<CurrentNetwork>::read_le(&bytes[..]).unwrap(), block_response);
+    }
+
+    /// A `Blocks` response keeps the legacy and V12 layouts.
+    #[test]
+    fn blocks_response_bytes_are_unchanged() {
+        let request = BlockRequest::new(1, 3).unwrap();
+        let block = sample_genesis_block(&mut TestRng::default());
+        let blocks = DataBlocks(vec![block.clone(), block]);
+        let blocks_bytes = Data::Object(blocks.clone()).to_bytes_le().unwrap();
+        let request_bytes = request.to_bytes_le().unwrap();
+
+        let legacy = BlockResponse::new(request, blocks.clone(), ConsensusVersion::V11).to_bytes_le().unwrap();
+        assert_eq!(legacy, [&request_bytes[..], &blocks_bytes].concat());
+
+        let v12 = BlockResponse::new(request, blocks, ConsensusVersion::V12).to_bytes_le().unwrap();
+        let version_bytes = ConsensusVersion::V12.to_bytes_le().unwrap();
+        assert_eq!(v12, [&0u32.to_le_bytes()[..], &request_bytes, &blocks_bytes, &version_bytes].concat());
+    }
+
+    #[test]
+    fn status_response_layout() {
+        let request = BlockRequest::new(7, 9).unwrap();
+        let cases = [
+            (BlockResponseStatus::Pruned { oldest_retained: 20 }, 0u8),
+            (BlockResponseStatus::NotYet { latest_height: 7 }, 1),
+        ];
+        for (status, tag) in cases {
+            let bytes = BlockResponse::<CurrentNetwork>::unavailable(request, status).to_bytes_le().unwrap();
+            let value = if tag == 0 { 20u32 } else { 7 };
+            let expected =
+                [&u32::MAX.to_le_bytes()[..], &7u32.to_le_bytes(), &9u32.to_le_bytes(), &[tag], &value.to_le_bytes()]
+                    .concat();
+            assert_eq!(bytes, expected);
+        }
+
+        // A status reply has no payload left to serialize.
+        let response = BlockResponse::<CurrentNetwork>::unavailable(request, cases[0].0);
+        assert!(!crate::Event::BlockResponse(response).has_unserialized_payload());
+
+        // An unknown tag is rejected.
+        let mut bytes = BlockResponse::<CurrentNetwork>::unavailable(request, cases[0].0).to_bytes_le().unwrap();
+        bytes[12] = 2;
+        assert!(BlockResponse::<CurrentNetwork>::read_le(&bytes[..]).is_err());
+    }
+
+    /// A status reply that contradicts its own request is rejected; any other is accepted.
+    #[test]
+    fn status_contradictions() {
+        let peer_ip = "127.0.0.1:1234".parse().unwrap();
+        let request = BlockRequest::new(10, 15).unwrap();
+        let cases = [
+            (BlockResponseStatus::Blocks, true),
+            (BlockResponseStatus::Pruned { oldest_retained: 11 }, true),
+            (BlockResponseStatus::Pruned { oldest_retained: u32::MAX }, true),
+            (BlockResponseStatus::Pruned { oldest_retained: 10 }, false),
+            (BlockResponseStatus::Pruned { oldest_retained: 0 }, false),
+            (BlockResponseStatus::NotYet { latest_height: 13 }, true),
+            (BlockResponseStatus::NotYet { latest_height: 0 }, true),
+            (BlockResponseStatus::NotYet { latest_height: 14 }, false),
+            (BlockResponseStatus::NotYet { latest_height: u32::MAX }, false),
+        ];
+        for (status, consistent) in cases {
+            assert_eq!(status.ensure_consistent_with(peer_ip, &request).is_ok(), consistent, "{status:?}");
+        }
     }
 
     #[test]

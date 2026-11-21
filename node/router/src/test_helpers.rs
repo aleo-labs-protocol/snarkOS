@@ -36,6 +36,7 @@ use crate::{
     Routing,
     messages::{
         BlockRequest,
+        BlockResponseStatus,
         DisconnectReason,
         Message,
         MessageCodec,
@@ -233,6 +234,11 @@ impl<N: Network> Inbound<N> for TestRouter<N> {
         _blocks: Vec<Block<N>>,
         _latest_consensus_version: Option<ConsensusVersion>,
     ) -> bool {
+        true
+    }
+
+    /// Handles a `BlockResponse` that says the peer cannot serve `request`.
+    fn block_unavailable(&self, _peer_ip: SocketAddr, _request: BlockRequest, _status: BlockResponseStatus) -> bool {
         true
     }
 

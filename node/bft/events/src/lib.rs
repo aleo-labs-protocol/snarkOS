@@ -28,7 +28,7 @@ mod block_request;
 pub use block_request::BlockRequest;
 
 mod block_response;
-pub use block_response::{BlockResponse, DataBlocks};
+pub use block_response::{BlockResponse, BlockResponseStatus, DataBlocks};
 
 mod certificate_request;
 pub use certificate_request::CertificateRequest;
@@ -174,8 +174,10 @@ impl<N: Network> Event<N> {
     /// The oldest event protocol version this node accepts from a peer; it can be incremented in
     /// order to force users to update. Minor releases can change this value.
     pub const MINIMUM_VERSION: u32 = 10;
+    /// The oldest event version that receives `BlockResponse` status replies.
+    pub const STATUS_EVENT_VERSION: u32 = 13;
     /// The version of the event protocol this node speaks. Minor releases can change this value.
-    pub const VERSION: u32 = 12;
+    pub const VERSION: u32 = 13;
 
     /// Serializes the event's [`Data`] payload, if it holds one that is not already serialized.
     ///

@@ -158,12 +158,15 @@ impl<N: Network> Sync<N> {
         // Start the block request generation loop (outgoing).
         let self_ = self.clone();
         self.spawn(async move {
+            let mut next_request_slot = None;
             loop {
-                // Wait for peer updates or timeout
-                let _ = tokio::time::timeout(Self::MAX_SYNC_INTERVAL, self_.block_sync.wait_for_peer_update()).await;
+                // Wait for peer updates, a peer's block request limit to allow a request, or timeout.
+                let deadline = Instant::now() + Self::MAX_SYNC_INTERVAL;
+                let deadline = next_request_slot.map_or(deadline, |slot: Instant| slot.min(deadline));
+                let _ = tokio::time::timeout_at(deadline.into(), self_.block_sync.wait_for_peer_update()).await;
 
                 // Issue block requests to peers.
-                self_.try_issuing_block_requests().await;
+                next_request_slot = self_.try_issuing_block_requests().await;
 
                 // Rate limiting happens in [`BlockSync::try_issuing_block_requests`] and no additional sleeps are needed here.
             }
@@ -216,6 +219,7 @@ impl<N: Network> Sync<N> {
         // Retrieve the sync receiver.
         let SyncReceiver {
             mut rx_block_sync_insert_block_response,
+            mut rx_block_sync_block_unavailable,
             mut rx_block_sync_remove_peer,
             mut rx_block_sync_update_peer_locators,
             mut rx_certificate_request,
@@ -245,6 +249,14 @@ impl<N: Network> Sync<N> {
                 }
 
                 callback.send(result).ok();
+            }
+        });
+
+        // Process each block response that says the peer cannot serve the request.
+        let self_ = self.clone();
+        self.spawn(async move {
+            while let Some((peer_ip, request, status)) = rx_block_sync_block_unavailable.recv().await {
+                self_.block_sync.insert_block_unavailable(peer_ip, request, status);
             }
         });
 
@@ -304,8 +316,8 @@ impl<N: Network> Sync<N> {
     ///
     /// This method handles timeout removal, checks if block sync is possible,
     /// and issues block requests to peers.
-    async fn try_issuing_block_requests(&self) {
-        self.block_sync.try_issuing_block_requests(&self.gateway).await;
+    async fn try_issuing_block_requests(&self) -> Option<Instant> {
+        self.block_sync.try_issuing_block_requests(&self.gateway).await
     }
 }
 
@@ -326,7 +338,7 @@ impl<N: Network> Sync<N> {
 
     /// We received new peer locators during a Ping.
     fn update_peer_locators(&self, peer_ip: SocketAddr, locators: BlockLocators<N>) -> Result<()> {
-        self.block_sync.update_peer_locators(peer_ip, &locators)
+        self.block_sync.update_peer_locators(peer_ip, &locators, None)
     }
 
     /// A peer disconnected.

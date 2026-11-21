@@ -25,8 +25,15 @@ use crate::common::{
     utils::{sample_gateway, sample_ledger, sample_storage},
 };
 use snarkos_account::Account;
-use snarkos_node_bft::{Gateway, helpers::init_primary_channels};
+use snarkos_node_bft::{
+    Gateway,
+    Transport,
+    helpers::{PrimaryReceiver, SyncReceiver, init_primary_channels, init_sync_channels},
+};
 use snarkos_node_bft_events::{
+    BlockRequest,
+    BlockResponse,
+    BlockResponseStatus,
     ConsensusSchedule,
     DisconnectReason,
     Event,
@@ -58,6 +65,7 @@ use futures::{SinkExt, TryStreamExt};
 use rand::RngExt;
 use tokio::{
     net::{TcpListener, TcpStream},
+    sync::mpsc,
     task,
     time::timeout,
 };
@@ -677,6 +685,143 @@ async fn an_initiator_rejects_a_responder_with_a_different_genesis() {
     // Neither side may end up considering the other a peer.
     assert!(!gateway_a.connected_addresses().contains(&accounts[1].address()));
     assert!(!gateway_b.connected_addresses().contains(&accounts[0].address()));
+}
+
+/// The receiver of the block requests a gateway reports as unavailable.
+type UnavailableReceiver = mpsc::Receiver<(SocketAddr, BlockRequest, BlockResponseStatus)>;
+
+/// Runs a gateway for the first of `accounts` with a sync sender. Returns the gateway, the
+/// receiver of the block requests it reports as unavailable, and its primary receiver, which has
+/// to stay open. Disconnecting peers are removed from sync at once.
+async fn run_sync_gateway(
+    accounts: &[Account<CurrentNetwork>],
+    ledger: Arc<TranslucentLedgerService<CurrentNetwork, ConsensusMemory<CurrentNetwork>>>,
+) -> (Gateway<CurrentNetwork>, UnavailableReceiver, PrimaryReceiver<CurrentNetwork>) {
+    let gateway = sample_gateway(accounts[0].clone(), sample_storage(ledger.clone()), ledger);
+    let (sync_sender, sync_receiver) = init_sync_channels();
+    let (primary_tx, primary_rx) = init_primary_channels();
+    gateway.run(primary_tx, [].into(), Some(sync_sender)).await;
+
+    let SyncReceiver { rx_block_sync_block_unavailable, mut rx_block_sync_remove_peer, .. } = sync_receiver;
+    task::spawn(async move {
+        while let Some((_, callback)) = rx_block_sync_remove_peer.recv().await {
+            let _ = callback.send(());
+        }
+    });
+    (gateway, rx_block_sync_block_unavailable, primary_rx)
+}
+
+/// Returns the first event the stream yields that `select` picks, skipping the others.
+async fn next_event<T>(
+    framed: &mut Framed<&mut TcpStream, EventCodec<CurrentNetwork>>,
+    select: impl Fn(Event<CurrentNetwork>) -> Option<T>,
+) -> Option<T> {
+    timeout(Duration::from_secs(5), async {
+        while let Ok(Some(event)) = framed.try_next().await {
+            if let Some(value) = select(event) {
+                return Some(value);
+            }
+        }
+        None
+    })
+    .await
+    .expect("the gateway did not send the event in time")
+}
+
+/// Tests the status replies a gateway exchanges with a peer at the status version: it answers a
+/// request past its tip with `NotYet`, reports a `NotYet` reply to sync, and disconnects a peer
+/// whose reply contradicts its request.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_gateway_exchanges_status_replies_with_a_new_peer() {
+    let mut rng = TestRng::default();
+    let (accounts, committee) = shared_test_committee(COMMITTEE_SIZE, &mut rng);
+    let accounts_ = accounts.clone();
+    let mut rng_ = TestRng::fixed(rng.random());
+    let ledger = task::spawn_blocking(move || sample_ledger(&accounts_, &committee, &mut rng_)).await.unwrap();
+    let (gateway, mut unavailable, _primary_rx) = run_sync_gateway(&accounts, ledger).await;
+    let peer = accounts[1].clone();
+    assert_eq!(Event::<CurrentNetwork>::VERSION, Event::<CurrentNetwork>::STATUS_EVENT_VERSION);
+
+    let (verdict, mut stream) =
+        handshake_with_gateway(&gateway, &peer, 4140, honest_signer(peer.clone())).await.unwrap();
+    assert!(matches!(verdict, ResponderProof::Accepted { .. }));
+    let mut framed = Framed::new(&mut stream, EventCodec::<CurrentNetwork>::default());
+    let peer_ip = SocketAddr::from(([127, 0, 0, 1], 4140));
+    let (gateway_clone, address) = (gateway.clone(), peer.address());
+    deadline!(Duration::from_secs(5), move || gateway_clone.connected_addresses().contains(&address));
+
+    // The gateway answers a request past its tip with `NotYet`.
+    let request = BlockRequest::new(1, 3).unwrap();
+    framed.send(Event::BlockRequest(request)).await.unwrap();
+    let response = next_event(&mut framed, |event| match event {
+        Event::BlockResponse(response) => Some(response),
+        _ => None,
+    })
+    .await
+    .unwrap();
+    assert_eq!(response.request, request);
+    assert_eq!(response.status, BlockResponseStatus::NotYet { latest_height: gateway.ledger().latest_block_height() });
+
+    // A `NotYet` reply to the gateway's request reaches sync.
+    let solicit = |request| {
+        let gateway = gateway.clone();
+        async move { assert!(gateway.send(peer_ip, Event::BlockRequest(request)).await.is_some()) }
+    };
+    solicit(request).await;
+    next_event(&mut framed, |event| matches!(event, Event::BlockRequest(r) if r == request).then_some(()))
+        .await
+        .unwrap();
+    let status = BlockResponseStatus::NotYet { latest_height: 0 };
+    framed.send(Event::BlockResponse(BlockResponse::unavailable(request, status))).await.unwrap();
+    let reported = timeout(Duration::from_secs(5), unavailable.recv()).await;
+    assert_eq!(reported.unwrap(), Some((peer_ip, request, status)));
+    assert!(gateway.connected_addresses().contains(&peer.address()));
+
+    // A reply that contradicts its request disconnects the peer.
+    let request = BlockRequest::new(2, 4).unwrap();
+    solicit(request).await;
+    next_event(&mut framed, |event| matches!(event, Event::BlockRequest(r) if r == request).then_some(()))
+        .await
+        .unwrap();
+    let status = BlockResponseStatus::Pruned { oldest_retained: 2 };
+    framed.send(Event::BlockResponse(BlockResponse::unavailable(request, status))).await.unwrap();
+    let (gateway_clone, address) = (gateway.clone(), peer.address());
+    deadline!(Duration::from_secs(5), move || !gateway_clone.connected_addresses().contains(&address));
+}
+
+/// Tests that a gateway sends no status reply to a peer below the status version: a request past
+/// its tip disconnects the peer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_gateway_disconnects_an_old_peer_that_asks_past_its_tip() {
+    let mut rng = TestRng::default();
+    let (accounts, committee) = shared_test_committee(COMMITTEE_SIZE, &mut rng);
+    let accounts_ = accounts.clone();
+    let mut rng_ = TestRng::fixed(rng.random());
+    let ledger = task::spawn_blocking(move || sample_ledger(&accounts_, &committee, &mut rng_)).await.unwrap();
+    let (gateway, _unavailable, _primary_rx) = run_sync_gateway(&accounts, ledger).await;
+    let peer = accounts[1].clone();
+
+    let version = Event::<CurrentNetwork>::STATUS_EVENT_VERSION - 1;
+    let trailer =
+        HandshakeTrailer { genesis_hash: Some(genesis_hash(&gateway)), ..HandshakeTrailer::of::<CurrentNetwork>() };
+    let (verdict, mut stream) =
+        handshake_with_gateway_sending(dial_addr(&gateway), &peer, 4140, version, trailer, honest_signer(peer.clone()))
+            .await
+            .unwrap();
+    assert!(matches!(verdict, ResponderProof::Accepted { .. }));
+    let mut framed = Framed::new(&mut stream, EventCodec::<CurrentNetwork>::default());
+    let (gateway_clone, address) = (gateway.clone(), peer.address());
+    deadline!(Duration::from_secs(5), move || gateway_clone.connected_addresses().contains(&address));
+
+    framed.send(Event::BlockRequest(BlockRequest::new(1, 3).unwrap())).await.unwrap();
+    let response = next_event(&mut framed, |event| match event {
+        Event::BlockResponse(response) => Some(response),
+        _ => None,
+    })
+    .await;
+    assert!(response.is_none(), "the gateway sent {response:?}");
+    let (gateway_clone, address) = (gateway.clone(), peer.address());
+    deadline!(Duration::from_secs(5), move || !gateway_clone.connected_addresses().contains(&address));
 }
 
 /// How long to wait for a stalled handshake to time out.

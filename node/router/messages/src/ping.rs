@@ -26,6 +26,8 @@ pub struct Ping<N: Network> {
     pub version: u32,
     pub node_type: NodeType,
     pub block_locators: Option<BlockLocators<N>>,
+    /// The oldest block height the sender serves, if it sent one with its block locators.
+    pub oldest_retained: Option<u32>,
 }
 
 /// The chain height [`MAX_PING_MESSAGE_SIZE`] is sized for: mainnet is at ~19.9M blocks and grows
@@ -35,11 +37,11 @@ pub const MAX_PING_LOCATOR_HEIGHT: u32 = 500_000_000;
 
 /// The maximum size of a `Ping` frame, kept next to `write_le` below since that is what actually
 /// defines the fixed part of this layout (4 + 1 + 1 bytes, plus the message ID that
-/// `Message::write_le` prepends). Unlike every other message type, `Ping` has no fixed shape:
-/// `block_locators` grows with the height of the chain, carrying up to `NUM_RECENT_BLOCKS` recent
-/// entries plus one checkpoint per `CHECKPOINT_INTERVAL` blocks (see
-/// `snarkos_node_sync_locators::block_locators`), each a `(u32, BlockHash)` pair - 4 bytes plus a
-/// 32-byte field element.
+/// `Message::write_le` prepends). Marker 2 adds a trailing 4-byte `oldest_retained`. Unlike every
+/// other message type, `Ping` has no fixed shape: `block_locators` grows with the height of the
+/// chain, carrying up to `NUM_RECENT_BLOCKS` recent entries plus one checkpoint per
+/// `CHECKPOINT_INTERVAL` blocks (see `snarkos_node_sync_locators::block_locators`), each a
+/// `(u32, BlockHash)` pair - 4 bytes plus a 32-byte field element.
 ///
 /// This is a policy cap rather than the wire format's own ceiling: the format can express
 /// `MAX_CHECKPOINTS` checkpoints, a chain of 4.29 billion blocks and ~14.75 MiB, but locator size
@@ -55,10 +57,11 @@ const _: () = {
     let ping = 2 // the message ID
         + 4 // `version`
         + 1 // `node_type`
-        + 1 // the `Some`/`None` marker on `block_locators`
+        + 1 // the marker on `block_locators`
         + 4 // the `recents` map's length prefix
         + 4 // the `checkpoints` map's length prefix
-        + (NUM_RECENT_BLOCKS + checkpoints) * locator_entry;
+        + (NUM_RECENT_BLOCKS + checkpoints) * locator_entry
+        + 4; // `oldest_retained`
     assert!(
         ping <= MAX_PING_MESSAGE_SIZE,
         "MAX_PING_MESSAGE_SIZE is below the Ping a chain at MAX_PING_LOCATOR_HEIGHT sends"
@@ -77,14 +80,19 @@ impl<N: Network> ToBytes for Ping<N> {
     fn write_le<W: io::Write>(&self, mut writer: W) -> io::Result<()> {
         self.version.write_le(&mut writer)?;
         self.node_type.write_le(&mut writer)?;
-        if let Some(locators) = &self.block_locators {
-            1u8.write_le(&mut writer)?;
-            locators.write_le(&mut writer)?;
-        } else {
-            0u8.write_le(&mut writer)?;
+        match (&self.block_locators, self.oldest_retained) {
+            (None, None) => 0u8.write_le(&mut writer),
+            (Some(locators), None) => {
+                1u8.write_le(&mut writer)?;
+                locators.write_le(&mut writer)
+            }
+            (Some(locators), Some(oldest_retained)) => {
+                2u8.write_le(&mut writer)?;
+                locators.write_le(&mut writer)?;
+                oldest_retained.write_le(&mut writer)
+            }
+            (None, Some(_)) => Err(error("A Ping cannot carry a floor without block locators")),
         }
-
-        Ok(())
     }
 }
 
@@ -94,19 +102,22 @@ impl<N: Network> FromBytes for Ping<N> {
         let node_type = NodeType::read_le(&mut reader)?;
 
         let selector = u8::read_le(&mut reader)?;
-        let block_locators = match selector {
-            0 => None,
-            1 => Some(BlockLocators::read_le(&mut reader)?),
+        let (block_locators, oldest_retained) = match selector {
+            0 => (None, None),
+            1 => (Some(BlockLocators::read_le(&mut reader)?), None),
+            2 => (Some(BlockLocators::read_le(&mut reader)?), Some(u32::read_le(&mut reader)?)),
             _ => return Err(error("Invalid block locators marker")),
         };
 
-        Ok(Self { version, node_type, block_locators })
+        Ok(Self { version, node_type, block_locators, oldest_retained })
     }
 }
 
 impl<N: Network> Ping<N> {
-    pub fn new(node_type: NodeType, block_locators: Option<BlockLocators<N>>) -> Self {
-        Self { version: <Message<N>>::latest_message_version(), node_type, block_locators }
+    /// Constructs a `Ping`. `oldest_retained` is only sent along with block locators.
+    pub fn new(node_type: NodeType, block_locators: Option<BlockLocators<N>>, oldest_retained: Option<u32>) -> Self {
+        let oldest_retained = oldest_retained.filter(|_| block_locators.is_some());
+        Self { version: <Message<N>>::latest_message_version(), node_type, block_locators, oldest_retained }
     }
 }
 
@@ -145,8 +156,11 @@ pub mod prop_tests {
     }
 
     pub fn any_ping() -> BoxedStrategy<Ping<CurrentNetwork>> {
-        (any::<u32>(), option::of(any_block_locators()), any_node_type())
-            .prop_map(|(version, block_locators, node_type)| Ping { version, block_locators, node_type })
+        (any::<u32>(), option::of(any_block_locators()), option::of(any::<u32>()), any_node_type())
+            .prop_map(|(version, block_locators, oldest_retained, node_type)| {
+                let oldest_retained = oldest_retained.filter(|_| block_locators.is_some());
+                Ping { version, block_locators, node_type, oldest_retained }
+            })
             .boxed()
     }
 
@@ -187,8 +201,33 @@ pub mod prop_tests {
                 version: u32::MAX,
                 node_type: NodeType::Client,
                 block_locators: Some(sample_block_locators(height)),
+                oldest_retained: None,
             });
         }
+    }
+
+    /// Marker 1 carries no floor, marker 2 appends it after the locators, and a floor without
+    /// locators is not encodable.
+    #[test]
+    fn ping_floor_marker() {
+        let ping = |oldest_retained| Ping::<CurrentNetwork> {
+            version: 0,
+            node_type: NodeType::Client,
+            block_locators: Some(sample_block_locators(10)),
+            oldest_retained,
+        };
+        let without = ping(None).to_bytes_le().unwrap();
+        let with = ping(Some(7)).to_bytes_le().unwrap();
+        assert_eq!(without[5], 1);
+        assert_eq!(with[5], 2);
+        assert_eq!(with.len(), without.len() + 4);
+        assert_eq!(with[6..with.len() - 4], without[6..]);
+        assert_eq!(with[with.len() - 4..], 7u32.to_le_bytes());
+        assert_roundtrip(&ping(Some(7)));
+
+        let no_locators = Ping::<CurrentNetwork> { block_locators: None, ..ping(Some(7)) };
+        assert!(no_locators.to_bytes_le().is_err());
+        assert_eq!(Ping::<CurrentNetwork>::new(NodeType::Client, None, Some(7)).oldest_retained, None);
     }
 
     /// The largest `Ping` the cap is sized to accept: the locators of a chain at
@@ -199,6 +238,7 @@ pub mod prop_tests {
             version: 0,
             node_type: snarkos_node_network::NodeType::Client,
             block_locators: Some(sample_block_locators(MAX_PING_LOCATOR_HEIGHT)),
+            oldest_retained: Some(u32::MAX),
         }
     }
 }

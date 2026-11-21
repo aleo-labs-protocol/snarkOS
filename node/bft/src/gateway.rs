@@ -30,6 +30,7 @@ use snarkos_account::Account;
 use snarkos_node_bft_events::{
     BlockRequest,
     BlockResponse,
+    BlockResponseStatus,
     CertificateRequest,
     CertificateResponse,
     ConsensusSchedule,
@@ -70,7 +71,7 @@ use snarkos_node_network::{
     },
     shorten_snarkos_sha,
 };
-use snarkos_node_sync::{MAX_BLOCKS_BEHIND, communication_service::CommunicationService};
+use snarkos_node_sync::{MAX_BLOCKS_BEHIND, communication_service::CommunicationService, serve_block_request};
 use snarkos_node_tcp::{
     Config,
     ConnectError,
@@ -422,6 +423,11 @@ impl<N: Network> CommunicationService for Gateway<N> {
         Event::BlockRequest(BlockRequest { start_height, end_height })
     }
 
+    /// Returns `None`: the block requests sent to validators are not limited.
+    fn block_request_limit(&self) -> Option<(usize, Duration)> {
+        None
+    }
+
     /// Sends the given message to specified peer.
     ///
     /// This function returns as soon as the message is queued to be sent,
@@ -501,6 +507,12 @@ impl<N: Network> Gateway<N> {
     /// Returns the primary sender.
     pub fn primary_sender(&self) -> &PrimarySender<N> {
         self.primary_sender.get().expect("Primary sender not set in gateway")
+    }
+
+    /// Returns `true` if the peer is connected at an event version that receives `BlockResponse`
+    /// status replies.
+    fn supports_status_replies(&self, peer_ip: SocketAddr) -> bool {
+        self.get_connected_peer(peer_ip).is_some_and(|peer| peer.version >= Event::<N>::STATUS_EVENT_VERSION)
     }
 
     /// Returns the number of workers.
@@ -730,20 +742,19 @@ impl<N: Network> Gateway<N> {
                     bail!("Block request from '{peer_ip}' has an excessive range ({start_height}..{end_height})")
                 }
 
-                // End height is exclusive.
-                let latest_consensus_version = N::CONSENSUS_VERSION(end_height - 1)?;
-
+                let supports_status = self.supports_status_replies(peer_ip);
                 let self_ = self.clone();
-                let blocks = match task::spawn_blocking(move || {
-                    // Retrieve the blocks within the requested range.
-                    match self_.ledger.get_blocks(start_height..end_height) {
-                        Ok(blocks) => Ok(DataBlocks(blocks)),
-                        Err(error) => bail!("Missing blocks {start_height} to {end_height} from ledger - {error}"),
-                    }
+                let response = match task::spawn_blocking(move || {
+                    serve_block_request(
+                        block_request,
+                        supports_status,
+                        || self_.ledger.latest_block_height(),
+                        |heights| self_.ledger.get_blocks(heights),
+                    )
                 })
                 .await
                 {
-                    Ok(Ok(blocks)) => blocks,
+                    Ok(Ok(response)) => response,
                     Ok(Err(error)) => return Err(error),
                     Err(error) => return Err(anyhow!("[BlockRequest] {error}")),
                 };
@@ -751,18 +762,22 @@ impl<N: Network> Gateway<N> {
                 let self_ = self.clone();
                 self.spawn(async move {
                     // Send the `BlockResponse` message to the peer.
-                    let event =
-                        Event::BlockResponse(BlockResponse::new(block_request, blocks, latest_consensus_version));
-                    Transport::send(&self_, peer_ip, event).await;
+                    Transport::send(&self_, peer_ip, Event::BlockResponse(response)).await;
                 });
                 Ok(true)
             }
-            Event::BlockResponse(BlockResponse { request, latest_consensus_version, blocks, .. }) => {
+            Event::BlockResponse(BlockResponse { request, status, latest_consensus_version, blocks }) => {
                 // Process the block response. Except for some tests, there is always a sync sender.
                 if let Some(sync_sender) = self.sync_sender.get() {
                     // Check the response corresponds to a request.
                     if !self.cache.remove_outbound_block_request(peer_ip, &request) {
                         bail!("Unsolicited block response from '{peer_ip}'")
+                    }
+
+                    if status != BlockResponseStatus::Blocks {
+                        status.ensure_consistent_with(peer_ip, &request)?;
+                        let _ = sync_sender.tx_block_sync_block_unavailable.send((peer_ip, request, status)).await;
+                        return Ok(true);
                     }
 
                     // Perform the deferred non-blocking deserialization of the blocks.
@@ -2392,6 +2407,44 @@ mod prop_tests {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), MEMORY_POOL_PORT + dev.port().unwrap())
         );
         assert_eq!(gateway.num_workers(), workers.len() as u8);
+    }
+
+    /// Tests that only peers connected at `STATUS_EVENT_VERSION` or above receive status replies.
+    #[test]
+    fn test_status_replies_need_the_status_event_version() {
+        use snarkos_node_bft_events::Event;
+        use snarkos_node_network::{ConnectionMode, NodeType, Peer};
+
+        let rng = &mut TestRng::default();
+        let committee = snarkvm::ledger::committee::test_helpers::sample_committee(rng);
+        let ledger = Arc::new(MockLedgerService::new(committee));
+        let storage = Storage::new(ledger.clone(), Arc::new(BFTMemoryService::new()), 10).unwrap();
+        let account = Account::new(rng).unwrap();
+        let gateway =
+            Gateway::new(account.clone(), storage, ledger, None, &[], false, NodeDataDir::new_test(None), Some(0))
+                .unwrap();
+
+        let connect = |port: u16, version: u32| {
+            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+            let mut peer = Peer::new_connecting(addr, false);
+            peer.upgrade_to_connected(
+                addr,
+                port,
+                account.address(),
+                NodeType::Validator,
+                version,
+                None,
+                ConnectionMode::Gateway,
+            );
+            gateway.peer_pool().write().insert(addr, peer);
+            addr
+        };
+        let status_version = Event::<CurrentNetwork>::STATUS_EVENT_VERSION;
+        let old_peer = connect(5001, status_version - 1);
+        let new_peer = connect(5002, status_version);
+
+        assert!(!gateway.supports_status_replies(old_peer));
+        assert!(gateway.supports_status_replies(new_peer));
     }
 
     #[proptest]
