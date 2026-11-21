@@ -38,10 +38,6 @@ env:
 # approves it. The org's fleet starter boots the boxes when GitHub queues a
 # fleet job, from any run, a fork's included, so no job here starts them. The
 # fleet jobs run only in this repository, which alone may use the fleet.
-#
-# Every job needs `schedule-due`. It runs only on a schedule, so each job's
-# `if:` holds a status function: a job whose need was skipped is otherwise
-# skipped too.
 jobs:
   # On a schedule, decides whether staging's head is due a check. It is not
   # due if an earlier scheduled run of this workflow on the same commit gave
@@ -93,6 +89,12 @@ jobs:
             | "\(.databaseId) \(.conclusion) \(.url)"' <<< "$runs")
           due true "Checking $GITHUB_SHA."
 
+  # `needs: schedule-due` makes each job wait for that job, directly or
+  # through `build-snarkos`, and every event but `schedule` skips it.
+  # `!cancelled()` replaces the implicit `success()`, which would skip a job
+  # whenever `schedule-due` is skipped. On a schedule, a job runs only if the
+  # head is due. Most hosted jobs reuse this condition as `*hosted-if`;
+  # `&fleet-if` on `lint` adds the repository check.
   check-shared-refs:
     needs: schedule-due
     if: &hosted-if >-
@@ -180,6 +182,9 @@ jobs:
     needs: schedule-due
     runs-on: [self-hosted, linux, x64, cpu]
     timeout-minutes: 90
+    # `*hosted-if` plus the repository check, which keeps every event's fleet
+    # jobs out of snarkOS-internal. lint-locktick, test and build-snarkos reuse
+    # it as `*fleet-if`.
     if: &fleet-if >-
       !cancelled() && github.repository == 'aleo-labs-protocol/snarkOS' &&
       (github.event_name != 'schedule' || needs.schedule-due.outputs.due == 'true')
