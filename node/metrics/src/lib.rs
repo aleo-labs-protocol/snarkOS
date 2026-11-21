@@ -228,6 +228,11 @@ impl<N: Network> TransmissionTracker<N> {
         (samples, self.retire(now))
     }
 
+    fn untrack_solutions(&mut self) {
+        self.entries.retain(|id, _| !matches!(id, TrackedId::Solution(_)));
+        self.expiry.retain(|_, id| !matches!(id, TrackedId::Solution(_)));
+    }
+
     fn insert(&mut self, id: TrackedId<N>, now: Instant) -> [u64; 2] {
         self.remove(id);
         let key = (now, self.sequence);
@@ -251,6 +256,22 @@ fn record_stale(counts: [u64; 2]) {
 pub fn track_transmission<N: Network>(tracker: &Mutex<TransmissionTracker<N>>, id: TrackedId<N>) {
     let counts = tracker.lock().insert(id, Instant::now());
     record_stale(counts);
+}
+
+/// Stops tracking transmissions that left the memory pool without reaching a block (e.g. evicted).
+pub fn untrack_transmissions<N: Network>(
+    tracker: &Mutex<TransmissionTracker<N>>,
+    ids: impl IntoIterator<Item = TrackedId<N>>,
+) {
+    let mut tracker = tracker.lock();
+    for id in ids {
+        tracker.remove(id);
+    }
+}
+
+/// Stops tracking every solution, e.g. when an epoch boundary clears all unconfirmed solutions.
+pub fn untrack_solutions<N: Network>(tracker: &Mutex<TransmissionTracker<N>>) {
+    tracker.lock().untrack_solutions();
 }
 
 pub fn add_transmission_latency_metric<N: Network>(tracker: &Mutex<TransmissionTracker<N>>, block: &Block<N>) {
@@ -413,5 +434,31 @@ mod transmission_tracker {
         assert_eq!(stale, [EXPIRY_BUDGET as u64, 0]);
         assert_eq!(tracker.retire(now), [0, 1]);
         assert_eq!(tracker.finish([transaction(2)], now), (vec![], [0, 0]));
+    }
+
+    #[test]
+    fn untracked_transmissions_are_neither_sampled_nor_stale() {
+        let tracker = Mutex::new(TransmissionTracker::<MainnetV0>::new(16));
+        let solution = |n| TrackedId::Solution(SolutionID::from(n));
+        let transaction = |n| TrackedId::Transaction(Field::<MainnetV0>::from_u64(n).into());
+        for n in 0..3 {
+            track_transmission(&tracker, solution(n));
+            track_transmission(&tracker, transaction(n));
+        }
+
+        // An evicted transaction is dropped; untracking an unknown ID is a no-op.
+        untrack_transmissions(&tracker, [transaction(1), transaction(7)]);
+        // An epoch boundary drops every solution.
+        untrack_solutions(&tracker);
+
+        let mut tracker = tracker.into_inner();
+        assert_eq!(tracker.entries.len(), 2);
+        assert_eq!(tracker.expiry.len(), 2);
+        let now = Instant::now() + MAX_AGE + Duration::from_secs(1);
+        let (samples, stale) = tracker.finish([solution(0), transaction(1)], now);
+        assert!(samples.is_empty());
+        // Only the two transactions that were still tracked age out as stale.
+        assert_eq!(stale, [0, 2]);
+        assert!(tracker.entries.is_empty() && tracker.expiry.is_empty());
     }
 }

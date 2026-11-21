@@ -327,12 +327,19 @@ impl<N: Network> Consensus<N> {
                 bail!("Solution '{}' exists in the ledger (skipping)", fmt_id(solution_id));
             }
             // Add the solution to the memory pool.
-            if self.solutions_queue.lock().put(solution_id, solution).is_some() {
+            // Note: `push` returns the old entry for a duplicate, or the least recently used entry it evicted.
+            let pushed = self.solutions_queue.lock().push(solution_id, solution);
+            if matches!(pushed, Some((id, _)) if id == solution_id) {
                 bail!("Solution '{}' exists in the memory pool", fmt_id(solution_id));
             }
             #[cfg(feature = "metrics")]
             {
                 metrics::increment_counter(metrics::consensus::UNCONFIRMED_SOLUTIONS);
+                // An evicted solution can no longer reach a block from this node, so stop tracking it.
+                if let Some((evicted_id, _)) = pushed {
+                    let evicted = metrics::TrackedId::Solution(evicted_id);
+                    metrics::untrack_transmissions(&self.transmissions_tracker, [evicted]);
+                }
                 metrics::track_transmission(&self.transmissions_tracker, metrics::TrackedId::Solution(solution_id));
             }
             trace!("Received unconfirmed solution '{}' in the queue", fmt_id(solution_id));
@@ -434,15 +441,20 @@ impl<N: Network> Consensus<N> {
             let insertion = self.transactions_queue.write().insert(transaction_id, transaction, priority_fee);
             #[cfg(feature = "metrics")]
             metrics::record_mempool_transaction(kind, match insertion {
-                Ok(QueueInsertion::Inserted | QueueInsertion::InsertedWithEviction) => "accepted",
+                Ok(QueueInsertion::Inserted | QueueInsertion::InsertedWithEviction(_)) => "accepted",
                 Ok(QueueInsertion::Duplicate) => "already_queued",
                 // The queue returns an error only when it is full.
                 Err(_) => "rejected_pool_full",
             });
             // A duplicate was counted and tracked when its first copy was queued.
             #[cfg(feature = "metrics")]
-            if matches!(insertion, Ok(QueueInsertion::Inserted | QueueInsertion::InsertedWithEviction)) {
+            if matches!(insertion, Ok(QueueInsertion::Inserted | QueueInsertion::InsertedWithEviction(_))) {
                 metrics::increment_counter(metrics::consensus::UNCONFIRMED_TRANSACTIONS);
+                // An evicted transaction can no longer reach a block from this node, so stop tracking it.
+                if let Ok(QueueInsertion::InsertedWithEviction(evicted_id)) = insertion {
+                    let evicted = metrics::TrackedId::Transaction(evicted_id);
+                    metrics::untrack_transmissions(&self.transmissions_tracker, [evicted]);
+                }
                 metrics::track_transmission(
                     &self.transmissions_tracker,
                     metrics::TrackedId::Transaction(transaction_id),
@@ -779,6 +791,12 @@ impl<N: Network> Consensus<N> {
 
             // Calculate latency for all transmissions included in this block.
             metrics::add_transmission_latency_metric(&self.transmissions_tracker, &block);
+            // The epoch boundary above cleared every unconfirmed solution (in the queue and in the workers),
+            // and none of them can be included anymore, so stop tracking them. This runs after the latency
+            // samples so that solutions included in this block are still recorded.
+            if block_height.is_multiple_of(N::NUM_BLOCKS_PER_EPOCH) {
+                metrics::untrack_solutions(&self.transmissions_tracker);
+            }
 
             metrics::gauge(metrics::consensus::COMMITTED_CERTIFICATES, num_committed_certificates as f64);
             metrics::histogram(metrics::consensus::CERTIFICATE_COMMIT_LATENCY, elapsed_secs);
