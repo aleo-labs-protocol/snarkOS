@@ -916,7 +916,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         Ok(([(CONTENT_TYPE, HeaderValue::from_static("application/json"))], body).into_response())
     }
 
-    /// Returns the `programs/summary` JSON body for the latest height, building it at most once.
+    /// Returns a `programs/summary` JSON body at least as new as the height the request first saw.
     pub(crate) async fn programs_summary_body(&self) -> Result<Bytes, RestError> {
         let seen = self.ledger.latest_height();
         if let Some(body) = self.programs_summary.get(seen..=seen) {
