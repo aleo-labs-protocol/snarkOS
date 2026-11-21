@@ -45,7 +45,7 @@ members = [
 [workspace.dependencies.snarkvm]
 #path = "../snarkVM"
 git = "https://github.com/aleo-labs-protocol/snarkVM.git"
-rev = "7ba14e66b6ae2e928e3615479ef784f6737da212" #staging
+rev = "665351e4477a92e8b477bb3fdebe7121452a9b61" #feat/deployment-freeze
 #version = "=4.12.0"
 default-features = false
 

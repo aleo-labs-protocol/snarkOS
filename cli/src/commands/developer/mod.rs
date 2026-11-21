@@ -19,6 +19,9 @@ pub use decrypt::*;
 mod deploy;
 pub use deploy::*;
 
+mod deployment_freeze;
+pub use deployment_freeze::*;
+
 mod execute;
 pub use execute::*;
 
@@ -40,7 +43,7 @@ use snarkvm::{
 };
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use clap::{Parser, ValueEnum};
+use clap::{Args, Parser, ValueEnum, builder::NonEmptyStringValueParser};
 use colored::Colorize;
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
@@ -54,6 +57,7 @@ use ureq::{
     ResponseExt,
     http::{self, Uri},
 };
+use zeroize::Zeroize;
 
 /// The format to store a generated transaction as.
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -82,6 +86,8 @@ pub enum DeveloperCommand {
     Decrypt(Decrypt),
     /// Deploy a program.
     Deploy(Deploy),
+    /// Vote on, or show, the deployment freeze (`aleo_deployment_freeze.aleo`).
+    DeploymentFreeze(DeploymentFreeze),
     /// Execute a program function.
     Execute(Execute),
     /// Scan the node for records.
@@ -106,6 +112,71 @@ pub struct Developer {
     /// Sets verbosity of log output. By default, no logs are shown.
     #[clap(long, global = true)]
     verbosity: Option<u8>,
+}
+
+/// The key, fee and broadcast options of `snarkos developer execute`, shared with the commands that
+/// build an execution.
+#[derive(Debug, Args)]
+#[command(
+    group(clap::ArgGroup::new("mode").required(true).multiple(false)),
+    group(clap::ArgGroup::new("key").required(true).multiple(false))
+)]
+struct ExecuteOptions {
+    /// The private key used to generate the execution.
+    #[clap(short = 'p', long, group = "key", value_parser=NonEmptyStringValueParser::default())]
+    private_key: Option<String>,
+    /// Specify the path to a file containing the account private key of the node
+    #[clap(long, group = "key", value_parser=NonEmptyStringValueParser::default())]
+    private_key_file: Option<String>,
+    /// Use a developer validator key to generate the execution
+    #[clap(long, group = "key")]
+    dev_key: Option<u16>,
+    /// The endpoint to query node state from and broadcast to (if set to broadcast).
+    ///
+    /// The given value is expected to be the base URL, e.g., "https://mynode.com", and will be extended automatically
+    /// to fit the API version, network type and query. A base URL that does not end in "/v1" or "/v2" gets "/v2".
+    /// For example, the base URL may extend to "https://mynode.com/v2/testnet/transaction/unconfirmed/ID" to retrieve
+    /// an unconfirmed transaction on the test network.
+    ///
+    /// The given value may also be a JSON serialized `StaticQuery` struct.
+    #[clap(short, long, alias="query", default_value=DEFAULT_ENDPOINT, verbatim_doc_comment)]
+    endpoint: String,
+    /// The priority fee in microcredits.
+    #[clap(long, default_value_t = 0)]
+    priority_fee: u64,
+    /// The record to spend the fee from.
+    #[clap(short, long)]
+    record: Option<String>,
+    /// Set the URL used to broadcast the transaction (if no value is given, the query endpoint is used).
+    ///
+    /// The given value is expected the full URL of the endpoint, not just the base URL, e.g., "https://mynode.com/v2/testnet/transaction/broadcast".
+    #[clap(short, long, group = "mode", verbatim_doc_comment)]
+    broadcast: Option<Option<Uri>>,
+    /// Performs a dry-run of transaction generation.
+    #[clap(short, long, group = "mode")]
+    dry_run: bool,
+    /// Store generated deployment transaction to a local file.
+    #[clap(long, group = "mode")]
+    store: Option<String>,
+    /// If --store is specified, the format in which the transaction should be stored : string or
+    /// bytes, by default : bytes.
+    #[clap(long, value_enum, default_value_t = StoreFormat::Bytes, requires="store")]
+    store_format: StoreFormat,
+    /// Wait for the transaction to be accepted by the network. Requires --broadcast.
+    #[clap(long, requires = "broadcast")]
+    wait: bool,
+    /// Timeout in seconds when waiting for transaction confirmation. Default is 60 seconds.
+    #[clap(long, default_value_t = 60, requires = "wait")]
+    timeout: u64,
+}
+
+impl Drop for ExecuteOptions {
+    /// Zeroize the private key when the options go out of scope.
+    fn drop(&mut self) {
+        if let Some(mut pk) = self.private_key.take() {
+            pk.zeroize()
+        }
+    }
 }
 
 /// The serialized REST error sent over the network.
@@ -160,6 +231,7 @@ impl Developer {
         match self.command {
             Decrypt(decrypt) => decrypt.parse::<N>(),
             Deploy(deploy) => deploy.parse::<N>(),
+            DeploymentFreeze(deployment_freeze) => deployment_freeze.parse::<N>(),
             Execute(execute) => execute.parse::<N>(),
             Scan(scan) => scan.parse::<N>(),
             TransferPrivate(transfer_private) => transfer_private.parse::<N>(),
@@ -402,18 +474,23 @@ impl Developer {
         }
     }
 
+    /// Gets the value of `program_id/mapping[key]`, or `None` if the mapping has no such key.
+    fn get_mapping_value<N: Network>(
+        endpoint: &Uri,
+        program_id: &str,
+        mapping: &str,
+        key: impl std::fmt::Display,
+    ) -> Result<Option<Value<N>>> {
+        // If no such key exists, the node returns status code 200 with `null` as the response body.
+        // Nodes should never return 404 for this endpoint.
+        Self::http_get_json::<N, Option<Value<N>>>(endpoint, &format!("program/{program_id}/mapping/{mapping}/{key}"))?
+            .ok_or_else(|| anyhow!("Got unexpected 404 error when fetching {program_id}/{mapping}"))
+    }
+
     /// Gets the public account balance of an Aleo Address (in microcredits).
     fn get_public_balance<N: Network>(endpoint: &Uri, address: &Address<N>) -> Result<Option<u64>> {
-        // Initialize the program id and account identifier.
-        let account_mapping = Identifier::<N>::from_str("account")?;
-        let credits = ProgramID::<N>::from_str("credits.aleo")?;
-
         // Request the balance from the endpoint.
-        // If no such balance/account exists, the node returns status code 200 with `null` as the response body.
-        // Nodes should never return 404 for this endpoint.
-        let result: Option<Value<N>> =
-            Self::http_get_json::<N, _>(endpoint, &format!("program/{credits}/mapping/{account_mapping}/{address}"))?
-                .ok_or_else(|| anyhow!("Got unexpected 404 error when fetching public balance"))?;
+        let result = Self::get_mapping_value::<N>(endpoint, "credits.aleo", "account", address)?;
 
         // Return the balance in microcredits.
         match result {

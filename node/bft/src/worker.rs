@@ -25,7 +25,12 @@ use crate::{
     helpers::{Pending, Ready, Storage, WorkerReceiver, fmt_id, max_redundant_requests},
     spawn_blocking,
 };
-use snarkos_node_bft_ledger_service::{LedgerService, deserialize_transaction_strict};
+use snarkos_node_bft_ledger_service::{
+    LedgerService,
+    check_deployment_not_frozen,
+    deserialize_transaction_strict,
+    is_deployment,
+};
 use snarkos_utilities::locks::parking_lot::{Mutex, RwLock};
 use snarkvm::{
     console::prelude::*,
@@ -42,6 +47,16 @@ use rand::seq::IteratorRandom;
 
 use std::{future::Future, net::SocketAddr, sync::Arc};
 use tokio::{sync::oneshot, task::JoinHandle, time::timeout};
+
+/// Where a transmission from a peer comes from. It decides which checks `Worker::insert_transmission_from_peer` applies.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum TransmissionSource {
+    /// Fetched in response to a worker ping. The ready-queue capacity limit applies, and deployments
+    /// are turned away while they are frozen.
+    Ping,
+    /// Fetched to materialize a peer's batch proposal before signing it. Every transmission is kept.
+    PeerProposal,
+}
 
 /// A worker's main role is maintaining a queue of verified ("ready") transmissions,
 /// which will eventually be fetched by the primary when the primary generates a new batch.
@@ -331,7 +346,7 @@ impl<N: Network> Worker<N> {
         transmission_id: TransmissionID<N>,
         transmission: Transmission<N>,
     ) {
-        self.insert_transmission_from_peer(peer_ip, transmission_id, transmission, true);
+        self.insert_transmission_from_peer(peer_ip, transmission_id, transmission, TransmissionSource::Ping);
     }
 
     /// Handles the incoming transmission from a peer.
@@ -347,22 +362,22 @@ impl<N: Network> Worker<N> {
         transmission_id: TransmissionID<N>,
         transmission: Transmission<N>,
     ) {
-        self.insert_transmission_from_peer(peer_ip, transmission_id, transmission, false);
+        self.insert_transmission_from_peer(peer_ip, transmission_id, transmission, TransmissionSource::PeerProposal);
     }
 
     /// Inserts a peer-provided transmission into the ready queue.
     ///
-    /// If `enforce_capacity_limit` is `true`, the transmission is dropped when the ready queue is
-    /// already full. This must only be set for the worker-ping fetch path; callers that must retain
-    /// the transmission (e.g. materializing a peer's batch proposal before signing it) must leave it
-    /// `false`. See [`Worker::process_transmission_from_ping`] and
+    /// If `source` is `TransmissionSource::Ping`, the transmission is dropped when the ready queue is
+    /// already full, or when it is a deployment and deployments are frozen. Callers that must retain
+    /// the transmission (e.g. materializing a peer's batch proposal before signing it) must pass
+    /// `TransmissionSource::PeerProposal`. See [`Worker::process_transmission_from_ping`] and
     /// [`Worker::process_transmission_from_peer`].
     fn insert_transmission_from_peer(
         &self,
         peer_ip: SocketAddr,
         transmission_id: TransmissionID<N>,
         transmission: Transmission<N>,
-        enforce_capacity_limit: bool,
+        source: TransmissionSource,
     ) {
         // If the transmission ID already exists, then do not store it.
         if self.contains_transmission(transmission_id) {
@@ -382,6 +397,20 @@ impl<N: Network> Worker<N> {
         if !is_well_formed {
             return;
         }
+        // On the worker-ping path, turn deployments away while they are frozen. A peer's batch proposal
+        // is not filtered here, so this node never refuses to sign over a frozen deployment.
+        if source == TransmissionSource::Ping
+            && let Transmission::Transaction(transaction) = &transmission
+            && is_deployment(transaction)
+            && let Err(error) = check_deployment_not_frozen(self.ledger.deployment_freeze_policy())
+        {
+            trace!(
+                "Worker {} - Skipping transmission '{}' - {error}",
+                self.id,
+                self.format_transmission_id(transmission_id)
+            );
+            return;
+        }
         // If the transmission is a deserialized execution, capture it so it can be verified
         // immediately below (only if it is actually inserted). This takes heavy transaction
         // verification out of the hot path during block generation.
@@ -397,7 +426,7 @@ impl<N: Network> Worker<N> {
         let inserted = {
             let mut ready = self.ready.write();
             // If the ready queue is full, then skip this transmission.
-            if enforce_capacity_limit && ready.num_transmissions() > Self::MAX_TRANSMISSIONS_PER_WORKER {
+            if source == TransmissionSource::Ping && ready.num_transmissions() > Self::MAX_TRANSMISSIONS_PER_WORKER {
                 return;
             }
             ready.insert(transmission_id, transmission)
@@ -407,7 +436,10 @@ impl<N: Network> Worker<N> {
             // Eagerly verify a newly-inserted execution to warm the verification cache.
             if let Some((tx_id, tx)) = execution_to_verify {
                 #[cfg(feature = "metrics")]
-                let site = if enforce_capacity_limit { "worker_ping" } else { "peer_proposal" };
+                let site = match source {
+                    TransmissionSource::Ping => "worker_ping",
+                    TransmissionSource::PeerProposal => "peer_proposal",
+                };
                 let self_ = self.clone();
                 tokio::spawn(async move {
                     #[cfg(feature = "metrics")]
@@ -484,6 +516,12 @@ impl<N: Network> Worker<N> {
         let transmission_id = TransmissionID::Transaction(transaction_id, checksum);
         // Remove the transaction from the pending queue.
         self.pending.remove(transmission_id, Some(transmission.clone()));
+        // Turn deployments away while they are frozen, before any check of the fee or proofs. Consensus
+        // drops queued deployments before sending them here, but not the transmissions it reinserts
+        // after it fails to advance to a block.
+        if is_deployment(&transaction) {
+            check_deployment_not_frozen(self.ledger.deployment_freeze_policy())?;
+        }
         // Check if the transaction ID exists.
         if self.contains_transmission(transmission_id) {
             return Ok(false);
@@ -689,8 +727,10 @@ mod tests {
             PendingBlock,
             committee::Committee,
             narwhal::{BatchCertificate, Transmission, TransmissionID},
+            test_helpers::sample_deployment_transaction,
         },
-        prelude::Address,
+        prelude::{Address, ToBytes},
+        synthesizer::process::deployment_freeze::FreezeWindow,
     };
 
     use bytes::Bytes;
@@ -756,6 +796,7 @@ mod tests {
             fn begin_ledger_update<'a>(&'a self) -> Result<Box<dyn LedgerUpdateService<N> + 'a>, BeginLedgerUpdateError>;
             fn transaction_spend_in_microcredits(&self, transaction: &Transaction<N>, consensus_version: ConsensusVersion) -> Result<u64>;
             fn is_stopped(&self) -> bool;
+            fn deployment_freeze_policy(&self) -> Option<FreezeWindow>;
         }
     }
 
@@ -1073,6 +1114,8 @@ mod tests {
         mock_ledger.expect_get_committee_lookback_for_round().returning(move |_| Ok(committee_clone.clone()));
         mock_ledger.expect_contains_transmission().returning(|_| Ok(false));
         mock_ledger.expect_check_transaction_basic().returning(|_, _| Err(anyhow!("")));
+        // The random transaction below reads as a deployment if its second byte is zero.
+        mock_ledger.expect_deployment_freeze_policy().returning(|| None);
         let ledger: Arc<dyn LedgerService<CurrentNetwork>> = Arc::new(mock_ledger);
         // Initialize the storage.
         let storage = Storage::<CurrentNetwork>::new(ledger.clone(), Arc::new(BFTMemoryService::new()), 1).unwrap();
@@ -1091,6 +1134,49 @@ mod tests {
         assert!(result.is_err());
         assert!(!worker.pending.contains(transmission_id));
         assert!(!worker.ready.read().contains(transmission_id));
+    }
+
+    #[tokio::test]
+    async fn test_deployments_frozen() {
+        let rng = &mut TestRng::default();
+        // Sample a committee.
+        let committee = snarkvm::ledger::committee::test_helpers::sample_committee(rng);
+        let committee_clone = committee.clone();
+        // Setup the mock gateway and a ledger that reports a deployment freeze.
+        let gateway = MockGateway::default();
+        let mut mock_ledger = MockLedger::default();
+        mock_ledger.expect_current_committee().returning(move || Ok(committee.clone()));
+        mock_ledger.expect_get_committee_lookback_for_round().returning(move |_| Ok(committee_clone.clone()));
+        mock_ledger.expect_contains_transmission().returning(|_| Ok(false));
+        mock_ledger.expect_deployment_freeze_policy().returning(|| Some(FreezeWindow { start: 20, end: 30 }));
+        // A frozen deployment is turned away before its fee or proofs are checked.
+        mock_ledger.expect_check_transaction_basic().never();
+        let ledger: Arc<dyn LedgerService<CurrentNetwork>> = Arc::new(mock_ledger);
+        // Initialize the storage.
+        let storage = Storage::<CurrentNetwork>::new(ledger.clone(), Arc::new(BFTMemoryService::new()), 1).unwrap();
+
+        // Create the Worker.
+        let worker = Worker::new(0, Arc::new(gateway), storage, ledger, Default::default()).unwrap();
+        let deployment = sample_deployment_transaction(2, 0, false, true, rng);
+        let transaction_id = deployment.id();
+        // Use the serialized form, as a deployment arrives from a peer.
+        let deployment = Data::Buffer(deployment.to_bytes_le().unwrap().into());
+        let checksum = deployment.to_checksum::<CurrentNetwork>().unwrap();
+        let transmission_id = TransmissionID::Transaction(transaction_id, checksum);
+        let peer_ip = SocketAddr::from(([127, 0, 0, 1], 1234));
+
+        // The node's own memory pool (fed by REST and by peers through `Consensus`) refuses it.
+        let error = worker.process_unconfirmed_transaction(transaction_id, deployment.clone()).await.unwrap_err();
+        assert!(error.to_string().contains("frozen") && error.to_string().contains("30"), "{error}");
+        assert!(!worker.ready.read().contains(transmission_id));
+
+        // A deployment fetched after a worker ping is dropped.
+        worker.process_transmission_from_ping(peer_ip, transmission_id, Transmission::Transaction(deployment.clone()));
+        assert!(!worker.ready.read().contains(transmission_id));
+
+        // A deployment in a peer's batch proposal is still stored, so this node never refuses to sign over it.
+        worker.process_transmission_from_peer(peer_ip, transmission_id, Transmission::Transaction(deployment));
+        assert!(worker.ready.read().contains(transmission_id));
     }
 
     #[tokio::test]

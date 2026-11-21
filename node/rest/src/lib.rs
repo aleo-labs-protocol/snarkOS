@@ -32,6 +32,7 @@ mod routes;
 
 mod version;
 
+use snarkos_node_bft_ledger_service::{DeploymentFreezeCache, check_deployment_not_frozen};
 use snarkos_node_cdn::CdnBlockSync;
 use snarkos_node_consensus::Consensus;
 use snarkos_node_router::{
@@ -222,6 +223,8 @@ pub struct Rest<N: Network, C: ConsensusStorage<N>, R: Routing<N>> {
     block_cache: Arc<Mutex<LruCache<N::BlockHash, ErasedJson>>>,
     /// The upstream for the routes of the removed `history` feature, if `--history-compat-mode` is set.
     history_compat: Option<Arc<HistoryCompat>>,
+    /// The deployment freeze policy, read at most once per block.
+    deployment_freeze: Arc<DeploymentFreezeCache<N>>,
 }
 
 impl<N: Network, C: 'static + ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
@@ -237,6 +240,7 @@ impl<N: Network, C: 'static + ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> 
         cdn_sync: Option<Arc<CdnBlockSync>>,
         block_sync: Arc<BlockSync<N>>,
         rest_verification_limits: RestVerificationLimits,
+        deployment_freeze: Arc<DeploymentFreezeCache<N>>,
     ) -> Result<Self> {
         let rest_verification_limits = RestVerificationLimits::new::<N, C>(
             rest_verification_limits.num_verifying_deploys,
@@ -260,6 +264,7 @@ impl<N: Network, C: 'static + ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> 
             verification_slots: Arc::new(VerificationSlots::new(rest_verification_limits)),
             block_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(BLOCK_CACHE_SIZE).unwrap()))),
             history_compat,
+            deployment_freeze,
         };
         // Spawn the server.
         server.spawn_server(rest_ip, rest_rps).await?;
@@ -791,6 +796,7 @@ mod route_tests {
             store::{StorageMode, helpers::memory::ConsensusMemory},
         },
         prelude::MainnetV0,
+        synthesizer::process::deployment_freeze::FreezeWindow,
         utilities::TestRng,
     };
 
@@ -842,6 +848,7 @@ mod route_tests {
             })),
             block_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(BLOCK_CACHE_SIZE).unwrap()))),
             history_compat: None,
+            deployment_freeze: Default::default(),
         }
     }
 
@@ -858,14 +865,57 @@ mod route_tests {
     /// hand does not carry, so this attaches one; without it every request fails the rate limiter's
     /// key extractor rather than reaching a handler.
     async fn request(rest: &CurrentRest, method: Method, uri: &str) -> (StatusCode, String) {
-        let mut request = Request::builder().method(method).uri(uri).body(Body::empty()).unwrap();
+        let request = Request::builder().method(method).uri(uri).body(Body::empty()).unwrap();
+        send_request(rest.build_routes(TEST_RPS), request).await
+    }
+
+    /// Issues a POST request with a JSON body against the routes, as [`request`] does.
+    async fn post_json<T: serde::Serialize>(rest: &CurrentRest, uri: &str, body: &T) -> (StatusCode, String) {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(body).unwrap()))
+            .unwrap();
+        send_request(rest.build_routes(TEST_RPS), request).await
+    }
+
+    /// Sends the request through the router, with the `ConnectInfo` that the governor layer needs,
+    /// and returns the status and the body.
+    async fn send_request(router: axum::Router, mut request: Request<Body>) -> (StatusCode, String) {
         request.extensions_mut().insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4130))));
 
-        let response = rest.build_routes(TEST_RPS).oneshot(request).await.unwrap();
+        let response = router.oneshot(request).await.unwrap();
         let status = response.status();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
 
-        (status, String::from_utf8(body.to_vec()).unwrap())
+        (status, String::from_utf8_lossy(&body).to_string())
+    }
+
+    #[tokio::test]
+    async fn transaction_broadcast_refuses_deployments_while_frozen() {
+        let rest = sample_rest().await;
+        let rng = &mut TestRng::default();
+        let deployment = snarkvm::ledger::test_helpers::sample_deployment_transaction(2, 0, false, true, rng);
+        let execution = snarkvm::ledger::test_helpers::sample_execution_transaction_with_fee(true, rng, 0);
+
+        // The genesis-only ledger is before the freeze version, so the ledger read finds no freeze.
+        let (status, body) = post_json(&rest, "/transaction/broadcast", &deployment).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // During a freeze, a deployment is refused at once, with the end height, and is not broadcast.
+        rest.deployment_freeze.set_policy_at(rest.ledger.latest_hash(), Some(FreezeWindow { start: 20, end: 30 }));
+        let (status, body) = post_json(&rest, "/transaction/broadcast", &deployment).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(body.contains("frozen") && body.contains("30"), "{body}");
+        // An execution is not affected.
+        let (status, body) = post_json(&rest, "/transaction/broadcast", &execution).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // After a thaw or expiry, deployments are accepted again.
+        rest.deployment_freeze.set_policy_at(rest.ledger.latest_hash(), None);
+        let (status, body) = post_json(&rest, "/transaction/broadcast", &deployment).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
     }
 
     #[tokio::test]
@@ -1085,14 +1135,7 @@ mod route_tests {
     /// Sends a request through an already-built router, so that state held by its layers -- the
     /// rate limiter in particular -- persists across calls.
     async fn send(router: &axum::Router, uri: &str) -> (StatusCode, String) {
-        let mut request = Request::builder().uri(uri).body(Body::empty()).unwrap();
-        request.extensions_mut().insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4130))));
-
-        let response = router.clone().oneshot(request).await.unwrap();
-        let status = response.status();
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-
-        (status, String::from_utf8_lossy(&body).to_string())
+        send_request(router.clone(), Request::builder().uri(uri).body(Body::empty()).unwrap()).await
     }
 
     #[tokio::test]

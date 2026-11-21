@@ -13,8 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{DEFAULT_ENDPOINT, Developer, ParsedQuery};
-use crate::{commands::StoreFormat, helpers::args::parse_private_key};
+use super::{Developer, ExecuteOptions, ParsedQuery};
+use crate::helpers::args::parse_private_key;
 
 use snarkvm::{
     console::network::Network,
@@ -41,14 +41,9 @@ use colored::Colorize;
 use std::str::FromStr;
 use tracing::debug;
 use ureq::http::Uri;
-use zeroize::Zeroize;
 
 /// Executes an Aleo program function.
 #[derive(Debug, Parser)]
-#[command(
-    group(clap::ArgGroup::new("mode").required(true).multiple(false)),
-    group(clap::ArgGroup::new("key").required(true).multiple(false))
-)]
 pub struct Execute {
     /// The program identifier.
     #[clap(value_parser=NonEmptyStringValueParser::default())]
@@ -58,76 +53,30 @@ pub struct Execute {
     function: String,
     /// The function inputs.
     inputs: Vec<String>,
-    /// The private key used to generate the execution.
-    #[clap(short = 'p', long, group = "key", value_parser=NonEmptyStringValueParser::default())]
-    private_key: Option<String>,
-    /// Specify the path to a file containing the account private key of the node
-    #[clap(long, group = "key", value_parser=NonEmptyStringValueParser::default())]
-    private_key_file: Option<String>,
-    /// Use a developer validator key to generate the execution
-    #[clap(long, group = "key")]
-    dev_key: Option<u16>,
-    /// The endpoint to query node state from and broadcast to (if set to broadcast).
-    ///
-    /// The given value is expected to be the base URL, e.g., "https://mynode.com", and will be extended automatically
-    /// to fit the API version, network type and query. A base URL that does not end in "/v1" or "/v2" gets "/v2".
-    /// For example, the base URL may extend to "https://mynode.com/v2/testnet/transaction/unconfirmed/ID" to retrieve
-    /// an unconfirmed transaction on the test network.
-    ///
-    /// The given value may also be a JSON serialized `StaticQuery` struct.
-    #[clap(short, long, alias="query", default_value=DEFAULT_ENDPOINT, verbatim_doc_comment)]
-    endpoint: String,
-    /// The priority fee in microcredits.
-    #[clap(long, default_value_t = 0)]
-    priority_fee: u64,
-    /// The record to spend the fee from.
-    #[clap(short, long)]
-    record: Option<String>,
-    /// Set the URL used to broadcast the transaction (if no value is given, the query endpoint is used).
-    ///
-    /// The given value is expected the full URL of the endpoint, not just the base URL, e.g., "https://mynode.com/v2/testnet/transaction/broadcast".
-    #[clap(short, long, group = "mode", verbatim_doc_comment)]
-    broadcast: Option<Option<Uri>>,
-    /// Performs a dry-run of transaction generation.
-    #[clap(short, long, group = "mode")]
-    dry_run: bool,
-    /// Store generated deployment transaction to a local file.
-    #[clap(long, group = "mode")]
-    store: Option<String>,
-    /// If --store is specified, the format in which the transaction should be stored : string or
-    /// bytes, by default : bytes.
-    #[clap(long, value_enum, default_value_t = StoreFormat::Bytes, requires="store")]
-    store_format: StoreFormat,
-    /// Wait for the transaction to be accepted by the network. Requires --broadcast.
-    #[clap(long, requires = "broadcast")]
-    wait: bool,
-    /// Timeout in seconds when waiting for transaction confirmation. Default is 60 seconds.
-    #[clap(long, default_value_t = 60, requires = "wait")]
-    timeout: u64,
+    #[clap(flatten)]
+    options: ExecuteOptions,
     /// Send the transaction without checking if sufficient funds are available (intended for testing purposes only).
     #[clap(long, hide = true)]
     skip_funds_check: bool,
 }
 
-impl Drop for Execute {
-    /// Zeroize the private key when the `Execute` struct goes out of scope.
-    fn drop(&mut self) {
-        if let Some(mut pk) = self.private_key.take() {
-            pk.zeroize()
-        }
-    }
-}
-
 impl Execute {
+    /// Returns the command that executes `program_id/function` on the given inputs.
+    pub(super) fn new(program_id: String, function: String, inputs: Vec<String>, options: ExecuteOptions) -> Self {
+        Self { program_id, function, inputs, options, skip_funds_check: false }
+    }
+
     /// Executes an Aleo program function with the provided inputs.
     pub fn parse<N: Network>(self) -> Result<String> {
-        let ParsedQuery { query, endpoint } = Developer::parse_query::<N>(&self.endpoint)?;
+        let options = &self.options;
+        let ParsedQuery { query, endpoint } = Developer::parse_query::<N>(&options.endpoint)?;
 
         // Check if the query is a static query.
         let is_static_query = matches!(query, Query::STATIC(_));
 
         // Retrieve the private key.
-        let private_key = parse_private_key(self.private_key.clone(), self.private_key_file.clone(), self.dev_key)?;
+        let private_key =
+            parse_private_key(options.private_key.clone(), options.private_key_file.clone(), options.dev_key)?;
 
         // Retrieve the program ID.
         let program_id = ProgramID::from_str(&self.program_id).with_context(|| "Failed to parse program ID")?;
@@ -152,7 +101,8 @@ impl Execute {
             // Initialize the VM.
             let vm = VM::from(store)?;
 
-            if !is_static_query && program_id != ProgramID::from_str("credits.aleo")? {
+            // Built-in programs, such as `credits.aleo`, are already in the process.
+            if !is_static_query && !vm.contains_program(&program_id) {
                 let endpoint = endpoint.as_ref().context("REST query has no endpoint")?;
                 let height = query.current_block_height().with_context(|| "Failed to retrieve current block height")?;
                 let version = N::CONSENSUS_VERSION(height)?;
@@ -163,7 +113,7 @@ impl Execute {
             }
 
             // Prepare the fee.
-            let fee_record = match &self.record {
+            let fee_record = match &options.record {
                 Some(record_string) => Some(
                     Developer::parse_record(&private_key, record_string).with_context(|| "Failed to parse record")?,
                 ),
@@ -176,7 +126,7 @@ impl Execute {
                 (program_id, function),
                 inputs.iter(),
                 fee_record,
-                self.priority_fee,
+                options.priority_fee,
                 Some(&query),
                 rng,
             )
@@ -184,7 +134,7 @@ impl Execute {
         };
 
         // Check if the public balance is sufficient.
-        if self.record.is_none() && !is_static_query && !self.skip_funds_check {
+        if options.record.is_none() && !is_static_query && !self.skip_funds_check {
             let endpoint = endpoint.as_ref().context("REST query has no endpoint")?;
             // Fetch the public balance.
             let address = Address::try_from(&private_key)?;
@@ -206,7 +156,7 @@ impl Execute {
             // Calculate the base fee.
             // This fee is the minimum fee required to pay for the transaction,
             // excluding any finalize fees that the execution may incur.
-            let base_fee = storage_cost.saturating_add(self.priority_fee);
+            let base_fee = storage_cost.saturating_add(options.priority_fee);
 
             // If the public balance is insufficient, return an error.
             if public_balance < base_fee {
@@ -223,12 +173,12 @@ impl Execute {
         // Determine if the transaction should be broadcast, stored, or displayed to the user.
         Developer::handle_transaction(
             endpoint.as_ref(),
-            &self.broadcast,
-            self.dry_run,
-            &self.store,
-            self.store_format,
-            self.wait,
-            self.timeout,
+            &options.broadcast,
+            options.dry_run,
+            &options.store,
+            options.store_format,
+            options.wait,
+            options.timeout,
             transaction,
             locator.to_string(),
         )
@@ -308,10 +258,10 @@ mod tests {
         };
 
         assert_eq!(developer.network, 0);
-        assert_eq!(execute.private_key, Some("PRIVATE_KEY".to_string()));
-        assert_eq!(execute.endpoint, "ENDPOINT");
-        assert_eq!(execute.priority_fee, 77);
-        assert_eq!(execute.record, Some("RECORD".into()));
+        assert_eq!(execute.options.private_key, Some("PRIVATE_KEY".to_string()));
+        assert_eq!(execute.options.endpoint, "ENDPOINT");
+        assert_eq!(execute.options.priority_fee, 77);
+        assert_eq!(execute.options.record, Some("RECORD".into()));
         assert_eq!(execute.program_id, "hello.aleo".to_string());
         assert_eq!(execute.function, "hello".to_string());
         assert_eq!(execute.inputs, vec!["1u32".to_string(), "2u32".to_string()]);
@@ -346,10 +296,10 @@ mod tests {
         };
 
         assert_eq!(developer.network, 0);
-        assert_eq!(execute.private_key_file, Some("PRIVATE_KEY_FILE".to_string()));
-        assert_eq!(execute.endpoint, "ENDPOINT");
-        assert_eq!(execute.priority_fee, 0); // Default value.
-        assert_eq!(execute.record, Some("RECORD".into()));
+        assert_eq!(execute.options.private_key_file, Some("PRIVATE_KEY_FILE".to_string()));
+        assert_eq!(execute.options.endpoint, "ENDPOINT");
+        assert_eq!(execute.options.priority_fee, 0); // Default value.
+        assert_eq!(execute.options.record, Some("RECORD".into()));
         assert_eq!(execute.program_id, "hello.aleo".to_string());
         assert_eq!(execute.function, "hello".to_string());
         assert_eq!(execute.inputs, vec!["1u32".to_string(), "2u32".to_string()]);
@@ -431,7 +381,7 @@ mod tests {
             bail!("Unexpected result of clap parsing!");
         };
 
-        assert_eq!(execute.endpoint, query);
+        assert_eq!(execute.options.endpoint, query);
 
         Ok(())
     }

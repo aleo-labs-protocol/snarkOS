@@ -16,6 +16,7 @@
 use crate::{
     BeginLedgerUpdateError,
     CommitteeNotFound,
+    DeploymentFreezeCache,
     LedgerService,
     LedgerUpdateService,
     deserialize_solution_strict,
@@ -56,6 +57,7 @@ use snarkvm::{
         consensus_config_value_by_version,
         transaction_compute_spend_in_microcredits,
     },
+    synthesizer::process::deployment_freeze::FreezeWindow,
 };
 
 use anyhow::ensure;
@@ -71,6 +73,8 @@ pub struct CoreLedgerService<N: Network, C: ConsensusStorage<N>> {
     latest_leader: Arc<RwLock<Option<(u64, Address<N>)>>>,
     stoppable: Arc<dyn Stoppable>,
     update_lock: Arc<Mutex<()>>,
+    /// The deployment freeze policy, read at most once per block.
+    deployment_freeze: Arc<DeploymentFreezeCache<N>>,
 }
 
 /// A transactional update to the ledger.
@@ -143,7 +147,19 @@ impl<N: Network, C: ConsensusStorage<N>> CoreLedgerService<N, C> {
             );
         }
 
-        Self { ledger, latest_leader: Default::default(), stoppable, update_lock: Default::default() }
+        Self {
+            ledger,
+            latest_leader: Default::default(),
+            stoppable,
+            update_lock: Default::default(),
+            deployment_freeze: Default::default(),
+        }
+    }
+
+    /// Returns the deployment freeze policy cache. A node shares it with its REST server and router,
+    /// so the policy is read from the ledger at most once per block.
+    pub fn deployment_freeze(&self) -> &Arc<DeploymentFreezeCache<N>> {
+        &self.deployment_freeze
     }
 
     /// Returns the deterministic dev committee for rounds at or after the hotswap start,
@@ -485,6 +501,11 @@ impl<N: Network, C: ConsensusStorage<N>> LedgerService<N> for CoreLedgerService<
             Ok(()) => Ok(()),
             Err(e) => bail!("Invalid solution '{}' for the current epoch - {e}", fmt_id(solution_id)),
         }
+    }
+
+    /// Returns the deployment freeze window, if deployments are frozen for the next block (node policy).
+    fn deployment_freeze_policy(&self) -> Option<FreezeWindow> {
+        self.deployment_freeze.policy(&self.ledger)
     }
 
     /// Checks the given transaction is well-formed and unique.
