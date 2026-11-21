@@ -725,7 +725,8 @@ impl<N: Network> Consensus<N> {
 
             // Build no block while validators may run a consensus version this build lacks. The BFT
             // retries the subdag with its next commit. A subdag that the ledger already passed has
-            // returned `Ok(None)` above, which lets the BFT mark it as committed.
+            // returned early above, so this function reports `Ok(false)`, which lets the BFT mark it
+            // as committed.
             self.bft.primary().gateway().ensure_block_may_be_built(block_height)?;
 
             // Advance to the next block.
