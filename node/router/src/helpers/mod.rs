@@ -15,3 +15,18 @@
 
 mod cache;
 pub use cache::Cache;
+
+use snarkvm::{
+    ledger::narwhal::Data,
+    prelude::{FromBytes, ToBytes},
+};
+
+use anyhow::Result;
+
+/// Returns the object in `data`, deserializing a buffer on the blocking thread pool.
+pub async fn deserialize_data<T: FromBytes + ToBytes + Send + 'static>(data: Data<T>) -> Result<T> {
+    match data {
+        Data::Object(object) => Ok(object),
+        Data::Buffer(bytes) => tokio::task::spawn_blocking(move || T::from_bytes_le(&bytes)).await?,
+    }
+}

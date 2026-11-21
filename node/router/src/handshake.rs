@@ -18,6 +18,7 @@ use crate::{
     NodeType,
     PeerPoolHandling,
     Router,
+    deserialize_data,
     messages::{ChallengeRequest, ChallengeResponse, DisconnectReason, Message, MessageCodec, MessageTrait},
 };
 use snarkos_node_network::{ConnectingPeerGuard, get_repo_commit_hash, log_repo_sha_comparison};
@@ -400,7 +401,7 @@ impl<N: Network> Router<N> {
             return Some(DisconnectReason::InvalidChallengeResponse);
         }
         // Perform the deferred non-blocking deserialization of the signature.
-        let Ok(signature) = signature.deserialize().await else {
+        let Ok(signature) = deserialize_data(signature).await else {
             warn!("Handshake with '{peer_addr}' failed (cannot deserialize the signature)");
             return Some(DisconnectReason::InvalidChallengeResponse);
         };

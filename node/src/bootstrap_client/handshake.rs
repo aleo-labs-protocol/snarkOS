@@ -30,7 +30,10 @@ use crate::{
     },
     bootstrap_client::{codec::BootstrapClientCodec, network::MessageOrEvent},
     network::{ConnectionMode, NodeType, PeerPoolHandling, log_repo_sha_comparison},
-    router::messages::{self, Message},
+    router::{
+        deserialize_data,
+        messages::{self, Message},
+    },
     tcp::{ConnectError, Connection, ConnectionSide, protocols::*},
 };
 use snarkos_node_network::{
@@ -248,7 +251,7 @@ impl<N: Network> BootstrapClient<N> {
         /* Message 4: verify the peer's proof, then produce our own. */
 
         // Perform the deferred non-blocking deserialization of the signature.
-        let Ok(signature) = peer_signature.deserialize().await else {
+        let Ok(signature) = deserialize_data(peer_signature).await else {
             warn!("{} Handshake with '{peer_addr}' failed (cannot deserialize the signature)", Self::OWNER);
             return Err(self
                 .reject_noise_handshake(peer_addr, noise, DisconnectReason::InvalidChallengeResponse)
@@ -446,7 +449,7 @@ impl<N: Network> BootstrapClient<N> {
             return false;
         }
         // Perform the deferred non-blocking deserialization of the signature.
-        let Ok(signature) = response.signature.clone().deserialize().await else {
+        let Ok(signature) = deserialize_data(response.signature.clone()).await else {
             warn!("{} Handshake with '{peer_addr}' failed (cannot deserialize the signature)", Self::OWNER);
             return false;
         };

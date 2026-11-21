@@ -17,6 +17,7 @@ use crate::{
     Outbound,
     PeerPoolHandling,
     Router,
+    deserialize_data,
     messages::{
         BlockRequest,
         BlockResponse,
@@ -231,7 +232,7 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
                 self.router().cache.decrement_outbound_puzzle_requests(peer_ip);
 
                 // Perform the deferred non-blocking deserialization of the block header.
-                let header = match message.block_header.deserialize().await {
+                let header = match deserialize_data(message.block_header).await {
                     Ok(header) => header,
                     Err(error) => bail!("[PuzzleResponse] {error}"),
                 };
@@ -269,7 +270,7 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
                 // Clone the serialized message.
                 let serialized = message.clone();
                 // Perform the deferred non-blocking deserialization of the solution.
-                let solution = match message.solution.deserialize().await {
+                let solution = match deserialize_data(message.solution).await {
                     Ok(solution) => solution,
                     Err(error) => bail!("[UnconfirmedSolution] {error}"),
                 };
@@ -310,7 +311,7 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
                 // Clone the serialized message.
                 let serialized = message.clone();
                 // Perform the deferred non-blocking deserialization of the transaction.
-                let transaction = match message.transaction.deserialize().await {
+                let transaction = match deserialize_data(message.transaction).await {
                     Ok(transaction) => transaction,
                     Err(error) => bail!("[UnconfirmedTransaction] {error}"),
                 };
