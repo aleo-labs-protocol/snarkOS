@@ -205,12 +205,17 @@ impl VerificationLane {
 }
 
 /// The latest `programs/summary` response body, built at most once per block height.
-#[derive(Default)]
 pub(crate) struct ProgramsSummaryCache {
     /// The height and serialized JSON body of the latest summary.
     latest: Mutex<Option<(u32, Bytes)>>,
-    /// Held while building a summary, so only one build runs at a time.
-    build: Mutex<()>,
+    /// One permit, so only one build runs at a time. Requests wait for it asynchronously.
+    build: Arc<Semaphore>,
+}
+
+impl Default for ProgramsSummaryCache {
+    fn default() -> Self {
+        Self { latest: Default::default(), build: Arc::new(Semaphore::new(1)) }
+    }
 }
 
 impl ProgramsSummaryCache {
@@ -219,15 +224,21 @@ impl ProgramsSummaryCache {
         self.latest.lock().as_ref().filter(|(h, _)| *h == height).map(|(_, body)| body.clone())
     }
 
+    /// Waits for the build permit without holding a blocking thread.
+    async fn acquire_build(&self) -> Result<OwnedSemaphorePermit, RestError> {
+        self.build.clone().acquire_owned().await.map_err(|err| RestError::internal_server_error(anyhow::anyhow!(err)))
+    }
+
     /// Returns the body for the height that `height` reads, building and caching it if needed.
-    /// Holds the build lock throughout, so call it from a blocking task.
+    /// Call it from a blocking task that owns the build permit, so a dropped request cannot
+    /// release the permit mid-build.
     fn get_or_build<E>(
         &self,
+        _permit: OwnedSemaphorePermit,
         height: impl FnOnce() -> u32,
         build: impl FnOnce(u32) -> Result<Bytes, E>,
     ) -> Result<Bytes, E> {
-        let _build = self.build.lock();
-        // Read the height under the lock: another request may have built it while this one waited.
+        // Read the height under the permit: another request may have built it while this one waited.
         let height = height();
         if let Some(body) = self.get(height) {
             return Ok(body);
@@ -1492,18 +1503,14 @@ mod route_tests {
     async fn programs_summary_builds_once_for_concurrent_requests() {
         let rest = sample_rest().await;
 
-        // Hold the build lock until both requests are waiting on it.
-        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
-        let cache = rest.programs_summary.clone();
-        let holder = tokio::task::spawn_blocking(move || {
-            let _build = cache.build.lock();
-            locked_tx.send(()).unwrap();
-            std::thread::sleep(Duration::from_millis(500));
-        });
-        locked_rx.await.unwrap();
+        // Hold the build permit until both requests are waiting for it.
+        let permit = rest.programs_summary.acquire_build().await.unwrap();
+        let release = async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            drop(permit);
+        };
 
-        let (first, second) = tokio::join!(rest.programs_summary_body(), rest.programs_summary_body());
-        holder.await.unwrap();
+        let (first, second, ()) = tokio::join!(rest.programs_summary_body(), rest.programs_summary_body(), release);
         assert_eq!(first.unwrap().as_ptr(), second.unwrap().as_ptr());
     }
 

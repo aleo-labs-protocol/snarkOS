@@ -922,10 +922,12 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             return Ok(body);
         }
 
+        let permit = self.programs_summary.acquire_build().await?;
         let rest = self.clone();
-        // Build inside the blocking task, so a disconnected client cannot release the lock mid-build.
+        // The blocking task owns the permit, so a disconnected client cannot release it mid-build.
         let build = move || {
             rest.programs_summary.get_or_build(
+                permit,
                 // Read the height first. The ledger advances it only after the block's storage batch
                 // is written, so the reads below see every deployment and amendment up to it.
                 || rest.ledger.latest_height(),
