@@ -70,6 +70,7 @@ use parking_lot::Mutex;
 use std::{
     net::SocketAddr,
     num::NonZeroUsize,
+    ops::RangeInclusive,
     sync::{Arc, LazyLock},
     time::Duration,
 };
@@ -219,33 +220,19 @@ impl Default for ProgramsSummaryCache {
 }
 
 impl ProgramsSummaryCache {
-    /// Returns the cached body if it was built at `height`.
-    fn get(&self, height: u32) -> Option<Bytes> {
-        self.latest.lock().as_ref().filter(|(h, _)| *h == height).map(|(_, body)| body.clone())
+    /// Returns the cached body if it was built at a height in `heights`.
+    fn get(&self, heights: RangeInclusive<u32>) -> Option<Bytes> {
+        self.latest.lock().as_ref().filter(|(h, _)| heights.contains(h)).map(|(_, body)| body.clone())
     }
 
-    /// Waits for the build permit without holding a blocking thread.
+    /// Caches `body` as the summary at `height`.
+    fn set(&self, height: u32, body: Bytes) {
+        *self.latest.lock() = Some((height, body));
+    }
+
+    /// Waits for the build permit.
     async fn acquire_build(&self) -> Result<OwnedSemaphorePermit, RestError> {
         self.build.clone().acquire_owned().await.map_err(|err| RestError::internal_server_error(anyhow::anyhow!(err)))
-    }
-
-    /// Returns the body for the height that `height` reads, building and caching it if needed.
-    /// Call it from a blocking task that owns the build permit, so a dropped request cannot
-    /// release the permit mid-build.
-    fn get_or_build<E>(
-        &self,
-        _permit: OwnedSemaphorePermit,
-        height: impl FnOnce() -> u32,
-        build: impl FnOnce(u32) -> Result<Bytes, E>,
-    ) -> Result<Bytes, E> {
-        // Read the height under the permit: another request may have built it while this one waited.
-        let height = height();
-        if let Some(body) = self.get(height) {
-            return Ok(body);
-        }
-        let body = build(height)?;
-        *self.latest.lock() = Some((height, body.clone()));
-        Ok(body)
     }
 }
 
@@ -842,7 +829,7 @@ mod route_tests {
             committee::test_helpers::sample_committee,
             store::{StorageMode, helpers::memory::ConsensusMemory},
         },
-        prelude::{MainnetV0, PrivateKey, Program, store::ConsensusStore},
+        prelude::{MainnetV0, PrivateKey, Program, Transaction, store::ConsensusStore},
         utilities::TestRng,
     };
 
@@ -1447,11 +1434,11 @@ mod route_tests {
         assert_eq!(hash, sample_genesis_block::<CurrentNetwork>().hash());
     }
 
-    #[tokio::test]
-    async fn programs_summary_lists_deployed_programs() {
-        // The mainnet genesis funds no key we hold, so build a genesis that does and deploy with
-        // it. Ledger and VM calls panic in an async context.
-        let ledger = tokio::task::spawn_blocking(|| {
+    /// Returns a test ledger whose genesis funds the returned key, since the mainnet genesis funds
+    /// no key we hold.
+    async fn funded_ledger() -> (Ledger<CurrentNetwork, ConsensusMemory<CurrentNetwork>>, PrivateKey<CurrentNetwork>) {
+        // Ledger and VM calls panic in an async context.
+        tokio::task::spawn_blocking(|| {
             let rng = &mut TestRng::default();
             let private_key = PrivateKey::<CurrentNetwork>::new(rng).unwrap();
             let store = ConsensusStore::open(StorageMode::new_test(None)).unwrap();
@@ -1462,21 +1449,46 @@ mod route_tests {
             let ledger =
                 Ledger::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>::load(genesis, StorageMode::new_test(None))
                     .unwrap();
+            (ledger, private_key)
+        })
+        .await
+        .expect("the ledger task panicked")
+    }
 
-            // Named to sort before `credits.aleo`.
-            let program = Program::<CurrentNetwork>::from_str(
-                "program aaa_summary.aleo;\n\nfunction hello:\n    input r0 as u32.private;\n    input r1 as u32.private;\n    add r0 r1 into r2;\n    output r2 as u32.private;\n",
-            )
-            .unwrap();
-            let deployment = ledger.vm().deploy(&private_key, &program, None, 600_000, None, rng).unwrap();
-            let block = ledger
-                .prepare_advance_to_next_beacon_block(&private_key, vec![], vec![], vec![deployment], rng)
-                .unwrap();
+    /// Advances the ledger by one block holding the given transactions.
+    async fn advance(
+        ledger: &Ledger<CurrentNetwork, ConsensusMemory<CurrentNetwork>>,
+        private_key: &PrivateKey<CurrentNetwork>,
+        transactions: Vec<Transaction<CurrentNetwork>>,
+    ) {
+        let (ledger, private_key) = (ledger.clone(), *private_key);
+        tokio::task::spawn_blocking(move || {
+            let rng = &mut TestRng::default();
+            let block =
+                ledger.prepare_advance_to_next_beacon_block(&private_key, vec![], vec![], transactions, rng).unwrap();
             ledger.advance_to_next_block(&block).unwrap();
-            ledger
         })
         .await
         .expect("the ledger task panicked");
+    }
+
+    #[tokio::test]
+    async fn programs_summary_lists_deployed_programs() {
+        let (ledger, private_key) = funded_ledger().await;
+        let deployment = {
+            let (ledger, private_key) = (ledger.clone(), private_key);
+            tokio::task::spawn_blocking(move || {
+                // Named to sort before `credits.aleo`.
+                let program = Program::<CurrentNetwork>::from_str(
+                    "program aaa_summary.aleo;\n\nfunction hello:\n    input r0 as u32.private;\n    input r1 as u32.private;\n    add r0 r1 into r2;\n    output r2 as u32.private;\n",
+                )
+                .unwrap();
+                ledger.vm().deploy(&private_key, &program, None, 600_000, None, &mut TestRng::default()).unwrap()
+            })
+            .await
+            .expect("the deploy task panicked")
+        };
+        advance(&ledger, &private_key, vec![deployment]).await;
         let rest = sample_rest_with(ledger).await;
 
         for prefix in ["/mainnet", "/v1/mainnet", "/v2/mainnet"] {
@@ -1500,18 +1512,48 @@ mod route_tests {
     }
 
     #[tokio::test]
+    async fn programs_summary_is_rebuilt_at_a_new_height() {
+        let (ledger, private_key) = funded_ledger().await;
+        let rest = sample_rest_with(ledger.clone()).await;
+        let before = rest.programs_summary_body().await.unwrap();
+
+        advance(&ledger, &private_key, vec![]).await;
+        let after = rest.programs_summary_body().await.unwrap();
+        assert!(before.starts_with(br#"{"height":0,"#));
+        assert!(after.starts_with(br#"{"height":1,"#));
+    }
+
+    #[tokio::test]
     async fn programs_summary_builds_once_for_concurrent_requests() {
         let rest = sample_rest().await;
 
-        // Hold the build permit until both requests are waiting for it.
+        // Hold the build permit, so both requests miss the cache and wait for it.
         let permit = rest.programs_summary.acquire_build().await.unwrap();
-        let release = async {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            drop(permit);
-        };
-
-        let (first, second, ()) = tokio::join!(rest.programs_summary_body(), rest.programs_summary_body(), release);
+        let (first, second, ()) =
+            tokio::join!(rest.programs_summary_body(), rest.programs_summary_body(), async { drop(permit) });
         assert_eq!(first.unwrap().as_ptr(), second.unwrap().as_ptr());
+    }
+
+    #[tokio::test]
+    async fn programs_summary_waiter_accepts_a_newer_build() {
+        let (ledger, private_key) = funded_ledger().await;
+        let rest = sample_rest_with(ledger.clone()).await;
+
+        // Poll a request once, so it sees height 0, misses the cache and waits for the permit.
+        let permit = rest.programs_summary.acquire_build().await.unwrap();
+        let request = rest.programs_summary_body();
+        tokio::pin!(request);
+        assert!(tokio::time::timeout(Duration::ZERO, request.as_mut()).await.is_err());
+
+        // While it waits, another build finishes at height 1, and then the ledger moves to height 2.
+        advance(&ledger, &private_key, vec![]).await;
+        let built = Bytes::from_static(b"built at height 1");
+        rest.programs_summary.set(1, built.clone());
+        advance(&ledger, &private_key, vec![]).await;
+        drop(permit);
+
+        // The waiter returns the height-1 body instead of rebuilding.
+        assert_eq!(request.await.unwrap(), built);
     }
 
     /// The routes of the removed `history` feature, in history compatibility mode.

@@ -918,33 +918,37 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
 
     /// Returns the `programs/summary` JSON body for the latest height, building it at most once.
     pub(crate) async fn programs_summary_body(&self) -> Result<Bytes, RestError> {
-        if let Some(body) = self.programs_summary.get(self.ledger.latest_height()) {
+        let seen = self.ledger.latest_height();
+        if let Some(body) = self.programs_summary.get(seen..=seen) {
             return Ok(body);
         }
 
         let permit = self.programs_summary.acquire_build().await?;
-        let rest = self.clone();
-        // The blocking task owns the permit, so a disconnected client cannot release it mid-build.
-        let build = move || {
-            rest.programs_summary.get_or_build(
-                permit,
-                // Read the height first. The ledger advances it only after the block's storage batch
-                // is written, so the reads below see every deployment and amendment up to it.
-                || rest.ledger.latest_height(),
-                |height| -> Result<Bytes, RestError> {
-                    let store = rest.ledger.vm().transaction_store();
-                    let mut programs = store
-                        .program_ids_and_latest_editions()
-                        .map(|(id, edition)| {
-                            let amendment_count = store.get_amendment_count(&id, *edition)?.unwrap_or(0);
-                            Ok(ProgramSummary { program_id: id.to_string(), edition: *edition, amendment_count })
-                        })
-                        .collect::<Result<Vec<_>, RestError>>()?;
-                    programs.sort_unstable_by(|a, b| a.program_id.cmp(&b.program_id));
-                    let summary = ProgramsSummary { height, programs };
-                    Ok(serde_json::to_vec(&summary).context("Failed to serialize the summary")?.into())
-                },
-            )
+        // The ledger advances the height only after the block is written, so a scan started after
+        // this read covers every block up to it.
+        let height = self.ledger.latest_height();
+        // A build that finished while this request waited is new enough.
+        if let Some(body) = self.programs_summary.get(seen..=height) {
+            return Ok(body);
+        }
+
+        let (ledger, cache) = (self.ledger.clone(), self.programs_summary.clone());
+        // The blocking task owns the permit, so a dropped request cannot release it mid-build.
+        let build = move || -> Result<Bytes, RestError> {
+            let _permit = permit;
+            let store = ledger.vm().transaction_store();
+            let mut programs = store
+                .program_ids_and_latest_editions()
+                .map(|(id, edition)| {
+                    let amendment_count = store.get_amendment_count(&id, *edition)?.unwrap_or(0);
+                    Ok(ProgramSummary { program_id: id.to_string(), edition: *edition, amendment_count })
+                })
+                .collect::<Result<Vec<_>, RestError>>()?;
+            programs.sort_unstable_by(|a, b| a.program_id.cmp(&b.program_id));
+            let summary = ProgramsSummary { height, programs };
+            let body = Bytes::from(serde_json::to_vec(&summary).context("Failed to serialize the summary")?);
+            cache.set(height, body.clone());
+            Ok(body)
         };
 
         match tokio::task::spawn_blocking(build).await {
