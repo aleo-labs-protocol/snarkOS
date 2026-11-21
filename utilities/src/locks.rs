@@ -19,6 +19,11 @@
 //! `locktick` crate, which records where each lock and guard is taken. `.cargo/config.toml`
 //! defines the cargo aliases that set the cfg.
 //!
+//! `locktick` comes from snarkVM's re-export, `snarkvm::utilities::locktick`, so these locks and
+//! snarkVM's register with one copy of the crate, and [`spawn_lock_reporter`] logs both. Hazard: a
+//! direct dependency on `locktick` can build a second copy, whose `lock_snapshots` misses
+//! snarkVM's locks.
+//!
 //! The submodules mirror the layout of `locktick`. A lock's methods return the guard alias of
 //! its submodule in both builds. Under `--cfg locktick` that guard is a `locktick::LockGuard`
 //! that dereferences to the plain guard. Code that passes a guard to an associated function of
@@ -33,16 +38,16 @@
 #[cfg(not(locktick))]
 type Guard<G> = G;
 #[cfg(locktick)]
-type Guard<G> = ::locktick::LockGuard<G>;
+type Guard<G> = ::snarkvm::utilities::locktick::LockGuard<G>;
 
 /// Synchronous locks from `parking_lot`.
 pub mod parking_lot {
     use super::Guard;
 
-    #[cfg(locktick)]
-    use ::locktick::parking_lot as backend;
     #[cfg(not(locktick))]
     use ::parking_lot as backend;
+    #[cfg(locktick)]
+    use ::snarkvm::utilities::locktick::parking_lot as backend;
 
     pub type Mutex<T> = backend::Mutex<T>;
     pub type RwLock<T> = backend::RwLock<T>;
@@ -56,7 +61,7 @@ pub mod tokio {
     use super::Guard;
 
     #[cfg(locktick)]
-    use ::locktick::tokio as backend;
+    use ::snarkvm::utilities::locktick::tokio as backend;
     #[cfg(not(locktick))]
     use ::tokio::sync as backend;
 
@@ -75,7 +80,7 @@ pub fn spawn_lock_reporter() {
         loop {
             tracing::info!("[locktick] checking for active lock guards");
             let ts = std::time::Instant::now();
-            let mut infos = ::locktick::lock_snapshots();
+            let mut infos = ::snarkvm::utilities::locktick::lock_snapshots();
             infos.sort_unstable_by(|l1, l2| l1.location.cmp(&l2.location));
 
             for lock in infos {
