@@ -101,3 +101,6 @@ features = [ "macros", "rt", "time" ]
 [dev-dependencies.tracing-subscriber]
 workspace = true
 features = [ "env-filter", "fmt" ]
+
+[dev-dependencies.tracing-test]
+workspace = true
