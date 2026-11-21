@@ -22,16 +22,53 @@ Jobs run in one of two places:
 | Event | Runs |
 |---|---|
 | Pull request into `staging` | `fmt`, `deny`, `shellcheck`, `source-checks`, `machete`, `lint`, `lint-locktick`, `test`, `build-snarkos`, `devnet`, `ci-ok` |
-| Push to `staging` | the above, plus `devnet-merge`, `windows` |
-| Pull request into `release/**`, push to `release/**`, or manual dispatch | the above, plus `devnet-release` |
+| Schedule, on `staging`, every six hours at 47 minutes past | the above, plus `devnet-merge`, `windows`, `each-feature` |
+| Pull request into `release/**` | the first row, plus `devnet-merge`, `windows`, `devnet-release` |
+| Push to `release/**`, or manual dispatch | the first row, plus `devnet-merge`, `windows`, `each-feature`, `devnet-release` |
+
+A push to `staging` starts no run. The schedule checks `staging`'s head
+instead, so `staging` is checked after each merge and not before it.
+
+## The schedule
+
+The `schedule-due` job runs first in a scheduled run. It decides whether the
+head of `staging` is due a check:
+
+- The head is not due if an earlier scheduled run on it gave a verdict: the
+  run passed or failed, and its `fmt` job ran. Every other job in the run is
+  then skipped, and so is `ci-ok`. The job's summary names that run.
+- A cancelled run, a run that was not due, and a run where `schedule-due`
+  failed give no verdict. A head with only such runs is due.
+- A failed head is not checked again on the next tick. To retry it, re-run
+  the scheduled run's jobs. A re-run is always due.
+- If the GitHub API fails, the head is due.
+
+Scheduled runs have concurrency groups of their own. Two on one commit run
+one after the other, and no push or pull request run cancels one.
+
+A day with no merge into `staging` costs only the hosted minutes of
+`schedule-due` and `notify`.
+
+The `notify` job posts to Slack when the scheduled run turns red, and once when
+it is green again. A run that was not due changes nothing. The channel is the
+repository variable `CI_SLACK_CHANNEL`, `#ci` by default. The job runs in the
+`ci-notify` environment, which admits only `staging` and holds the
+`CI_SLACK_TOKEN` secret.
+
+A schedule fires only in the default branch's copy of `ci.yml`.
+`snarkOS-internal` mirrors `staging` with this file, so its schedule fires too.
+There `schedule-due` is skipped, and so is every job after it.
 
 ## Jobs
 
-A job marked "merge" runs on the second and third rows of the table above, and
-a job marked "release" only on the third. The other jobs run on every event.
+A job marked "merge" runs on the schedule, on pull requests into and pushes to
+`release/**`, and on manual dispatch. A job marked "release" runs on the last
+two rows of the table above. `each-feature` runs on no pull request. The other
+jobs run on every event.
 
 | Job | Runner | Trigger | Timeout (min) | What it runs |
 |---|---|---|---|---|
+| `schedule-due` | hosted | schedule | 10 | decides whether `staging`'s head is due a check |
 | `check-shared-refs` | hosted | all | | checks that each `aleo-labs-protocol/gh-actions` ref is a release tag, and that each matrix `name` axis lists the same names as its `include` |
 | `fmt` | hosted | all | | `cargo fmt --check` on `FMT_TOOLCHAIN` |
 | `deny` | hosted | all | | `cargo deny --workspace check bans licenses sources`, plus `advisories` everywhere but `staging`, whose advisories [`bump-advisories.yml`](.github/workflows/bump-advisories.yml) bumps nightly |
@@ -57,7 +94,9 @@ a job marked "release" only on the third. The other jobs run on every event.
 | `devnet-release (chaotic-restart-all)` | `cpu` | release | 45 | `test_restart_all.sh`, with delays |
 | `machete` | hosted | all | | `cargo machete` |
 | `windows` | hosted (Windows) | merge | | `cargo check --examples --benches --tests` in `account`, `cli`, `display`, `node` |
-| `ci-ok` | hosted | all | | fails unless every job succeeded; a merge or release job may be skipped where it is not meant to run |
+| `each-feature` | `cpu` | merge, no pull request | 120 | `cargo hack clippy --each-feature` over the workspace, without `cuda` |
+| `ci-ok` | hosted | all | | fails unless every job succeeded; a job may be skipped where it is not meant to run |
+| `notify` | hosted | schedule | 10 | posts to Slack when the scheduled run turns red or green |
 
 A job with no timeout gets the GitHub default of six hours. Only hosted jobs
 have none, and a hosted job holds no fleet box.

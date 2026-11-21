@@ -5,19 +5,30 @@ on:
     # A pull request that changes only Markdown starts no run.
     paths-ignore:
       - '**.md'
+  # A push to staging starts no run; the schedule below checks staging's head.
   push:
-    branches: [staging, 'release/**']
+    branches: ['release/**']
+  # Staging's head, every six hours. GitHub runs `schedule` only on the
+  # default branch, staging, and takes no `branches` filter for it.
+  # `schedule-due` and `notify` check the repository, so the schedule does
+  # nothing in snarkOS-internal. `schedule-due` skips a head that a scheduled
+  # run already gave a verdict.
+  schedule:
+    - cron: '47 */6 * * *'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 # A superseded PR run holds a one-slot box the new head is queued behind, so a
-# new push cancels it. Pushes are grouped by branch and commit instead: a group
-# keeps one pending run and drops the rest, and every push to every branch
-# needs its own verdict.
+# new push cancels it. Other runs are grouped by event, branch and commit
+# instead: a group keeps one pending run and drops the rest, and every push to
+# a release branch needs its own verdict. Scheduled runs have groups of their
+# own, so a push or pull request run never cancels one. Two scheduled runs of
+# one commit run one after the other, so the second's `schedule-due` sees the
+# first's verdict.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || format('{0}-{1}', github.ref, github.sha) }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || format('{0}-{1}-{2}', github.event_name, github.ref, github.sha) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -28,7 +39,67 @@ env:
 # fleet job, from any run, a fork's included, so no job here starts them. The
 # fleet jobs run only in this repository, which alone may use the fleet.
 jobs:
+  # On a schedule, decides whether staging's head is due a check. It is not
+  # due if an earlier scheduled run of this workflow on the same commit gave
+  # a verdict: it passed or failed, and its `fmt` job ran. A cancelled run,
+  # a run this job skipped and a run where this job failed give none, and a
+  # failed head is not checked again until a human re-runs it. A re-run is
+  # always due. snarkOS-internal mirrors staging with this file, and there
+  # this job and so the whole run are skipped.
+  schedule-due:
+    if: github.event_name == 'schedule' && github.repository == 'aleo-labs-protocol/snarkOS'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: { actions: read }
+    outputs:
+      due: ${{ steps.check.outputs.due }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MARKER: fmt
+        run: |
+          workflow=${GITHUB_WORKFLOW_REF%%@*}
+          workflow=${workflow##*/}
+          due() {
+            echo "$2" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "due=$1" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          [ "$GITHUB_RUN_ATTEMPT" -eq 1 ] || due true "A re-run: checking $GITHUB_SHA."
+          # An API error checks the head rather than leave it unchecked.
+          if ! runs=$(gh run list -R "$GITHUB_REPOSITORY" --workflow "$workflow" \
+              --event schedule --branch "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" \
+              --limit 100 --json databaseId,status,conclusion,url); then
+            echo "::warning::could not list earlier scheduled runs; checking $GITHUB_SHA"
+            due true "Checking $GITHUB_SHA."
+          fi
+          # Newest first.
+          while read -r id conclusion url; do
+            if ! marker=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?per_page=100" \
+                --jq "[.jobs[] | select(.name == \"$MARKER\") | .conclusion][0] // \"\""); then
+              echo "::warning::could not list the jobs of run $id; checking $GITHUB_SHA"
+              due true "Checking $GITHUB_SHA."
+            fi
+            if [ "$marker" = success ] || [ "$marker" = failure ]; then
+              due false "Skipped: $url gave $GITHUB_SHA a verdict ($conclusion)."
+            fi
+          done < <(jq -r --argjson id "$GITHUB_RUN_ID" '.[]
+            | select(.databaseId < $id and .status == "completed" and (.conclusion | IN("success", "failure")))
+            | "\(.databaseId) \(.conclusion) \(.url)"' <<< "$runs")
+          due true "Checking $GITHUB_SHA."
+
+  # `needs: schedule-due` makes each job wait for that job, directly or
+  # through `build-snarkos`, and every event but `schedule` skips it.
+  # `!cancelled()` replaces the implicit `success()`, which would skip a job
+  # whenever `schedule-due` is skipped. On a schedule, a job runs only if the
+  # head is due. Most hosted jobs reuse this condition as `*hosted-if`;
+  # `&fleet-if` on `lint` adds the repository check.
   check-shared-refs:
+    needs: schedule-due
+    if: &hosted-if >-
+      !cancelled() &&
+      (github.event_name != 'schedule' || needs.schedule-due.outputs.due == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -42,7 +113,11 @@ jobs:
           echo "$bad"
           [ -z "$bad" ]
 
+  # `schedule-due` reads this job's name: a scheduled run in which it ran gave
+  # its commit a verdict.
   fmt:
+    needs: schedule-due
+    if: *hosted-if
     runs-on: ubuntu-latest
     env:
       # `.rustfmt.toml` uses nightly-only options, which stable drops without
@@ -55,6 +130,8 @@ jobs:
       - run: cargo "+$FMT_TOOLCHAIN" fmt --all -- --check
 
   deny:
+    needs: schedule-due
+    if: *hosted-if
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -68,6 +145,8 @@ jobs:
         run: cargo deny --workspace check advisories
 
   shellcheck:
+    needs: schedule-due
+    if: *hosted-if
     runs-on: ubuntu-latest
     env:
       SHELLCHECK_VERSION: v0.11.0
@@ -80,6 +159,8 @@ jobs:
           "$RUNNER_TEMP/shellcheck-${SHELLCHECK_VERSION}/shellcheck" -x .ci/*.sh scripts/*.sh .github/*.sh
 
   source-checks:
+    needs: schedule-due
+    if: *hosted-if
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -89,6 +170,8 @@ jobs:
   # The shallow checkout lacks the history the replays of real merges need, so
   # those are skipped here and run locally.
   merge-fixup:
+    needs: schedule-due
+    if: *hosted-if
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -96,10 +179,15 @@ jobs:
       - run: .github/merge-fixup.test.sh
 
   lint:
+    needs: schedule-due
     runs-on: [self-hosted, linux, x64, cpu]
     timeout-minutes: 90
+    # `*hosted-if` plus the repository check, which keeps every event's fleet
+    # jobs out of snarkOS-internal. lint-locktick, test and build-snarkos reuse
+    # it as `*fleet-if`.
     if: &fleet-if >-
-      github.repository == 'aleo-labs-protocol/snarkOS'
+      !cancelled() && github.repository == 'aleo-labs-protocol/snarkOS' &&
+      (github.event_name != 'schedule' || needs.schedule-due.outputs.due == 'true')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
@@ -117,6 +205,7 @@ jobs:
       - run: cargo check -p snarkos-node-bft-events --features test-helpers
 
   lint-locktick:
+    needs: schedule-due
     runs-on: [self-hosted, linux, x64, cpu]
     timeout-minutes: 90
     if: *fleet-if
@@ -142,6 +231,8 @@ jobs:
   #
   # Cheap entries run on free hosted runners and do not wait for the fleet.
   test-hosted:
+    needs: schedule-due
+    if: *hosted-if
     permissions: { contents: read, actions: write }
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -224,6 +315,7 @@ jobs:
         with: *aleo-resources
 
   test:
+    needs: schedule-due
     permissions: { contents: read, actions: write }
     runs-on: [self-hosted, linux, x64, cpu]
     timeout-minutes: 90
@@ -265,6 +357,7 @@ jobs:
 
   # The node binary the devnet jobs run, built once per workflow run.
   build-snarkos:
+    needs: schedule-due
     runs-on: [self-hosted, linux, x64, cpu]
     timeout-minutes: 60
     if: *fleet-if
@@ -350,8 +443,8 @@ jobs:
         if: always()
         run: *stop-nodes
 
-  # Slower devnets. On every push, on pull requests into a release branch, and
-  # on demand.
+  # Slower devnets. On every push to a release branch, on pull requests into
+  # one, on the schedule and on demand.
   devnet-merge:
     needs: build-snarkos
     runs-on: [self-hosted, linux, x64, cpu]
@@ -421,6 +514,8 @@ jobs:
   # feature unification would carry them into the binary if any crate on its
   # path ever enabled it.
   release-graph:
+    needs: schedule-due
+    if: *hosted-if
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -435,6 +530,8 @@ jobs:
           fi
 
   machete:
+    needs: schedule-due
+    if: *hosted-if
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -446,8 +543,12 @@ jobs:
   # Builds cold: the four caches would take about half of the repository's
   # 10 GB and evict the entries the hosted test jobs restore from.
   windows:
+    needs: schedule-due
     runs-on: windows-latest
-    if: github.event_name != 'pull_request' || startsWith(github.base_ref, 'release/')
+    if: >-
+      !cancelled() &&
+      (github.event_name != 'schedule' || needs.schedule-due.outputs.due == 'true') &&
+      (github.event_name != 'pull_request' || startsWith(github.base_ref, 'release/'))
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     strategy:
@@ -464,13 +565,15 @@ jobs:
   # builds above unify features across crates, so they miss a feature that is
   # not forwarded to a dependency, and code gated on the wrong feature. `cuda`
   # needs nvcc. Each feature set checks snarkVM again. On every push to a
-  # release branch, and on demand.
+  # release branch, on the schedule and on demand.
   each-feature:
+    needs: schedule-due
     runs-on: [self-hosted, linux, x64, cpu]
     timeout-minutes: 120
     if: >-
-      github.event_name != 'pull_request' &&
-      github.repository == 'aleo-labs-protocol/snarkOS'
+      !cancelled() && github.repository == 'aleo-labs-protocol/snarkOS' &&
+      (github.event_name != 'schedule' || needs.schedule-due.outputs.due == 'true') &&
+      github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
@@ -481,19 +584,51 @@ jobs:
       - run: cargo hack clippy --workspace --each-feature --exclude-features cuda --locked -- -D warnings
 
   # The one job to require on protected branches. A skipped job counts as passed
-  # for a required check, so every job must succeed here. The exception is a
-  # merge or release job skipped outside a release branch, where it is not meant
-  # to run.
+  # for a required check, so every job must succeed here, except one skipped
+  # where it is not meant to run: `schedule-due` off the schedule,
+  # `each-feature` on a pull request, the merge jobs on a pull request into
+  # any branch but a release branch, and `devnet-release` outside a release.
+  # A scheduled run that is not due has no verdict.
   ci-ok:
-    if: always()
-    needs: [check-shared-refs, fmt, deny, shellcheck, source-checks, merge-fixup, machete, release-graph, lint, lint-locktick, test-hosted, test, build-snarkos, devnet, devnet-merge, devnet-release, windows]
+    if: >-
+      always() &&
+      (github.event_name != 'schedule' || needs.schedule-due.outputs.due == 'true')
+    needs: [schedule-due, check-shared-refs, fmt, deny, shellcheck, source-checks, merge-fixup, machete, release-graph, lint, lint-locktick, test-hosted, test, build-snarkos, devnet, devnet-merge, devnet-release, windows, each-feature]
     runs-on: ubuntu-latest
     steps:
       - env:
           NEEDS: ${{ toJSON(needs) }}
+          EVENT: ${{ github.event_name }}
           RELEASE: >-
             ${{ github.event_name == 'workflow_dispatch' ||
             startsWith(github.ref, 'refs/heads/release/') ||
             startsWith(github.base_ref, 'release/') }}
         run: |
-          jq -e --argjson release "$RELEASE" 'to_entries | map(select(.value.result != "success" and ($release or .value.result != "skipped" or (.key | IN("devnet-merge", "devnet-release", "windows") | not)))) | if length == 0 then true else (map("\(.key): \(.value.result)") | join(", ") | halt_error) end' <<< "$NEEDS"
+          jq -e --arg event "$EVENT" --argjson release "$RELEASE" '
+            (if $event == "schedule" then ["devnet-release"]
+            elif $event != "pull_request" then ["schedule-due"]
+            elif $release then ["schedule-due", "each-feature"]
+            else ["schedule-due", "each-feature", "devnet-merge", "devnet-release", "windows"] end) as $skippable
+            | to_entries
+            | map(select(.value.result != "success" and (.value.result != "skipped" or (.key | IN($skippable[]) | not))))
+            | if length == 0 then true else (map("\(.key): \(.value.result)") | join(", ") | halt_error) end' <<< "$NEEDS"
+
+  # Posts to Slack when staging's scheduled run turns red, and once when it is
+  # green again. `checked` is false for a run that was not due.
+  notify:
+    if: always() && github.event_name == 'schedule' && github.repository == 'aleo-labs-protocol/snarkOS'
+    needs: [schedule-due, check-shared-refs, fmt, deny, shellcheck, source-checks, merge-fixup, machete, release-graph, lint, lint-locktick, test-hosted, test, build-snarkos, devnet, devnet-merge, devnet-release, windows, each-feature, ci-ok]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: { actions: read }
+    # Lives in the ci-notify environment, which admits only staging. The job
+    # receives CI_SLACK_TOKEN from it.
+    environment: ci-notify
+    steps:
+      # gh-actions is ours; check-shared-refs requires a @vN tag here, not a SHA.
+      - uses: aleo-labs-protocol/gh-actions/.github/actions/notify-ci-state@v2
+        with:
+          slack-token: ${{ secrets.CI_SLACK_TOKEN }}
+          channel: ${{ vars.CI_SLACK_CHANNEL || '#ci' }}
+          result: ${{ contains(needs.*.result, 'failure') && 'failure' || contains(needs.*.result, 'cancelled') && 'cancelled' || 'success' }}
+          checked: ${{ needs.schedule-due.outputs.due == 'true' && 'true' || 'false' }}
