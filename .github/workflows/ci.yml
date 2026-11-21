@@ -8,9 +8,11 @@ on:
   # A push to staging starts no run; the schedule below checks staging's head.
   push:
     branches: ['release/**']
-  # Staging's head, every six hours. The schedule fires only in the default
-  # branch's copy of this file, and `schedule-due` skips a head that a
-  # scheduled run already gave a verdict.
+  # Staging's head, every six hours. GitHub runs `schedule` only on the
+  # default branch, staging, and takes no `branches` filter for it.
+  # `schedule-due` and `notify` check the repository, so the schedule does
+  # nothing in snarkOS-internal. `schedule-due` skips a head that a scheduled
+  # run already gave a verdict.
   schedule:
     - cron: '47 */6 * * *'
   workflow_dispatch:
