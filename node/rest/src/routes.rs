@@ -923,32 +923,26 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         }
 
         let rest = self.clone();
-        let build = move || -> Result<Bytes, RestError> {
-            // Lock inside the blocking task, so a disconnected client cannot release it mid-build.
-            let _build = rest.programs_summary.build.lock();
-            // Read the height first. The ledger advances it only after the block's storage batch
-            // is written, so the reads below see every deployment and amendment up to it.
-            let height = rest.ledger.latest_height();
-            // Another request may have built it while this one waited for the lock.
-            if let Some(body) = rest.programs_summary.get(height) {
-                return Ok(body);
-            }
-
-            let store = rest.ledger.vm().transaction_store();
-            let mut programs = store
-                .program_ids_and_latest_editions()
-                .map(|(id, edition)| {
-                    let amendment_count = store.get_amendment_count(&id, *edition)?.unwrap_or(0);
-                    Ok(ProgramSummary { program_id: id.to_string(), edition: *edition, amendment_count })
-                })
-                .collect::<Result<Vec<_>, RestError>>()?;
-            programs.sort_unstable_by(|a, b| a.program_id.cmp(&b.program_id));
-            let body = Bytes::from(
-                serde_json::to_vec(&ProgramsSummary { height, programs })
-                    .map_err(|err| RestError::internal_server_error(anyhow!(err)))?,
-            );
-            *rest.programs_summary.latest.lock() = Some((height, body.clone()));
-            Ok(body)
+        // Build inside the blocking task, so a disconnected client cannot release the lock mid-build.
+        let build = move || {
+            rest.programs_summary.get_or_build(
+                // Read the height first. The ledger advances it only after the block's storage batch
+                // is written, so the reads below see every deployment and amendment up to it.
+                || rest.ledger.latest_height(),
+                |height| -> Result<Bytes, RestError> {
+                    let store = rest.ledger.vm().transaction_store();
+                    let mut programs = store
+                        .program_ids_and_latest_editions()
+                        .map(|(id, edition)| {
+                            let amendment_count = store.get_amendment_count(&id, *edition)?.unwrap_or(0);
+                            Ok(ProgramSummary { program_id: id.to_string(), edition: *edition, amendment_count })
+                        })
+                        .collect::<Result<Vec<_>, RestError>>()?;
+                    programs.sort_unstable_by(|a, b| a.program_id.cmp(&b.program_id));
+                    let summary = ProgramsSummary { height, programs };
+                    Ok(serde_json::to_vec(&summary).context("Failed to serialize the summary")?.into())
+                },
+            )
         };
 
         match tokio::task::spawn_blocking(build).await {

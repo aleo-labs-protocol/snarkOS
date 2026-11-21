@@ -218,6 +218,24 @@ impl ProgramsSummaryCache {
     fn get(&self, height: u32) -> Option<Bytes> {
         self.latest.lock().as_ref().filter(|(h, _)| *h == height).map(|(_, body)| body.clone())
     }
+
+    /// Returns the body for the height that `height` reads, building and caching it if needed.
+    /// Holds the build lock throughout, so call it from a blocking task.
+    fn get_or_build<E>(
+        &self,
+        height: impl FnOnce() -> u32,
+        build: impl FnOnce(u32) -> Result<Bytes, E>,
+    ) -> Result<Bytes, E> {
+        let _build = self.build.lock();
+        // Read the height under the lock: another request may have built it while this one waited.
+        let height = height();
+        if let Some(body) = self.get(height) {
+            return Ok(body);
+        }
+        let body = build(height)?;
+        *self.latest.lock() = Some((height, body.clone()));
+        Ok(body)
+    }
 }
 
 /// A REST API server for the ledger.
