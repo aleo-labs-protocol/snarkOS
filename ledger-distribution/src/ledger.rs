@@ -40,6 +40,9 @@ impl<N: Network> LedgerReader<N> {
     ///
     /// HAZARD: snarkVM allows one open ledger database per process, so this cannot be opened in a
     /// process that also opens a ledger of its own.
+    ///
+    /// HAZARD: a secondary instance keeps every table file of the ledger open, so the process needs an
+    /// open-files limit above the ledger's table-file count.
     pub fn open(ledger_path: impl Into<PathBuf>, secondary_path: impl Into<PathBuf>) -> Result<Self> {
         let storage = BlockDB::<N>::open(StorageMode::Custom(ledger_path.into(), Some(secondary_path.into())))?;
         Ok(Self { storage })
