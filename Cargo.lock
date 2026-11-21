@@ -5671,7 +5671,6 @@ dependencies = [
  "parking_lot",
  "rayon",
  "snarkvm",
- "time",
  "tokio",
  "tracing",
 ]

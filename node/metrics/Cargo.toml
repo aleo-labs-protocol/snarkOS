@@ -48,9 +48,6 @@ workspace = true
 workspace = true
 features = [ "console", "ledger", "metrics" ]
 
-[dependencies.time]
-workspace = true
-
 [dependencies.tokio]
 workspace = true
 features = [ "rt" ]
