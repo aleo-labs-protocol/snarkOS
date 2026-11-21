@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use snarkos_cli::{commands::CLI, helpers::Updater};
-use snarkvm::utilities::{display_error, flatten_error};
+use snarkvm::utilities::flatten_error;
 
 use clap::Parser;
 use std::{backtrace::Backtrace, env, io, io::IsTerminal, panic::catch_unwind};
@@ -127,7 +127,8 @@ fn main() {
         Ok(Err(err)) => {
             // A regular error occurred during startup.
             if io::stderr().is_terminal() || !has_tracing_subscriber() {
-                display_error(&err);
+                eprintln!("⚠️ {err}");
+                err.chain().skip(1).for_each(|cause| eprintln!("     ↳ {cause}"));
                 eprintln!();
                 eprintln!("Use `--help` for instructions on how to use this command");
             } else {
