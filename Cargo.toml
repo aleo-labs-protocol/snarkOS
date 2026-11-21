@@ -45,7 +45,7 @@ members = [
 [workspace.dependencies.snarkvm]
 #path = "../snarkVM"
 git = "https://github.com/aleo-labs-protocol/snarkVM.git"
-rev = "7ba14e66b6ae2e928e3615479ef784f6737da212" #staging
+rev = "8f4ba84f2bc59dc51c4b2d1379f32c774bd98408" # snarkVM locktick-reexport PR head; move to its merge commit once it lands
 #version = "=4.12.0"
 default-features = false
 
@@ -98,9 +98,6 @@ version = "0.3"
 
 [workspace.dependencies.futures-util]
 version = "0.3"
-
-[workspace.dependencies.locktick]
-version = "0.6"
 
 [workspace.dependencies.lru]
 version = "0.19.0"
