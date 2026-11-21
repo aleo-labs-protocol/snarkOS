@@ -752,14 +752,14 @@ impl<N: Network> BlockSync<N> {
         if batches.is_empty() {
             let total_requests = self.num_total_block_requests();
             let num_outstanding = self.num_outstanding_block_requests();
-            if total_requests != 0 {
-                trace!(
-                    "Not block synced yet, but there are still {total_requests} in-flight requests. {num_outstanding} are still awaiting responses."
-                );
-            } else {
+            if total_requests == 0 {
                 debug!(
                     "Not block synced yet, and there are no outstanding block requests or \
                  new block requests to send"
+                );
+            } else if !self.requested_all_served() {
+                trace!(
+                    "Not block synced yet, but there are still {total_requests} in-flight requests. {num_outstanding} are still awaiting responses."
                 );
             }
         } else {
@@ -1375,6 +1375,10 @@ impl<N: Network> BlockSync<N> {
 
             print_requests();
             vec![]
+        } else if self.requested_all_served() {
+            // Nothing to request until a peer serves more blocks, e.g. at the tip while the tip
+            // block is in flight.
+            vec![]
         } else if let Some((sync_peers, min_common_ancestor)) =
             self.find_sync_peers_inner(current_height, Some(start_height))
         {
@@ -1407,7 +1411,7 @@ impl<N: Network> BlockSync<N> {
 
             vec![]
         } else {
-            // This happens if we already requested all advertised blocks.
+            // No sync peers serve the next height to request.
             trace!("No new blocks can be requested, but there are still outstanding requests.");
 
             print_requests();
@@ -1937,6 +1941,15 @@ impl<N: Network> BlockSync<N> {
             height += 1;
         }
         height
+    }
+
+    /// Returns `true` if a peer is ahead of this node, and every block any peer serves is in the
+    /// ledger or requested.
+    fn requested_all_served(&self) -> bool {
+        let current_height = self.retention_height();
+        let start_height = self.first_unrequested_height(current_height.saturating_add(1));
+        let max_tip = self.locators.read().values().map(|peer| peer.serving_tip()).max();
+        max_tip.is_some_and(|tip| current_height < tip && tip < start_height)
     }
 
     /// Given the sync peers and their minimum common ancestor, return a list of block requests
@@ -2929,6 +2942,25 @@ mod tests {
         let (requests, sync_peers) = sync.prepare_block_requests().pop().unwrap();
         assert_eq!(requests.first().unwrap().0, 1_051);
         assert!(sync_peers.contains_key(&sample_peer_ip(2)));
+    }
+
+    /// Tests when block sync has requested every block its peers serve.
+    #[test]
+    fn test_quiet_while_tip_block_in_flight() {
+        let sync = sample_sync_at_height(1_000);
+        add_peers(&sync, 1, 1, 1_001, 0);
+        insert_requests_to(&sync, sample_peer_ip(1), 1_001..1_002);
+        assert!(sync.requested_all_served());
+
+        // A peer ahead whose floor is above the next height to request.
+        add_peers(&sync, 2, 1, 1_100, 1_050);
+        assert!(!sync.requested_all_served());
+
+        // No peer ahead, but requests are outstanding.
+        let sync = sample_sync_at_height(1_000);
+        add_peers(&sync, 1, 1, 1_000, 0);
+        insert_requests_to(&sync, sample_peer_ip(1), 1_001..1_002);
+        assert!(!sync.requested_all_served());
     }
 
     /// Tests that a `Pruned` reply raises the floor, releases the whole chunk at once, and that the
