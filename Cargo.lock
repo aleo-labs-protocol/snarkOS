@@ -5573,7 +5573,6 @@ dependencies = [
  "rayon",
  "snarkos-utilities",
  "snarkvm",
- "time",
  "tokio",
  "tracing",
 ]

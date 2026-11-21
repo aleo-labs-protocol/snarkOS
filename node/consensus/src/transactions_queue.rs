@@ -27,11 +27,11 @@ use crate::{CAPACITY_FOR_DEPLOYMENTS, CAPACITY_FOR_EXECUTIONS};
 
 /// The result of a successful insertion into the transactions queue.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum QueueInsertion {
+pub enum QueueInsertion<ID> {
     /// The transaction was added to the queue.
     Inserted,
-    /// The transaction was added to the queue, and a lower-priority transaction was evicted.
-    InsertedWithEviction,
+    /// The transaction was added to the queue, and the lower-priority transaction with this ID was evicted.
+    InsertedWithEviction(ID),
     /// The transaction was already in the queue; nothing changed.
     Duplicate,
 }
@@ -60,7 +60,7 @@ impl<N: Network> TransactionsQueue<N> {
         transaction_id: N::TransactionID,
         transaction: Transaction<N>,
         priority_fee: U64<N>,
-    ) -> Result<QueueInsertion> {
+    ) -> Result<QueueInsertion<N::TransactionID>> {
         let is_execute = transaction.is_execute();
         let result = if is_execute {
             self.executions.insert(transaction_id, transaction, priority_fee)
@@ -70,7 +70,7 @@ impl<N: Network> TransactionsQueue<N> {
 
         #[cfg(feature = "metrics")]
         {
-            if let Ok(QueueInsertion::InsertedWithEviction) = result {
+            if let Ok(QueueInsertion::InsertedWithEviction(_)) = result {
                 let kind = if is_execute { "execute" } else { "deploy" };
                 metrics::increment_counter_1(metrics::consensus::MEMPOOL_EVICTED, "kind", kind);
             }
@@ -135,7 +135,7 @@ impl<N: Network> TransactionsQueueInner<N> {
         transaction_id: N::TransactionID,
         transaction: Transaction<N>,
         priority_fee: U64<N>,
-    ) -> Result<QueueInsertion> {
+    ) -> Result<QueueInsertion<N::TransactionID>> {
         // Duplicates are a no-op: they must not evict anything or refresh recency.
         // Note: the transaction ID is the root of the transaction tree, which includes a leaf for the fee
         // transition. A transaction with the same ID therefore always has the same priority fee, and a
@@ -172,14 +172,14 @@ impl<N: Network> TransactionsQueueInner<N> {
                 );
 
                 // Remove an entry from the low-priority queue to make room for the high-priority transaction.
-                let evicted = self.fifo_queue.pop_lru().is_some();
-                if evicted {
+                let evicted = self.fifo_queue.pop_lru().map(|(evicted_id, _)| evicted_id);
+                if evicted.is_some() {
                     #[cfg(feature = "metrics")]
                     metrics::increment_counter(metrics::consensus::DROPPED_TRANSACTIONS);
                 }
 
                 self.priority_queue.insert(transaction_id, transaction, priority_fee);
-                if evicted { QueueInsertion::InsertedWithEviction } else { QueueInsertion::Inserted }
+                evicted.map_or(QueueInsertion::Inserted, QueueInsertion::InsertedWithEviction)
             }
             // Invariant: if the queue is at capacity but the priority queue is
             // equal to the capacity, the low-priority queue must be empty.
@@ -189,8 +189,8 @@ impl<N: Network> TransactionsQueueInner<N> {
                     "The low-priority queue must be empty when the priority queue is full"
                 );
 
-                self.priority_queue.compare_insert(transaction_id, transaction, priority_fee)?;
-                QueueInsertion::InsertedWithEviction
+                let evicted = self.priority_queue.compare_insert(transaction_id, transaction, priority_fee)?;
+                evicted.map_or(QueueInsertion::Inserted, QueueInsertion::InsertedWithEviction)
             }
         };
 
@@ -240,10 +240,10 @@ impl<N: Network> PriorityQueue<N> {
         transaction_id: N::TransactionID,
         transaction: Transaction<N>,
         fee: U64<N>,
-    ) -> Result<()> {
+    ) -> Result<Option<N::TransactionID>> {
         // Make sure the collection isn't empty.
         if self.transaction_ids.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
 
         // If the lowest fee in the collection is higher than the new fee, reject the new transaction.
@@ -267,7 +267,7 @@ impl<N: Network> PriorityQueue<N> {
         metrics::increment_counter(metrics::consensus::DROPPED_TRANSACTIONS);
 
         self.insert(transaction_id, transaction, fee);
-        Ok(())
+        Ok(Some(id))
     }
 
     fn pop(&mut self) -> Option<(N::TransactionID, Transaction<N>)> {
@@ -520,9 +520,9 @@ mod tests {
         // A full queue rejects a zero-fee transaction.
         assert!(insert(2, 0).is_err());
         // A priority transaction evicts the zero-fee transaction.
-        assert_eq!(insert(3, 200).unwrap(), QueueInsertion::InsertedWithEviction);
+        assert_eq!(insert(3, 200).unwrap(), QueueInsertion::InsertedWithEviction(executions[0].0));
         // A full priority queue evicts its lowest fee for a fee at least as high.
-        assert_eq!(insert(4, 100).unwrap(), QueueInsertion::InsertedWithEviction);
+        assert_eq!(insert(4, 100).unwrap(), QueueInsertion::InsertedWithEviction(executions[1].0));
         // A full priority queue rejects a lower fee.
         assert!(insert(2, 50).is_err());
     }
