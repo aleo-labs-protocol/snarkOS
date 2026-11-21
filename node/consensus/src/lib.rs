@@ -177,8 +177,13 @@ impl<N: Network> Consensus<N> {
             seen_solutions: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(1 << 16).unwrap()))),
             seen_transactions: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(1 << 16).unwrap()))),
             #[cfg(feature = "metrics")]
+            // Cover the inbound queues plus transmissions already handed to the BFT: up to
+            // `MAX_TRANSMISSIONS_TOLERANCE` in the workers, and as many again in certificates awaiting commit.
             transmissions_tracker: Arc::new(Mutex::new(metrics::TransmissionTracker::new(
-                CAPACITY_FOR_DEPLOYMENTS + CAPACITY_FOR_EXECUTIONS + CAPACITY_FOR_SOLUTIONS,
+                CAPACITY_FOR_DEPLOYMENTS
+                    + CAPACITY_FOR_EXECUTIONS
+                    + CAPACITY_FOR_SOLUTIONS
+                    + 2 * Primary::<N>::MAX_TRANSMISSIONS_TOLERANCE,
             ))),
             handles: Default::default(),
             ping: ping.clone(),

@@ -196,11 +196,15 @@ impl<N: Network> TransmissionTracker<N> {
         let mut counts = [0; 2];
         for _ in 0..EXPIRY_BUDGET {
             let Some((&(start, _), &id)) = self.expiry.first_key_value() else { break };
-            if self.entries.len() <= self.capacity && now.duration_since(start) <= MAX_AGE {
+            let expired = now.duration_since(start) > MAX_AGE;
+            if self.entries.len() <= self.capacity && !expired {
                 break;
             }
             self.remove(id);
-            counts[usize::from(matches!(id, TrackedId::Transaction(_)))] += 1;
+            // Only age evictions count as stale; capacity evictions drop the entry silently.
+            if expired {
+                counts[usize::from(matches!(id, TrackedId::Transaction(_)))] += 1;
+            }
         }
         counts
     }
@@ -389,7 +393,7 @@ mod transmission_tracker {
             tracker.insert(solution(n), start);
         }
         for n in 0..3 {
-            assert_eq!(tracker.insert(transaction(n), start), [1, 0]);
+            assert_eq!(tracker.insert(transaction(n), start), [0, 0]);
         }
         let refreshed = start + Duration::from_millis(250);
         for _ in 0..3 {
