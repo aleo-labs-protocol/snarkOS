@@ -51,7 +51,9 @@ A day with no merge into `staging` costs only the hosted minutes of
 
 The `notify` job posts to Slack when the scheduled run turns red, and once when
 it is green again. A run that was not due changes nothing. The channel is the
-repository variable `CI_SLACK_CHANNEL`, `#ci` by default.
+repository variable `CI_SLACK_CHANNEL`, `#ci` by default. The job runs in the
+`ci-notify` environment, which admits only `staging` and holds the
+`CI_SLACK_TOKEN` secret.
 
 A schedule fires only in the default branch's copy of `ci.yml`.
 `snarkOS-internal` mirrors `staging` with this file, so its schedule fires too.

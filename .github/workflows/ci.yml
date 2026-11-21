@@ -614,6 +614,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions: { actions: read }
+    # Lives in the ci-notify environment, which admits only staging. The job
+    # receives CI_SLACK_TOKEN from it.
+    environment: ci-notify
     steps:
       # gh-actions is ours; check-shared-refs requires a @vN tag here, not a SHA.
       - uses: aleo-labs-protocol/gh-actions/.github/actions/notify-ci-state@v2
