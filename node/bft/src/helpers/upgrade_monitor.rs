@@ -14,16 +14,13 @@
 // limitations under the License.
 
 use snarkos_node_bft_events::ConsensusSchedule;
+use snarkos_utilities::locks::parking_lot::Mutex;
 use snarkvm::{
     console::network::Network,
     ledger::committee::Committee,
     prelude::{Address, FromBytes, IoResult, Read, Result, ToBytes, Write},
 };
 
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::Mutex;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::Mutex;
 use std::{
     collections::{HashMap, HashSet},
     fmt,

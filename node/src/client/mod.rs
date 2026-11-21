@@ -37,7 +37,7 @@ use snarkos_node_tcp::{
     P2P,
     protocols::{Disconnect, Handshake, OnConnect, Reading},
 };
-use snarkos_utilities::{NodeDataDir, SignalHandler, Stoppable};
+use snarkos_utilities::{NodeDataDir, SignalHandler, Stoppable, locks::parking_lot::Mutex};
 
 use snarkvm::{
     console::network::Network,
@@ -52,11 +52,7 @@ use snarkvm::{
 
 use anyhow::{Context, Result};
 use core::future::Future;
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::Mutex;
 use lru::LruCache;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::Mutex;
 use std::{
     net::SocketAddr,
     num::NonZeroUsize,

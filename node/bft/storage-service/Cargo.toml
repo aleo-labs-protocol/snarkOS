@@ -18,7 +18,6 @@ edition = "2024"
 
 [features]
 default = [ ]
-locktick = [ "dep:locktick", "snarkvm/locktick" ]
 # Gate code with `cfg(any(test, feature = "test-helpers"))`: the unit tests build without this feature.
 test-helpers = [ "snarkvm/test-helpers" ]
 
@@ -29,15 +28,10 @@ workspace = true
 workspace = true
 features = [ "serde", "rayon" ]
 
-[dependencies.locktick]
-workspace = true
-features = [ "parking_lot" ]
-optional = true
-
 [dependencies.lru]
 workspace = true
 
-[dependencies.parking_lot]
+[dependencies.snarkos-utilities]
 workspace = true
 
 [dependencies.snarkvm]

@@ -18,15 +18,6 @@ edition = "2024"
 
 [features]
 default = [ ]
-locktick = [
-  "dep:locktick",
-  "snarkos-display/locktick",
-  "snarkos-node/locktick",
-  "snarkos-node-cdn/locktick",
-  "snarkos-node-rest/locktick",
-  "snarkos-utilities/locktick",
-  "snarkvm/locktick"
-]
 metrics = [ "dep:snarkos-node-metrics", "snarkos-node/metrics" ]
 cuda = [
   "snarkvm/cuda",
@@ -73,15 +64,7 @@ workspace = true
 workspace = true
 features = [ "serde", "rayon" ]
 
-[dependencies.locktick]
-workspace = true
-features = [ "parking_lot" ]
-optional = true
-
 [dependencies.num_cpus]
-workspace = true
-
-[dependencies.parking_lot]
 workspace = true
 
 [dependencies.rand]

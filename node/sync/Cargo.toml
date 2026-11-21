@@ -18,11 +18,6 @@ edition = "2024"
 
 [features]
 default = [ ]
-locktick = [
-  "dep:locktick",
-  "snarkos-node-bft-ledger-service/locktick",
-  "snarkos-node-router/locktick",
-]
 metrics = [ "dep:snarkos-node-metrics", "snarkos-node-network/metrics" ]
 cuda = [ "snarkvm/cuda", "snarkos-node-bft-ledger-service/cuda", "snarkos-node-router/cuda" ]
 test-helpers = [ "snarkos-node-sync-locators/test-helpers" ]
@@ -38,14 +33,6 @@ features = [ "serde", "rayon" ]
 workspace = true
 
 [dependencies.futures]
-workspace = true
-
-[dependencies.locktick]
-workspace = true
-features = [ "parking_lot", "tokio" ]
-optional = true
-
-[dependencies.parking_lot]
 workspace = true
 
 [dependencies.serde]
@@ -78,6 +65,9 @@ workspace = true
 workspace = true
 
 [dependencies.snarkos-node-sync-locators]
+workspace = true
+
+[dependencies.snarkos-utilities]
 workspace = true
 
 [dependencies.snarkvm]

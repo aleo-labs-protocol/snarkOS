@@ -25,6 +25,10 @@ use snarkos_node_router::{
 };
 use snarkos_node_sync_communication_service::CommunicationService;
 use snarkos_node_sync_locators::{CHECKPOINT_INTERVAL, NUM_RECENT_BLOCKS};
+use snarkos_utilities::locks::{
+    parking_lot::{Mutex, RwLock},
+    tokio::Mutex as TMutex,
+};
 
 use snarkvm::{
     console::network::{ConsensusVersion, Network},
@@ -35,14 +39,6 @@ use snarkvm::{
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::{Mutex, RwLock};
-#[cfg(feature = "locktick")]
-use locktick::tokio::Mutex as TMutex;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::Mutex;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::RwLock;
 use rand::seq::{IteratorRandom, SliceRandom};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque, hash_map},
@@ -51,8 +47,6 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-#[cfg(not(feature = "locktick"))]
-use tokio::sync::Mutex as TMutex;
 use tokio::sync::Notify;
 use tracing::info;
 
@@ -2139,11 +2133,8 @@ mod tests {
     };
 
     use indexmap::{IndexSet, indexset};
-    #[cfg(feature = "locktick")]
-    use locktick::parking_lot::RwLock;
-    #[cfg(not(feature = "locktick"))]
-    use parking_lot::RwLock;
     use rand::RngExt;
+    use snarkos_utilities::locks::parking_lot::RwLock;
     use std::{
         collections::BTreeSet,
         net::{IpAddr, Ipv4Addr},

@@ -17,10 +17,7 @@ use crate::events::BlockRequest;
 use snarkvm::{console::types::Field, ledger::narwhal::TransmissionID, prelude::Network};
 
 use core::hash::Hash;
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::RwLock;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::RwLock;
+use snarkos_utilities::locks::parking_lot::RwLock;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::{IpAddr, SocketAddr},

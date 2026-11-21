@@ -46,7 +46,10 @@ use snarkos_node_bft::{
 use snarkos_node_bft_ledger_service::LedgerService;
 use snarkos_node_bft_storage_service::BFTPersistentStorage;
 use snarkos_node_sync::{BlockSync, Ping};
-use snarkos_utilities::NodeDataDir;
+use snarkos_utilities::{
+    NodeDataDir,
+    locks::parking_lot::{Mutex, RwLock},
+};
 
 use snarkvm::{
     ledger::{
@@ -63,11 +66,7 @@ use snarkvm::{
 use anyhow::{Context, Result, bail};
 use cfg_if::cfg_if;
 use indexmap::IndexMap;
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::{Mutex, RwLock};
 use lru::LruCache;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::{Mutex, RwLock};
 use std::{future::Future, net::SocketAddr, num::NonZeroUsize, sync::Arc};
 use tokio::{
     sync::{Notify, oneshot},

@@ -18,11 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::Mutex;
-
-#[cfg(not(feature = "locktick"))]
-use parking_lot::Mutex;
+use snarkos_utilities::locks::parking_lot::Mutex;
 
 #[derive(Default)]
 struct SyncMetricsData {
