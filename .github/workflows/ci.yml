@@ -224,10 +224,9 @@ jobs:
   # cargo flags share one build; nextest's `-E` and `--no-tests` are not cargo
   # flags. `cargo test -p a -p b` unifies the features of a and b, and several
   # crates enable features on their dependencies that change what those
-  # dependencies do:
-  # `snarkos-node-router/test-helpers`, `snarkos-node-network/test-helpers` and
-  # `snarkvm-ledger-block/test` skip checks, and `rocks` and `metrics` select
-  # other code paths. Crates share a line only where that unification enables
+  # dependencies do: `snarkos-node-router/test-helpers` and
+  # `snarkos-node-network/test-helpers` skip checks, and `rocks` and `metrics`
+  # select other code paths. Crates share a line only where that unification enables
   # none of these on any crate. Other helper features, such as `mock` and the
   # other crates' `test-helpers`, can still be unified.
   #

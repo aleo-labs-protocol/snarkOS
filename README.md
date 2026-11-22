@@ -622,9 +622,10 @@ cargo run --release -- clean --dev <NODE_ID>
 * **cuda** -
   Allows some operations to run on the (NVidia) GPU, instead of on the CPU. See [CUDA acceleration for provers](#optional-cuda-acceleration-for-provers) for install tips and current puzzle status.
 * **dev-network** -
-  Builds a node for a local development network: it lowers the coinbase and proof targets and the
-  consensus version heights, and allows the `--dev` flag. Never enable it to join a public network,
-  including testnet.
+  Builds a node for a local development network: it lowers the genesis coinbase and proof targets and
+  the consensus version heights, enables the dev committee and the dev genesis state root, and allows
+  the `--dev` flag. Never enable it to join a public network, including testnet. Such a build rejects
+  the shipped genesis block at startup, and peers with another genesis reject its handshakes.
 
 ### Lock instrumentation
 

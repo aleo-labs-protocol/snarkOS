@@ -116,8 +116,8 @@ and cargo flags share one build, as the two lines of
 tests between them. `cargo test -p a -p b` unifies the features of `a` and
 `b`, and several crates enable features on their
 dependencies that change what those dependencies do, such as
-`snarkos-node-router/test-helpers` and `snarkvm-ledger-block/test`. So crates
-share a line only where that unification enables no such feature on any crate.
+`snarkos-node-router/test-helpers`. So crates share a line only where that
+unification enables no such feature on any crate.
 Other helper features, such as `mock` and the other crates' `test-helpers`, can
 still be unified, so a test may
 compile in its line that would not under `cargo test -p <crate>` alone. Check

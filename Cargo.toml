@@ -287,6 +287,10 @@ cuda = [
   "snarkos-node-router/cuda",
   "snarkos-node-sync/cuda"
 ]
+# Lowers network parameters (consensus heights, genesis targets) and enables the dev committee and the
+# dev genesis state root, for local test and development networks. Never enable it to join a public
+# network, including testnet: such a build rejects the shipped genesis block at startup, as its genesis
+# targets differ, and the router and gateway handshakes reject peers with another genesis.
 dev-network = [ "snarkos-cli/dev-network", "snarkos-node/dev-network" ]
 tokio_console = [ "snarkos-cli/tokio_console" ]
 

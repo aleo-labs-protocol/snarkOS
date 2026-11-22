@@ -31,7 +31,6 @@ cuda = [
   "snarkos-node-sync/cuda"
 ]
 test-helpers = [
-  # "snarkvm/test" this breaks some of the tests
   "snarkvm/test-helpers",
   "snarkos-node-bft-ledger-service/test-helpers",
   "snarkos-node-bft-storage-service/test-helpers"
