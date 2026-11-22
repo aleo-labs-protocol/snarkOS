@@ -372,7 +372,7 @@ jobs:
       - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
       # The same profile as `ci_cargo_install_snarkos` in .ci/utils.sh, which
       # the upgrade tests build the latest release with.
-      - run: cargo build --release --locked --features test_network
+      - run: cargo build --release --locked --features dev-network
         env:
           CARGO_PROFILE_RELEASE_LTO: "off"
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"

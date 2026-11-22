@@ -45,7 +45,7 @@ members = [
 [workspace.dependencies.snarkvm]
 #path = "../snarkVM"
 git = "https://github.com/aleo-labs-protocol/snarkVM.git"
-rev = "5dc3edd5a74b22df7e9880607becb648fd477ecb" #staging
+rev = "a33f170b2c75dadcb91891c60f761c817fbde79f" #staging
 #version = "=4.12.0"
 default-features = false
 
@@ -287,9 +287,7 @@ cuda = [
   "snarkos-node-router/cuda",
   "snarkos-node-sync/cuda"
 ]
-test_targets = [ "snarkos-cli/test_targets" ]
-test_consensus_heights = [ "snarkos-cli/test_consensus_heights" ]
-test_network = [ "snarkos-cli/test_network", "snarkos-node/test_network" ]
+dev-network = [ "snarkos-cli/dev-network", "snarkos-node/dev-network" ]
 tokio_console = [ "snarkos-cli/tokio_console" ]
 
 [dependencies.clap]

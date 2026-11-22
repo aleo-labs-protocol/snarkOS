@@ -18,7 +18,7 @@ mod router;
 use crate::traits::NodeInterface;
 
 use snarkos_account::Account;
-#[cfg(feature = "test_network")]
+#[cfg(feature = "dev-network")]
 use snarkos_node_bft::ledger_service::{persist_dev_committee_start_round_if_unwritten, prepare_dev_committee_options};
 use snarkos_node_bft::{helpers::UpgradeMonitor, ledger_service::CoreLedgerService, spawn_blocking};
 use snarkos_node_cdn::CdnBlockSync;
@@ -93,8 +93,8 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         trusted_peers_only: bool,
         dev_txs: bool,
         dev: Option<u16>,
-        #[cfg(feature = "test_network")] dev_hotswap_config: Option<DevHotswapConfig>,
-        #[cfg(not(feature = "test_network"))] _dev_hotswap_config: Option<DevHotswapConfig>,
+        #[cfg(feature = "dev-network")] dev_hotswap_config: Option<DevHotswapConfig>,
+        #[cfg(not(feature = "dev-network"))] _dev_hotswap_config: Option<DevHotswapConfig>,
         proposal_spent_limit_multiplier: u64,
         signal_handler: Arc<SignalHandler>,
     ) -> Result<Self> {
@@ -105,7 +105,7 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
             let genesis = genesis.clone();
 
             cfg_if! {
-                if #[cfg(feature = "test_network")] {
+                if #[cfg(feature = "dev-network")] {
                     if let Some(config) = dev_hotswap_config
                         .map(|cfg| prepare_dev_committee_options(&node_data_dir, cfg)) {
                             spawn_blocking!(Ledger::<N, C>::load_with_dev_committee(genesis, storage_mode, config?))
@@ -126,7 +126,7 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
 
         // If snarkVM picked the start round itself (no CLI flag and no persisted file),
         // record it now so subsequent restarts are stable.
-        #[cfg(feature = "test_network")]
+        #[cfg(feature = "dev-network")]
         if let Some(committee) = ledger.dev_committee() {
             persist_dev_committee_start_round_if_unwritten(&node_data_dir, committee.starting_round())?;
         }
