@@ -451,7 +451,7 @@ mod transmission_tracker {
         // An epoch boundary drops every solution.
         untrack_solutions(&tracker);
 
-        let mut tracker = tracker.into_inner();
+        let mut tracker = tracker.lock();
         assert_eq!(tracker.entries.len(), 2);
         assert_eq!(tracker.expiry.len(), 2);
         let now = Instant::now() + MAX_AGE + Duration::from_secs(1);
