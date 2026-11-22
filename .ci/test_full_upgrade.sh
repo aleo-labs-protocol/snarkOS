@@ -4,7 +4,7 @@
 # Backwards-compatibility upgrade test:
 #
 # 1. Download latest snarkOS release source from GitHub.
-# 2. Build it via `cargo install --locked --path . --features dev-network`
+# 2. Build it with its devnet feature via `ci_cargo_install_snarkos`
 #    into a separate prefix (SNARKOS_RELEASE_DIR).
 # 3. Query latest_consensus_version for latest release and PR binaries from the REST API of a single node of each.
 # 4. Compute CONSENSUS_VERSION_HEIGHTS for latest release and PR.
@@ -27,7 +27,8 @@ network_id=$3
 # Default values if not provided
 : "${total_validators:=4}"
 : "${total_clients:=2}"
-: "${network_id:=0}"
+# Testnet, where the latest release and this build share a dev genesis.
+: "${network_id:=1}"
 
 # Node verbosity
 NODE_VERBOSITY=4
@@ -223,14 +224,6 @@ function build_consensus_heights_with_big_last() {
   heights="$heights,$last"
 
   echo "$heights"
-}
-
-function ci_cargo_install_snarkos() {
-  CARGO_PROFILE_RELEASE_LTO=off \
-  CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
-  CARGO_PROFILE_RELEASE_OPT_LEVEL=2 \
-  CARGO_PROFILE_RELEASE_DEBUG=0 \
-    cargo install --locked --path . --features dev-network "$@"
 }
 
 # Query the latest consensus versions of the release + PR binaries, then compute heights.

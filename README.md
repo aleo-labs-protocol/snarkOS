@@ -622,9 +622,8 @@ cargo run --release -- clean --dev <NODE_ID>
 * **cuda** -
   Allows some operations to run on the (NVidia) GPU, instead of on the CPU. See [CUDA acceleration for provers](#optional-cuda-acceleration-for-provers) for install tips and current puzzle status.
 * **dev-network** -
-  Builds a node for a local development network: it lowers the coinbase and proof targets and the
-  consensus version heights, and allows the `--dev` flag. Never enable it to join a public network,
-  including testnet.
+  Builds a node for a local development network and allows the `--dev` flag. Never enable it to join
+  a public network, including testnet. The feature's comment in `cli/Cargo.toml` says what it changes.
 
 ### Lock instrumentation
 

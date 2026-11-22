@@ -821,11 +821,14 @@ SNARKOS_RELEASE_VERSION_FILE="${SNARKOS_RELEASE_VERSION_FILE:-$SNARKOS_RELEASE_D
 
 # Build snarkos with optimized settings for CI (faster builds).
 function ci_cargo_install_snarkos() {
+  # Releases from before `dev-network` name this feature `test_network`.
+  local feature=dev-network
+  grep -q '^test_network = ' Cargo.toml && feature=test_network
   CARGO_PROFILE_RELEASE_LTO=off \
   CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
   CARGO_PROFILE_RELEASE_OPT_LEVEL=2 \
   CARGO_PROFILE_RELEASE_DEBUG=0 \
-    cargo install --locked --path . --features dev-network "$@"
+    cargo install --locked --path . --features "$feature" "$@"
 }
 
 # Download and build the latest snarkOS release from GitHub.

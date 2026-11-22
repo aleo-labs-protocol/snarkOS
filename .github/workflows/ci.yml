@@ -224,12 +224,11 @@ jobs:
   # cargo flags share one build; nextest's `-E` and `--no-tests` are not cargo
   # flags. `cargo test -p a -p b` unifies the features of a and b, and several
   # crates enable features on their dependencies that change what those
-  # dependencies do:
-  # `snarkos-node-router/test-helpers`, `snarkos-node-network/test-helpers` and
-  # `snarkvm-ledger-block/test` skip checks, and `rocks` and `metrics` select
-  # other code paths. Crates share a line only where that unification enables
-  # none of these on any crate. Other helper features, such as `mock` and the
-  # other crates' `test-helpers`, can still be unified.
+  # dependencies do: `snarkos-node-router/test-helpers` and
+  # `snarkos-node-network/test-helpers` skip checks, and `rocks` and `metrics`
+  # select other code paths. Crates share a line only where that unification
+  # enables none of these on any crate. Other helper features, such as `mock`
+  # and the other crates' `test-helpers`, can still be unified.
   #
   # Cheap entries run on free hosted runners and do not wait for the fleet.
   test-hosted:
@@ -480,8 +479,9 @@ jobs:
             timeout: 90
             runs: |
               export CARGO_TARGET_DIR="$SNARKOS_RELEASE_DIR/target"
-              ./.ci/test_full_upgrade.sh
-              ./.ci/test_partial_upgrade.sh
+              # Testnet (network 1), where the latest release and this build share a dev genesis.
+              ./.ci/test_full_upgrade.sh 4 2 1
+              ./.ci/test_partial_upgrade.sh 4 1
     # No expression: GitHub shows a skipped job's `name` unevaluated.
     name: devnet-merge
     steps: *devnet-steps
