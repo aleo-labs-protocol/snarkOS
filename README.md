@@ -625,7 +625,8 @@ cargo run --release -- clean --dev <NODE_ID>
   Builds a node for a local development network: it lowers the genesis coinbase and proof targets and
   the consensus version heights, enables the dev committee and the dev genesis state root, and allows
   the `--dev` flag. Never enable it to join a public network, including testnet. Such a build rejects
-  the shipped genesis block at startup, and peers with another genesis reject its handshakes.
+  the shipped genesis block at startup, and peers with another genesis reject its handshakes. The
+  `snarkos developer` commands make no such check.
 
 ### Lock instrumentation
 

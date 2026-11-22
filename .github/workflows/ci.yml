@@ -226,9 +226,9 @@ jobs:
   # crates enable features on their dependencies that change what those
   # dependencies do: `snarkos-node-router/test-helpers` and
   # `snarkos-node-network/test-helpers` skip checks, and `rocks` and `metrics`
-  # select other code paths. Crates share a line only where that unification enables
-  # none of these on any crate. Other helper features, such as `mock` and the
-  # other crates' `test-helpers`, can still be unified.
+  # select other code paths. Crates share a line only where that unification
+  # enables none of these on any crate. Other helper features, such as `mock`
+  # and the other crates' `test-helpers`, can still be unified.
   #
   # Cheap entries run on free hosted runners and do not wait for the fleet.
   test-hosted:
