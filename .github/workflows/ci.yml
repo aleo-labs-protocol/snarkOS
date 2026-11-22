@@ -220,9 +220,11 @@ jobs:
         run: cargo locktick-clippy -q -p snarkos-utilities --message-format=json | grep '"name":"locktick"' > /dev/null
       - run: cargo locktick-clippy --workspace --all-targets --all-features -- -D warnings
 
-  # Each line of `runs` is one build. `cargo test -p a -p b` unifies the
-  # features of a and b, and several crates enable features on their
-  # dependencies that change what those dependencies do:
+  # Each line of `runs` is one cargo command. Lines with the same `-p` set and
+  # cargo flags share one build; nextest's `-E` and `--no-tests` are not cargo
+  # flags. `cargo test -p a -p b` unifies the features of a and b, and several
+  # crates enable features on their dependencies that change what those
+  # dependencies do:
   # `snarkos-node-router/test-helpers`, `snarkos-node-network/test-helpers` and
   # `snarkvm-ledger-block/test` skip checks, and `rocks` and `metrics` select
   # other code paths. Crates share a line only where that unification enables
@@ -327,11 +329,16 @@ jobs:
       matrix:
         include:
           - name: services
+            runs: nextest run -p snarkos-node-consensus -p snarkos-cli
+          # Both lines name the same packages, so they share one build, and the
+          # filters split the run in two. A package named in `-p` but in neither
+          # filter is built and never tested. `--no-tests=fail` makes a filter
+          # that stops matching fail. Builds RocksDB, whose bindings need
+          # libclang, which hosted runners lack.
+          - name: node-rest-distribution
             runs: |
-              nextest run -p snarkos-node-consensus -p snarkos-cli
-              nextest run -p snarkos-node-rest
-          - name: node
-            runs: nextest run -p snarkos-node -p snarkos-node-bft-storage-service
+              nextest run -p snarkos-node -p snarkos-node-bft-storage-service -p snarkos-node-rest -p snarkos-ledger-distribution -E package(=snarkos-node)|package(=snarkos-node-bft-storage-service) --no-tests=fail
+              nextest run -p snarkos-node -p snarkos-node-bft-storage-service -p snarkos-node-rest -p snarkos-ledger-distribution -E package(=snarkos-node-rest)|package(=snarkos-ledger-distribution) --no-tests=fail
           # Both lines use `metrics`, which the `snarkos` binary enables by
           # default. `helpers::telemetry` compiles only under it, and a line
           # without it rebuilds the snarkvm and bft crates. nextest skips the
@@ -349,9 +356,6 @@ jobs:
             runs: |
               nextest run -p snarkos-node-router
               nextest run -p snarkos-node-sync
-          # Builds RocksDB, whose bindings need libclang, which hosted runners lack.
-          - name: ledger-distribution
-            runs: nextest run -p snarkos-ledger-distribution
     name: test (${{ matrix.name }})
     steps: *test-steps
 
