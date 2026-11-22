@@ -38,6 +38,8 @@ test-helpers = [
 dev-network = [
   "snarkos-node-bft-ledger-service/dev-network",
 ]
+# See `cli/Cargo.toml`.
+dev-committee-override = [ "snarkos-node-bft-ledger-service/dev-committee-override" ]
 
 [dependencies.anyhow]
 workspace = true

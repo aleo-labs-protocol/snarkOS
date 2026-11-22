@@ -461,9 +461,16 @@ jobs:
       matrix:
         name: [dev-on-prod-restart, chaotic-minority-reset, chaotic-majority-restart, upgrade]
         include:
+          # `--dev-on-prod` needs production network parameters, so it runs
+          # a binary of its own, built without `dev-network`.
           - name: dev-on-prod-restart
-            timeout: 45
-            runs: ./.ci/test_dev_on_prod_restart.sh
+            timeout: 90
+            runs: |
+              CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
+              CARGO_PROFILE_RELEASE_OPT_LEVEL=2 CARGO_PROFILE_RELEASE_DEBUG=0 \
+                cargo build --release --locked --features dev-committee-override
+              export PATH="$CARGO_TARGET_DIR/release:$PATH"
+              ./.ci/test_dev_on_prod_restart.sh
           - name: chaotic-minority-reset
             timeout: 45
             delay: true

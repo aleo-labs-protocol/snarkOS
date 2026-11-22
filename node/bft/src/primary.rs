@@ -663,7 +663,7 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
             if previous_committee_lookback.is_quorum_threshold_reached(&authors) {
                 is_ready = true;
             }
-            #[cfg(feature = "dev-network")]
+            #[cfg(feature = "dev-committee-override")]
             {
                 // If we are using a hotswapped dev committee, use simplified checks to more easily advance.
                 if let Some(dev_committee) = self.ledger.dev_committee_for_round(previous_round)?

@@ -173,13 +173,13 @@ copy_setup_ledger
 start_dev_nodes
 
 log "Step 4: Wait until dev network advances by +${DEV_ADVANCE_BLOCKS} blocks"
-wait_for_height_advance "$REST_PORT" "$DEV_ADVANCE_BLOCKS" "$DEV_MAX_WAIT" "dev-network-first-run"
+wait_for_height_advance "$REST_PORT" "$DEV_ADVANCE_BLOCKS" "$DEV_MAX_WAIT" "dev-committee-first-run"
 
 log "Step 5: Gracefully stop all dev nodes"
 graceful_stop_all_dev_nodes
 
 log "Step 6: Restart all dev nodes and wait for +${DEV_ADVANCE_BLOCKS} blocks"
 start_dev_nodes
-wait_for_height_advance "$REST_PORT" "$DEV_ADVANCE_BLOCKS" "$DEV_MAX_WAIT" "dev-network-second-run"
+wait_for_height_advance "$REST_PORT" "$DEV_ADVANCE_BLOCKS" "$DEV_MAX_WAIT" "dev-committee-second-run"
 
 log "SUCCESS: Completed dev-on-prod restart flow"

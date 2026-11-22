@@ -86,7 +86,7 @@ jobs run on every event.
 | `build-snarkos` | `cpu` | all | 60 | release `snarkos` with `dev-network`, as an artifact |
 | `devnet (devnet)` | `cpu` | all | 40 | `test_db_backup.sh`, `test_devnet.sh` |
 | `devnet (simple-node)` | `cpu` | all | 60 | `test_simple_node.sh` |
-| `devnet-merge (dev-on-prod-restart)` | `cpu` | merge | 45 | `test_dev_on_prod_restart.sh` |
+| `devnet-merge (dev-on-prod-restart)` | `cpu` | merge | 90 | release `snarkos` with `dev-committee-override`, then `test_dev_on_prod_restart.sh` |
 | `devnet-merge (chaotic-minority-reset)` | `cpu` | merge | 45 | `test_reset_minority.sh`, with delays |
 | `devnet-merge (chaotic-majority-restart)` | `cpu` | merge | 45 | `test_restart_majority.sh`, with delays |
 | `devnet-merge (upgrade)` | `cpu` | merge | 90 | `test_full_upgrade.sh`, `test_partial_upgrade.sh`, on testnet |
@@ -142,7 +142,9 @@ line, with the time of each test.
 
 `build-snarkos` builds the node once with `--features dev-network`. Each
 `devnet`, `devnet-merge` and `devnet-release` entry downloads it and runs
-scripts from `.ci` on one box. A box has one runner slot, so the nodes' fixed
+scripts from `.ci` on one box. The `dev-on-prod-restart` entry instead builds
+the node with `--features dev-committee-override`, because `--dev-on-prod`
+needs production network parameters. A box has one runner slot, so the nodes' fixed
 ports never collide with another job's.
 
 Each `test` and devnet job on the fleet gets its own home directory and
