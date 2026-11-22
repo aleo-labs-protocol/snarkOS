@@ -30,10 +30,7 @@ use crate::{
 use snarkvm::prelude::Network;
 
 use indexmap::IndexMap;
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::RwLock;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::RwLock;
+use snarkos_utilities::locks::parking_lot::RwLock;
 use std::{collections::HashMap, io, net::SocketAddr};
 use tokio::time::sleep;
 use tokio_util::codec::Decoder;

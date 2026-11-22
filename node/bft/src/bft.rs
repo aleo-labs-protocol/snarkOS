@@ -23,7 +23,10 @@ use crate::{
 use snarkos_account::Account;
 use snarkos_node_bft_ledger_service::LedgerService;
 use snarkos_node_sync::{BlockSync, Ping};
-use snarkos_utilities::NodeDataDir;
+use snarkos_utilities::{
+    NodeDataDir,
+    locks::{parking_lot::RwLock, tokio::Mutex},
+};
 
 use snarkvm::{
     console::account::Address,
@@ -39,12 +42,6 @@ use snarkvm::{
 
 use anyhow::Context;
 use indexmap::{IndexMap, IndexSet};
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::RwLock;
-#[cfg(feature = "locktick")]
-use locktick::tokio::Mutex;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::RwLock;
 use std::{
     collections::{BTreeMap, HashSet},
     net::SocketAddr,
@@ -53,8 +50,6 @@ use std::{
         atomic::{AtomicI64, Ordering},
     },
 };
-#[cfg(not(feature = "locktick"))]
-use tokio::sync::Mutex;
 use tokio::sync::{OnceCell, oneshot};
 
 #[derive(Clone)]

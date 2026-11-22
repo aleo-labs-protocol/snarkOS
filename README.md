@@ -208,8 +208,7 @@ Once enabled, telemetry metrics are available through:
     // GET /{network}/validators/participation?metadata={true}
     ```
 
-Telemetry is part of the `metrics` feature, which is enabled by default. The `telemetry` feature flag
-is kept as an alias for `metrics`, so commands that name it explicitly still work:
+Telemetry is part of the `metrics` feature, which is enabled by default:
 
 #### 1. [Installation](#2.3-installation)
 
@@ -617,20 +616,31 @@ cargo run --release -- clean --dev <NODE_ID>
 
 ## 6.4 Feature Flags
 
-By default, the metrics feature is turned on for some internal crates. It carries the validator
-telemetry described in [Validator Telemetry Metrics](#321-validator-telemetry-metrics).
-
-* **history** -
-  Enables a /history REST endpoint.
-* **telemetry** -
-  Deprecated alias for **metrics**, kept so that existing build commands keep working.
-  Validator telemetry is part of **metrics**.
+* **metrics** -
+  Enabled by default. Adds the `--metrics` flag and the metrics exporter. It carries the validator
+  telemetry described in [Validator Telemetry Metrics](#321-validator-telemetry-metrics).
 * **cuda** -
   Allows some operations to run on the (NVidia) GPU, instead of on the CPU. See [CUDA acceleration for provers](#optional-cuda-acceleration-for-provers) for install tips and current puzzle status.
-* **locktick** -
-  This feature turns on code for detecting deadlocks.
-* **test_targets** -
-  This feature allows the lowering of coinbase and proof targets for testing.
+* **dev-network** -
+  Builds a node for a local development network: it lowers the coinbase and proof targets and the
+  consensus version heights, and allows the `--dev` flag. Never enable it to join a public network,
+  including testnet.
+
+### Lock instrumentation
+
+The `locktick` cfg, which is not a feature, swaps every lock for an instrumented one from the
+[`locktick`](https://crates.io/crates/locktick) crate, to help find deadlocks and lock contention.
+Every three seconds, the node logs each lock guard that is held or waited for. To build the node
+with it, run:
+
+```
+cargo locktick-build --release
+```
+
+`cargo locktick-build` is an alias in `.cargo/config.toml` that adds `--cfg locktick` to the
+compiler flags. `cargo locktick-check` and `cargo locktick-clippy` do the same for `check` and
+`clippy`. If you set the `RUSTFLAGS` environment variable, it overrides the alias,
+so add `--cfg locktick` to `RUSTFLAGS` instead.
 
 ## 6.5 Local Backups
 

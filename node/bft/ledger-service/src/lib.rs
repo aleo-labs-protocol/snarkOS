@@ -25,9 +25,7 @@ extern crate snarkos_node_metrics as metrics;
 mod helpers;
 pub use helpers::*;
 
-#[cfg(feature = "ledger")]
 pub mod ledger;
-#[cfg(feature = "ledger")]
 pub use ledger::*;
 
 #[cfg(feature = "mock")]
@@ -35,14 +33,12 @@ pub mod mock;
 #[cfg(feature = "mock")]
 pub use mock::*;
 
-#[cfg(feature = "prover")]
 pub mod prover;
-#[cfg(feature = "prover")]
 pub use prover::*;
 
-#[cfg(feature = "translucent")]
+#[cfg(feature = "test-helpers")]
 pub mod translucent;
-#[cfg(feature = "translucent")]
+#[cfg(feature = "test-helpers")]
 pub use translucent::*;
 
 pub mod traits;

@@ -25,7 +25,9 @@ MAX_CLIENT_LOG_SIZE_BYTES=$((1 * 1024 * 1024))
 : "${total_validators:=4}"
 : "${total_clients:=4}" # need at least 4 clients, so each validator has at least one client connected to it.
 : "${network_id:=0}"
-: "${min_height:=60}" # To likely go past the 100 round garbage collection limit.
+# Garbage collection removes certificates 100 rounds below the latest leader round, and block h
+# has a leader round of at least 2h, so every validator has garbage collected by height 51.
+: "${min_height:=55}"
 
 tx_file="${TMPDIR:-/tmp}/transfer_public_tx.txt"
 
@@ -130,7 +132,7 @@ if ! wait_for_stable_consensus_version 0 "$network_name"; then
 fi
 
 # Broadcast a transfer_public built from a static query.
-# The state root is the fixed dev genesis root (Field::one()), which a test_network
+# The state root is the fixed dev genesis root (Field::one()), which a dev-network
 # node stores at height 0. The height is the chain height after the consensus
 # version has stabilized, so proving uses that same consensus version.
 # Devnet consensus passes ConsensusVersion::V10 before the version stabilizes.

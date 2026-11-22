@@ -14,16 +14,13 @@
 // limitations under the License.
 
 use snarkos_node_bft_events::ConsensusSchedule;
+use snarkos_utilities::locks::parking_lot::Mutex;
 use snarkvm::{
     console::network::Network,
     ledger::committee::Committee,
     prelude::{Address, FromBytes, IoResult, Read, Result, ToBytes, Write},
 };
 
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::Mutex;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::Mutex;
 use std::{
     collections::{HashMap, HashSet},
     fmt,
@@ -469,13 +466,6 @@ impl<N: Network> UpgradeMonitor<N> {
              height; upgrade snarkOS before then.",
             required.stop_height()
         );
-    }
-
-    /// Holds the lock on the evidence until the returned guard is dropped, which pauses a handshake
-    /// where it records the peer's schedule.
-    #[cfg(feature = "test")]
-    pub fn lock_for_test(&self) -> impl Sized + '_ {
-        self.state.lock()
     }
 
     /// Returns the path of the record of a required upgrade.

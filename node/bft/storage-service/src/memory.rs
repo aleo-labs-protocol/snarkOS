@@ -20,10 +20,7 @@ use snarkvm::{
 };
 
 use indexmap::{IndexMap, IndexSet, indexset, map::Entry};
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::RwLock;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::RwLock;
+use snarkos_utilities::locks::parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use tracing::error;
 
@@ -176,7 +173,6 @@ impl<N: Network> StorageService<N> for BFTMemoryService<N> {
     }
 
     /// Returns a HashMap over the `(transmission ID, (transmission, certificate IDs))` entries.
-    #[cfg(any(test, feature = "test"))]
     fn as_hashmap(&self) -> HashMap<TransmissionID<N>, (Transmission<N>, IndexSet<Field<N>>)> {
         self.transmissions.read().clone().into_iter().collect()
     }

@@ -18,10 +18,7 @@ use snarkvm::prelude::{Network, puzzle::SolutionID};
 
 use core::hash::Hash;
 use linked_hash_map::LinkedHashMap;
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::RwLock;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::RwLock;
+use snarkos_utilities::locks::parking_lot::RwLock;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     net::{IpAddr, SocketAddr},
@@ -72,7 +69,7 @@ impl<N: Network> Default for Cache<N> {
 }
 
 impl<N: Network> Cache<N> {
-    const INBOUND_BLOCK_REQUEST_INTERVAL: i64 = 60;
+    const INBOUND_BLOCK_REQUEST_INTERVAL: i64 = crate::BLOCK_REQUEST_INTERVAL_IN_SECS;
     const INBOUND_PUZZLE_REQUEST_INTERVAL: i64 = 60;
     const INBOUND_UNCONFIRMED_SOLUTION_INTERVAL: i64 = 60;
 

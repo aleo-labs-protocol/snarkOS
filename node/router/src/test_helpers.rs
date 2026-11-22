@@ -21,7 +21,7 @@
 
 use snarkos_account::Account;
 use snarkos_node_bft_ledger_service::MockLedgerService;
-use snarkos_utilities::NodeDataDir;
+use snarkos_utilities::{NodeDataDir, locks::parking_lot::RwLock};
 use snarkvm::{
     prelude::{FromBytes, MainnetV0 as CurrentNetwork, PrivateKey},
     utilities::TestRng,
@@ -36,6 +36,7 @@ use crate::{
     Routing,
     messages::{
         BlockRequest,
+        BlockResponseStatus,
         DisconnectReason,
         Message,
         MessageCodec,
@@ -65,10 +66,6 @@ use snarkvm::{
 };
 
 use async_trait::async_trait;
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::RwLock;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::RwLock;
 use std::{collections::HashMap, io, net::SocketAddr, str::FromStr, sync::Arc};
 use tracing::*;
 
@@ -237,6 +234,11 @@ impl<N: Network> Inbound<N> for TestRouter<N> {
         _blocks: Vec<Block<N>>,
         _latest_consensus_version: Option<ConsensusVersion>,
     ) -> bool {
+        true
+    }
+
+    /// Handles a `BlockResponse` that says the peer cannot serve `request`.
+    fn block_unavailable(&self, _peer_ip: SocketAddr, _request: BlockRequest, _status: BlockResponseStatus) -> bool {
         true
     }
 

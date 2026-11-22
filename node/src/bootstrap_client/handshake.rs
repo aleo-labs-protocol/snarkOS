@@ -34,6 +34,7 @@ use crate::{
     tcp::{ConnectError, Connection, ConnectionSide, protocols::*},
 };
 use snarkos_node_network::{
+    ConnectingPeerGuard,
     harden_socket,
     noise::{
         HandshakeProtocol,
@@ -119,15 +120,13 @@ impl<N: Network> Handshake for BootstrapClient<N> {
         // Make the socket more robust.
         harden_socket(stream)?;
 
-        // We don't know the listening address yet, as we don't initiate connections.
-        let mut listener_addr = if peer_side == ConnectionSide::Initiator {
+        // The bootstrap client only accepts connections.
+        if peer_side == ConnectionSide::Initiator {
             debug!("Received a connection request from '{peer_addr}'");
-            None
         } else {
             unreachable!("The boostrapper clients don't initiate connections");
-        };
+        }
 
-        // Perform the handshake; we pass on a mutable reference to listener_addr in case the process is broken at any point in time.
         let handshake_result = if peer_side == ConnectionSide::Responder {
             unreachable!("The boostrapper clients don't initiate connections");
         } else {
@@ -136,50 +135,37 @@ impl<N: Network> Handshake for BootstrapClient<N> {
                 // so the marker settles the connection mode. When the router's handshake is
                 // converted the two will need telling apart - most likely by giving each
                 // subprotocol its own marker - and this is the dispatch that has to change.
-                (HandshakeProtocol::Noise, _) => {
-                    self.handshake_inner_responder_noise(peer_addr, &mut listener_addr, stream).await
-                }
-                (HandshakeProtocol::Legacy, prefix) => {
-                    self.handshake_inner_responder(peer_addr, &mut listener_addr, stream, &prefix).await
-                }
+                (HandshakeProtocol::Noise, _) => self.handshake_inner_responder_noise(peer_addr, stream).await,
+                (HandshakeProtocol::Legacy, prefix) => self.handshake_inner_responder(peer_addr, stream, &prefix).await,
             }
         };
 
-        if let Some(addr) = listener_addr {
-            match handshake_result {
-                Ok((peer_port, peer_aleo_addr, peer_node_type, peer_version, peer_snarkos_sha, connection_mode)) => {
-                    if let Some(peer) = self.peer_pool.write().get_mut(&addr) {
-                        // Due to only having a single Resolver, the BootstrapClient only adds an Aleo
-                        // address mapping for Gateway-mode connections, as it is only used there, and
-                        // it could otherwise clash with the Router-mode mapping for validators, which
-                        // may connect in both modes at the same time.
-                        let aleo_addr =
-                            if connection_mode == ConnectionMode::Gateway { Some(peer_aleo_addr) } else { None };
-                        self.resolver.write().insert_peer(peer.listener_addr(), peer_addr, aleo_addr);
-                        peer.upgrade_to_connected(
-                            peer_addr,
-                            peer_port,
-                            peer_aleo_addr,
-                            peer_node_type,
-                            peer_version,
-                            peer_snarkos_sha,
-                            connection_mode,
-                        );
-                    }
-                    debug!("Completed the handshake with '{peer_addr}'");
-                }
-                Err(_) => {
-                    if let Some(peer) = self.peer_pool.write().get_mut(&addr) {
-                        // The peer may only be downgraded if it's a ConnectingPeer.
-                        if peer.is_connecting() {
-                            peer.downgrade_to_candidate(addr);
-                        }
-                    }
-                }
-            }
+        // On failure, the handshake has already returned any peer it marked as connecting to the
+        // candidates.
+        let (peer_port, peer_aleo_addr, peer_node_type, peer_version, peer_snarkos_sha, connection_mode, connecting) =
+            handshake_result?;
+        if let Some(peer) = self.peer_pool.write().get_mut(&connecting.listener_addr()) {
+            // Due to only having a single Resolver, the BootstrapClient only adds an Aleo
+            // address mapping for Gateway-mode connections, as it is only used there, and
+            // it could otherwise clash with the Router-mode mapping for validators, which
+            // may connect in both modes at the same time.
+            let aleo_addr = if connection_mode == ConnectionMode::Gateway { Some(peer_aleo_addr) } else { None };
+            self.resolver.write().insert_peer(peer.listener_addr(), peer_addr, aleo_addr);
+            peer.upgrade_to_connected(
+                peer_addr,
+                peer_port,
+                peer_aleo_addr,
+                peer_node_type,
+                peer_version,
+                peer_snarkos_sha,
+                connection_mode,
+            );
         }
+        // The connecting peer takes the peer pool's lock when dropped.
+        drop(connecting);
+        debug!("Completed the handshake with '{peer_addr}'");
 
-        handshake_result.map(|_| connection)
+        Ok(connection)
     }
 }
 
@@ -194,9 +180,11 @@ impl<N: Network> BootstrapClient<N> {
     async fn handshake_inner_responder_noise<'a>(
         &'a self,
         peer_addr: SocketAddr,
-        listener_addr: &mut Option<SocketAddr>,
         stream: &'a mut TcpStream,
-    ) -> Result<(u16, Address<N>, NodeType, u32, Option<[u8; 40]>, ConnectionMode), ConnectError> {
+    ) -> Result<
+        (u16, Address<N>, NodeType, u32, Option<[u8; 40]>, ConnectionMode, ConnectingPeerGuard<'a, N>),
+        ConnectError,
+    > {
         /* Message 1: the peer's cleartext hint, read without deriving anything. */
 
         let pending = PendingSession::accept(stream).await?;
@@ -216,8 +204,7 @@ impl<N: Network> BootstrapClient<N> {
 
         // Introduce the peer into the peer pool; this is the only thing mutated here, so it goes
         // after the checks that might have turned the peer away.
-        *listener_addr = Some(SocketAddr::new(peer_addr.ip(), hint.listener_port));
-        self.add_connecting_peer(listener_addr.unwrap())?;
+        let connecting = self.add_connecting_peer(SocketAddr::new(peer_addr.ip(), hint.listener_port))?;
 
         /* Message 2: disclose ourselves, without signing anything yet. */
 
@@ -244,16 +231,18 @@ impl<N: Network> BootstrapClient<N> {
             != (peer_info.version, peer_info.listener_port, peer_info.address)
         {
             warn!("{} Handshake with '{peer_addr}' failed (the handshake hint was contradicted)", Self::OWNER);
-            return self.reject_noise_handshake(peer_addr, noise, DisconnectReason::ProtocolViolation).await;
+            return Err(self.reject_noise_handshake(peer_addr, noise, DisconnectReason::ProtocolViolation).await);
         }
         log_repo_sha_comparison(peer_addr, &peer_info.snarkos_sha, Self::OWNER);
 
         if peer_info.restrictions_id != self.restrictions_id {
             warn!("{} Handshake with '{peer_addr}' failed (incorrect restrictions ID)", Self::OWNER);
-            return self.reject_noise_handshake(peer_addr, noise, DisconnectReason::InvalidChallengeResponse).await;
+            return Err(self
+                .reject_noise_handshake(peer_addr, noise, DisconnectReason::InvalidChallengeResponse)
+                .await);
         }
         if let Some(reason) = self.verify_peer_claims(peer_addr, peer_info.version, peer_info.address).await? {
-            return self.reject_noise_handshake(peer_addr, noise, reason).await;
+            return Err(self.reject_noise_handshake(peer_addr, noise, reason).await);
         }
 
         /* Message 4: verify the peer's proof, then produce our own. */
@@ -261,11 +250,15 @@ impl<N: Network> BootstrapClient<N> {
         // Perform the deferred non-blocking deserialization of the signature.
         let Ok(signature) = peer_signature.deserialize().await else {
             warn!("{} Handshake with '{peer_addr}' failed (cannot deserialize the signature)", Self::OWNER);
-            return self.reject_noise_handshake(peer_addr, noise, DisconnectReason::InvalidChallengeResponse).await;
+            return Err(self
+                .reject_noise_handshake(peer_addr, noise, DisconnectReason::InvalidChallengeResponse)
+                .await);
         };
         if !signature.verify_bytes(&peer_info.address, &peer_binding) {
             warn!("{} Handshake with '{peer_addr}' failed (invalid signature)", Self::OWNER);
-            return self.reject_noise_handshake(peer_addr, noise, DisconnectReason::InvalidChallengeResponse).await;
+            return Err(self
+                .reject_noise_handshake(peer_addr, noise, DisconnectReason::InvalidChallengeResponse)
+                .await);
         }
 
         let Ok(our_signature) = self.account.sign_bytes(&binding, &mut rand::rng()) else {
@@ -280,19 +273,25 @@ impl<N: Network> BootstrapClient<N> {
             peer_info.version,
             peer_info.snarkos_sha,
             ConnectionMode::Gateway,
+            connecting,
         ))
     }
 
-    /// Tells the initiator why it was turned away, and fails the handshake with that reason.
+    /// Tells the initiator why it was turned away. Returns the error that ends the handshake: the
+    /// reason, or the error that kept the initiator from hearing it.
     async fn reject_noise_handshake(
         &self,
         peer_addr: SocketAddr,
         mut noise: NoiseSession<&mut TcpStream>,
         reason: DisconnectReason,
-    ) -> Result<(u16, Address<N>, NodeType, u32, Option<[u8; 40]>, ConnectionMode), ConnectError> {
-        noise.send(&encode_payload(&ResponderProof::<N>::Rejected { reason })?).await?;
+    ) -> ConnectError {
+        let sent: Result<(), ConnectError> = async {
+            noise.send(&encode_payload(&ResponderProof::<N>::Rejected { reason })?).await?;
+            Ok(())
+        }
+        .await;
 
-        Err(reason.into_connect_error(peer_addr))
+        sent.err().unwrap_or_else(|| reason.into_connect_error(peer_addr))
     }
 
     /// The checks a peer's claimed identity can be held to without any cryptography, run first
@@ -328,10 +327,12 @@ impl<N: Network> BootstrapClient<N> {
     async fn handshake_inner_responder<'a>(
         &'a self,
         peer_addr: SocketAddr,
-        listener_addr: &mut Option<SocketAddr>,
         stream: &'a mut TcpStream,
         prefix: &[u8],
-    ) -> Result<(u16, Address<N>, NodeType, u32, Option<[u8; 40]>, ConnectionMode), ConnectError> {
+    ) -> Result<
+        (u16, Address<N>, NodeType, u32, Option<[u8; 40]>, ConnectionMode, ConnectingPeerGuard<'a, N>),
+        ConnectError,
+    > {
         // Construct the stream.
         let mut framed = prepare_framed(stream, BootstrapClientCodec::<N>::handshake(), prefix);
 
@@ -342,11 +343,8 @@ impl<N: Network> BootstrapClient<N> {
             unreachable!("expect_handshake_msg only returns a router challenge request");
         };
 
-        // Obtain the peer's listening address.
-        *listener_addr = Some(SocketAddr::new(peer_addr.ip(), peer_request.listener_port));
-
-        // Introduce the peer into the peer pool.
-        self.add_connecting_peer(listener_addr.unwrap())?;
+        // Introduce the peer into the peer pool, at its listening address.
+        let connecting = self.add_connecting_peer(SocketAddr::new(peer_addr.ip(), peer_request.listener_port))?;
 
         // Verify the challenge request.
         if !self.verify_challenge_request(peer_addr, &mut framed, &peer_request).await? {
@@ -403,6 +401,7 @@ impl<N: Network> BootstrapClient<N> {
             peer_request.version,
             peer_request.snarkos_sha,
             ConnectionMode::Router,
+            connecting,
         ))
     }
 

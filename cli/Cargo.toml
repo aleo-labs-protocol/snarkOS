@@ -18,16 +18,6 @@ edition = "2024"
 
 [features]
 default = [ ]
-async = [ ]
-locktick = [
-  "dep:locktick",
-  "snarkos-display/locktick",
-  "snarkos-node/locktick",
-  "snarkos-node-cdn/locktick",
-  "snarkos-node-rest/locktick",
-  "snarkos-utilities/locktick",
-  "snarkvm/locktick"
-]
 metrics = [ "dep:snarkos-node-metrics", "snarkos-node/metrics" ]
 cuda = [
   "snarkvm/cuda",
@@ -36,20 +26,7 @@ cuda = [
   "snarkos-node-cdn/cuda",
   "snarkos-node-rest/cuda"
 ]
-test_targets = [ "snarkvm/test_targets" ]
-test_consensus_heights = [ "snarkvm/test_consensus_heights" ]
-test_network = [
-  "test_targets", 
-  "test_consensus_heights",
-  "snarkvm/dev-committee",
-  "snarkvm/dev-print",
-  "snarkvm/dev_genesis_state_root",
-]
-serial = [
-  "snarkvm/serial",
-  "snarkos-node/serial",
-  "snarkos-display/serial",
-]
+dev-network = [ "snarkvm/dev-network", "snarkvm/dev-committee", "snarkvm/dev_genesis_state_root" ]
 tokio_console = [ "dep:console-subscriber", "tokio/tracing" ]
 
 [dependencies.anstyle]
@@ -79,15 +56,7 @@ workspace = true
 workspace = true
 features = [ "serde", "rayon" ]
 
-[dependencies.locktick]
-workspace = true
-features = [ "parking_lot" ]
-optional = true
-
 [dependencies.num_cpus]
-workspace = true
-
-[dependencies.parking_lot]
 workspace = true
 
 [dependencies.rand]

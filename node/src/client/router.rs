@@ -19,8 +19,7 @@ use snarkos_node_router::{
     Routing,
     messages::{
         BlockRequest,
-        BlockResponse,
-        DataBlocks,
+        BlockResponseStatus,
         DisconnectReason,
         MessageCodec,
         PeerRequest,
@@ -193,33 +192,7 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Client<N, C> {
 
     /// Handles a `BlockRequest` message.
     fn block_request(&self, peer_ip: SocketAddr, message: BlockRequest) -> bool {
-        let BlockRequest { start_height, end_height } = &message;
-
-        // Get the latest consensus version, i.e., the one for the last block's height.
-        let latest_consensus_version = match N::CONSENSUS_VERSION(end_height.saturating_sub(1)) {
-            Ok(version) => version,
-            Err(err) => {
-                let err = err.context("Failed to retrieve consensus version");
-                error!("{}", flatten_error(&err));
-                return false;
-            }
-        };
-
-        // Retrieve the blocks within the requested range.
-        let blocks = match self.ledger.get_blocks(*start_height..*end_height) {
-            Ok(blocks) => DataBlocks(blocks),
-            Err(error) => {
-                let err =
-                    error.context(format!("Failed to retrieve blocks {start_height} to {end_height} from the ledger"));
-                error!("{}", flatten_error(&err));
-                return false;
-            }
-        };
-
-        // Send the `BlockResponse` message to the peer.
-        self.router()
-            .send(peer_ip, Message::BlockResponse(BlockResponse::new(message, blocks, latest_consensus_version)));
-        true
+        crate::send_block_response(self.router(), &self.ledger, peer_ip, message)
     }
 
     /// Handles a `BlockResponse` message.
@@ -265,12 +238,18 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Client<N, C> {
         }
     }
 
+    /// Handles a `BlockResponse` that says the peer cannot serve `request`.
+    fn block_unavailable(&self, peer_ip: SocketAddr, request: BlockRequest, status: BlockResponseStatus) -> bool {
+        self.sync.insert_block_unavailable(peer_ip, request, status);
+        true
+    }
+
     /// Processes the block locators and sends back a `Pong` message.
     fn ping(&self, peer_ip: SocketAddr, message: Ping<N>) -> bool {
         // If block locators were provided, then update the peer in the sync pool.
         if let Some(block_locators) = message.block_locators {
             // Check the block locators are valid, and update the peer in the sync pool.
-            if let Err(err) = self.sync.update_peer_locators(peer_ip, &block_locators) {
+            if let Err(err) = self.sync.update_peer_locators(peer_ip, &block_locators, message.oldest_retained) {
                 warn!("{}", flatten_error(err.context(format!("Peer '{peer_ip}' sent invalid block locators"))));
                 return false;
             }

@@ -18,28 +18,15 @@ edition = "2024"
 
 [features]
 default = [ ]
-ledger = [ "ledger-write", "parking_lot", "rand", "rayon", "tokio", "tracing" ]
-ledger-write = [ ]
-locktick = [
-  "dep:locktick",
-  "snarkvm/locktick",
-  "snarkos-utilities/locktick"
-]
 metrics = [ "dep:snarkos-node-metrics", "snarkvm/metrics" ]
-mock = [ "ledger-write", "parking_lot", "tracing" ]
-prover = [ ]
+mock = [ ]
 cuda = [ "snarkvm/cuda" ]
-serial = [
-  "snarkvm/serial",
-  "snarkos-node-metrics?/serial"
-]
-test = [ "mock", "translucent" ]
-test_network = [
+test-helpers = [ "mock" ]
+dev-network = [
   "snarkvm/dev-committee",
   "snarkvm/dev_genesis_state_root",
-  "snarkos-utilities/test_network"
+  "snarkos-utilities/dev-network"
 ]
-translucent = [ "ledger" ]
 
 [dependencies.anyhow]
 workspace = true
@@ -51,11 +38,6 @@ version = "0.1"
 workspace = true
 features = [ "serde", "rayon" ]
 
-[dependencies.locktick]
-workspace = true
-features = [ "parking_lot" ]
-optional = true
-
 [dependencies.snarkos-node-metrics]
 workspace = true
 optional = true
@@ -63,17 +45,11 @@ optional = true
 [dependencies.snarkos-utilities]
 workspace = true
 
-[dependencies.parking_lot]
-workspace = true
-optional = true
-
 [dependencies.rand]
 workspace = true
-optional = true
 
 [dependencies.rayon]
 workspace = true
-optional = true
 
 [dependencies.snarkvm]
 workspace = true
@@ -82,14 +58,12 @@ features = [ "console", "ledger", "synthesizer" ]
 [dependencies.tokio]
 workspace = true
 features = [ "macros", "rt-multi-thread" ]
-optional = true
 
 [dependencies.thiserror]
 workspace = true
 
 [dependencies.tracing]
 workspace = true
-optional = true
 features = [ "log" ]
 
 [dev-dependencies.snarkos-utilities]

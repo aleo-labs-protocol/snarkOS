@@ -35,8 +35,8 @@ init_log_dir
 
 trap stop_nodes EXIT
 
-# The heights of V1..V21 match the test defaults; only V22 differs.
-base_heights="0,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24"
+# The heights of V1..V22 match the test defaults; only V23 differs.
+base_heights="0,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25"
 upgraded_heights="$base_heights,$activation_height"
 outdated_heights="$base_heights,4294967295"
 
@@ -49,8 +49,8 @@ upgraded_port=3030
 outdated_port=$((3030+outdated_validator))
 outdated_metrics_port=9000
 record_file=".node-data-$network_id-$outdated_validator/required-consensus-upgrade"
-# The activation height and ConsensusVersion::V22, in the little-endian encoding of the record.
-expected_record="$(printf '%08x' "$activation_height" | sed -E 's/(..)(..)(..)(..)/\4\3\2\1/')1600"
+# The activation height and ConsensusVersion::V23, in the little-endian encoding of the record.
+expected_record="$(printf '%08x' "$activation_height" | sed -E 's/(..)(..)(..)(..)/\4\3\2\1/')1700"
 
 # Starts validator $1 with the consensus version heights $2, logging to $3.
 function start_validator() {

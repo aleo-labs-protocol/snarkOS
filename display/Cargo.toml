@@ -18,8 +18,6 @@ edition = "2024"
 
 [features]
 default = [ ]
-locktick = [ "snarkos-node/locktick", "snarkos-utilities/locktick" ]
-serial = [ "snarkvm/serial", "snarkos-node/serial" ]
 
 [dependencies.anyhow]
 workspace = true

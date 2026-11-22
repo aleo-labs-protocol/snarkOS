@@ -21,5 +21,5 @@ pub use handshake::*;
 
 /// The handshake strategies, which are otherwise unreachable from outside this
 /// crate: `handshake` is a private module. See `crate::prop_tests` for the rest.
-#[cfg(any(test, feature = "fuzz-helpers"))]
+#[cfg(any(test, feature = "test-helpers"))]
 pub use handshake::prop_tests as handshake_generators;

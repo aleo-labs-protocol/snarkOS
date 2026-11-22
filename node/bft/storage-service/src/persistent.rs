@@ -35,11 +35,8 @@ use snarkvm::{
 
 use anyhow::anyhow;
 use indexmap::{IndexSet, indexset};
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::Mutex;
 use lru::LruCache;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::Mutex;
+use snarkos_utilities::locks::parking_lot::Mutex;
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
@@ -313,7 +310,7 @@ impl<N: Network> StorageService<N> for BFTPersistentStorage<N> {
     }
 
     /// Returns a HashMap over the `(transmission ID, (transmission, certificate IDs))` entries.
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(any(test, feature = "test-helpers"))]
     fn as_hashmap(&self) -> HashMap<TransmissionID<N>, (Transmission<N>, IndexSet<Field<N>>)> {
         self.transmissions.iter_confirmed().map(|(k, v)| (k.into_owned(), (*v).clone())).collect()
     }

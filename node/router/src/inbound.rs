@@ -20,6 +20,7 @@ use crate::{
     messages::{
         BlockRequest,
         BlockResponse,
+        BlockResponseStatus,
         DataBlocks,
         Message,
         PeerResponse,
@@ -43,13 +44,15 @@ use tokio::task::spawn_blocking;
 
 /// The max number of peers to send in a `PeerResponse` message.
 pub const MAX_PEERS_TO_SEND: usize = u8::MAX as usize;
+/// The maximum number of block requests accepted from a peer per `BLOCK_REQUEST_INTERVAL_IN_SECS`.
+pub const MAXIMUM_BLOCK_REQUESTS_PER_INTERVAL: usize = 256;
+/// The interval, in seconds, over which the block requests from a peer are counted.
+pub const BLOCK_REQUEST_INTERVAL_IN_SECS: i64 = 60;
 
 #[async_trait]
 pub trait Inbound<N: Network>: Reading + Outbound<N> {
     /// The maximum number of puzzle requests per interval.
     const MAXIMUM_PUZZLE_REQUESTS_PER_INTERVAL: usize = 5;
-    /// The maximum number of block requests per interval.
-    const MAXIMUM_BLOCK_REQUESTS_PER_INTERVAL: usize = 256;
     /// The maximum number of unconfirmed solutions per interval (~3800 per hour at 60s interval).
     const MAXIMUM_UNCONFIRMED_SOLUTIONS_PER_INTERVAL: usize = 64;
     /// The duration in seconds to sleep in between ping requests with a connected peer.
@@ -112,7 +115,7 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
                 // Insert the block request for the peer, and fetch the recent frequency.
                 let frequency = self.router().cache.insert_inbound_block_request(peer_ip);
                 // Check if the number of block requests is within the limit.
-                if frequency > Self::MAXIMUM_BLOCK_REQUESTS_PER_INTERVAL {
+                if frequency > MAXIMUM_BLOCK_REQUESTS_PER_INTERVAL {
                     bail!("Peer '{peer_ip}' is not following the protocol (excessive block requests)")
                 }
                 // Ensure the block request is well-formed.
@@ -130,10 +133,18 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
                     false => bail!("Peer '{peer_ip}' sent an invalid block request"),
                 }
             }
-            Message::BlockResponse(BlockResponse { request, latest_consensus_version, blocks, .. }) => {
+            Message::BlockResponse(BlockResponse { request, status, latest_consensus_version, blocks }) => {
                 // Remove the block request, checking if this node previously sent a block request to this peer.
                 if !self.router().cache.remove_outbound_block_request(peer_ip, &request) {
                     bail!("Peer '{peer_ip}' is not following the protocol (unexpected block response)")
+                }
+
+                if status != BlockResponseStatus::Blocks {
+                    status.ensure_consistent_with(peer_ip, &request)?;
+                    return match self.block_unavailable(peer_ip, request, status) {
+                        true => Ok(true),
+                        false => bail!("Peer '{peer_ip}' sent an invalid block response"),
+                    };
                 }
 
                 // Perform the deferred non-blocking deserialization of the blocks.
@@ -343,6 +354,9 @@ pub trait Inbound<N: Network>: Reading + Outbound<N> {
         blocks: Vec<Block<N>>,
         latest_consensus_version: Option<ConsensusVersion>,
     ) -> bool;
+
+    /// Handles a `BlockResponse` that says the peer cannot serve `request`.
+    fn block_unavailable(&self, peer_ip: SocketAddr, request: BlockRequest, status: BlockResponseStatus) -> bool;
 
     /// Handles a `PeerRequest` message.
     fn peer_request(&self, peer_ip: SocketAddr) -> bool {

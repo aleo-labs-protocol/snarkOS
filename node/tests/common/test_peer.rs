@@ -14,8 +14,9 @@
 // limitations under the License.
 
 use snarkos_account::Account;
-use snarkos_node_network::NodeType;
+use snarkos_node_network::{NodeType, PeerPoolHandling};
 use snarkos_node_router::{
+    Router,
     expect_message,
     messages::{ChallengeRequest, ChallengeResponse, Message, MessageCodec, MessageTrait},
 };
@@ -31,7 +32,11 @@ use std::{
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
+    sync::{Arc, Mutex},
+    time::Duration,
 };
+
+use deadline::deadline;
 
 use futures_util::{TryStreamExt, sink::SinkExt};
 use pea2pea::{
@@ -64,6 +69,9 @@ pub struct TestPeer {
     node: Node,
     node_type: NodeType,
     account: Account<CurrentNetwork>,
+    /// The message version the peer advertises in the handshake.
+    version: u32,
+    received_messages: Arc<Mutex<Vec<Message<CurrentNetwork>>>>,
 }
 
 impl Pea2Pea for TestPeer {
@@ -86,6 +94,11 @@ impl TestPeer {
     }
 
     pub async fn new(node_type: NodeType, account: Account<CurrentNetwork>) -> Self {
+        Self::with_version(node_type, account, Message::<CurrentNetwork>::latest_message_version()).await
+    }
+
+    /// Returns a peer that advertises message version `version` in the handshake.
+    pub async fn with_version(node_type: NodeType, account: Account<CurrentNetwork>, version: u32) -> Self {
         let peer = Self {
             node: Node::new(Config {
                 max_connections: 200,
@@ -97,6 +110,8 @@ impl TestPeer {
             }),
             node_type,
             account,
+            version,
+            received_messages: Default::default(),
         };
 
         peer.enable_handshake().await;
@@ -124,6 +139,17 @@ impl TestPeer {
 
     pub fn address(&self) -> Address<CurrentNetwork> {
         self.account.address()
+    }
+
+    /// Returns a copy of the messages received from connected nodes so far.
+    pub fn received_messages(&self) -> Vec<Message<CurrentNetwork>> {
+        self.received_messages.lock().unwrap().clone()
+    }
+
+    /// Returns a challenge request at this peer's message version.
+    fn challenge_request(&self, port: u16, nonce: u64) -> ChallengeRequest<CurrentNetwork> {
+        let request = ChallengeRequest::new(port, self.node_type(), self.address(), nonce, None);
+        ChallengeRequest { version: self.version, ..request }
     }
 }
 
@@ -156,8 +182,7 @@ impl TestPeer {
         match node_side {
             ConnectionSide::Initiator => {
                 // Send a challenge request to the peer.
-                let our_request =
-                    ChallengeRequest::new(local_ip.port(), self.node_type(), self.address(), rng.random(), None);
+                let our_request = self.challenge_request(local_ip.port(), rng.random());
                 framed.send(Message::ChallengeRequest(our_request)).await?;
 
                 // Receive the peer's challenge bundle.
@@ -195,8 +220,7 @@ impl TestPeer {
                     nonce: response_nonce,
                 };
                 framed.send(Message::ChallengeResponse(our_response)).await?;
-                let our_request =
-                    ChallengeRequest::new(local_ip.port(), self.node_type(), self.address(), rng.random(), None);
+                let our_request = self.challenge_request(local_ip.port(), rng.random());
                 framed.send(Message::ChallengeRequest(our_request)).await?;
 
                 // Listen for the challenge response.
@@ -225,9 +249,26 @@ impl Reading for TestPeer {
         Default::default()
     }
 
-    async fn process_message(&self, _peer_ip: SocketAddr, _message: Self::Message) {}
+    async fn process_message(&self, _peer_ip: SocketAddr, message: Self::Message) {
+        self.received_messages.lock().unwrap().push(message);
+    }
 }
 
 impl OnDisconnect for TestPeer {
     async fn on_disconnect(&self, _peer_addr: SocketAddr, _origin: DisconnectOrigin) {}
+}
+
+/// Connects the node's router to `peer` and waits until both sides see the connection. Returns the
+/// node's address as the peer sees it.
+pub async fn connect_peer(router: &Router<CurrentNetwork>, peer: &TestPeer) -> SocketAddr {
+    let peer_addr = peer.listening_addr().await;
+    let num_peers = router.number_of_connected_peers() + 1;
+    router.connect(peer_addr).unwrap().await.unwrap().unwrap();
+
+    let router_clone = router.clone();
+    deadline!(Duration::from_secs(5), move || router_clone.number_of_connected_peers() == num_peers);
+    let peer_clone = peer.clone();
+    deadline!(Duration::from_secs(5), move || peer_clone.node().num_connected() == 1);
+
+    *peer.node().connected_addrs().first().unwrap()
 }

@@ -24,11 +24,14 @@ use crate::{
     spawn_blocking,
 };
 
-use snarkos_utilities::Stoppable;
-#[cfg(feature = "test_network")]
+#[cfg(feature = "dev-network")]
 use snarkos_utilities::{DevHotswapConfig, NodeDataDir};
+use snarkos_utilities::{
+    Stoppable,
+    locks::parking_lot::{Mutex, MutexGuard, RwLock},
+};
 
-#[cfg(feature = "test_network")]
+#[cfg(feature = "dev-network")]
 use snarkvm::ledger::DevCommitteeOptions;
 use snarkvm::{
     ledger::{
@@ -57,15 +60,6 @@ use snarkvm::{
 
 use anyhow::ensure;
 use indexmap::IndexMap;
-#[cfg(feature = "locktick")]
-use locktick::{
-    LockGuard,
-    parking_lot::{Mutex, RwLock},
-};
-use parking_lot::MutexGuard;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::{Mutex, RwLock};
-#[cfg(not(feature = "serial"))]
 use rayon::prelude::*;
 
 use std::{fmt, ops::Range, sync::Arc};
@@ -80,16 +74,11 @@ pub struct CoreLedgerService<N: Network, C: ConsensusStorage<N>> {
 }
 
 /// A transactional update to the ledger.
-#[cfg(feature = "ledger-write")]
 pub struct LedgerUpdate<'a, N: Network, C: ConsensusStorage<N>> {
     ledger: Ledger<N, C>,
-    #[cfg(feature = "locktick")]
-    _lock: LockGuard<MutexGuard<'a, ()>>,
-    #[cfg(not(feature = "locktick"))]
     _lock: MutexGuard<'a, ()>,
 }
 
-#[cfg(feature = "ledger-write")]
 impl<'a, N: Network, C: ConsensusStorage<N>> LedgerUpdateService<N> for LedgerUpdate<'a, N, C> {
     fn check_block_subdag(
         &self,
@@ -159,7 +148,7 @@ impl<N: Network, C: ConsensusStorage<N>> CoreLedgerService<N, C> {
 
     /// Returns the deterministic dev committee for rounds at or after the hotswap start,
     /// reading from the snarkVM `Ledger` (which owns the committee under `--dev-on-prod`).
-    #[cfg(feature = "test_network")]
+    #[cfg(feature = "dev-network")]
     fn dev_committee_for_round(&self, round: u64) -> Result<Option<Committee<N>>> {
         let Some(dev_committee) = self.ledger.dev_committee() else {
             return Ok(None);
@@ -177,7 +166,7 @@ impl<N: Network, C: ConsensusStorage<N>> CoreLedgerService<N, C> {
 /// 1. The round persisted to `<node_data_dir>/dev-committee-state` from a previous run.
 /// 2. `None` — defer to snarkVM, which falls back to the latest block's round at load time
 ///    and is then persisted by [`persist_dev_committee_start_round_if_unwritten`].
-#[cfg(feature = "test_network")]
+#[cfg(feature = "dev-network")]
 pub fn prepare_dev_committee_options(
     node_data_dir: &NodeDataDir,
     config: DevHotswapConfig,
@@ -207,7 +196,7 @@ pub fn prepare_dev_committee_options(
 /// Persists the given `start_round` to `<node_data_dir>/dev-committee-state` if the file
 /// doesn't already exist. Called after [`Ledger::load_with_dev_committee`] so that the
 /// round chosen by snarkVM (its `latest_round()` default) survives restarts.
-#[cfg(feature = "test_network")]
+#[cfg(feature = "dev-network")]
 pub fn persist_dev_committee_start_round_if_unwritten(node_data_dir: &NodeDataDir, start_round: u64) -> Result<()> {
     let path = node_data_dir.dev_committee_state_path();
     if !path.exists() {
@@ -219,7 +208,7 @@ pub fn persist_dev_committee_start_round_if_unwritten(node_data_dir: &NodeDataDi
 
 /// Writes the given `start_round` to the dev committee state file at `path`, creating the
 /// parent directory if needed.
-#[cfg(feature = "test_network")]
+#[cfg(feature = "dev-network")]
 fn write_dev_committee_start_round(path: &std::path::Path, start_round: u64) -> Result<()> {
     if let Some(parent) = path.parent()
         && !parent.exists()
@@ -324,7 +313,7 @@ impl<N: Network, C: ConsensusStorage<N>> LedgerService<N> for CoreLedgerService<
 
     /// Returns the current committee.
     fn current_committee(&self) -> Result<Committee<N>> {
-        #[cfg(feature = "test_network")]
+        #[cfg(feature = "dev-network")]
         {
             if let Some(dev_committee) = self.ledger.dev_committee() {
                 return Ok(dev_committee.clone());
@@ -344,7 +333,7 @@ impl<N: Network, C: ConsensusStorage<N>> LedgerService<N> for CoreLedgerService<
 
     /// Returns the committee lookback for the given round.
     fn get_committee_lookback_for_round(&self, round: u64) -> Result<Committee<N>> {
-        #[cfg(feature = "test_network")]
+        #[cfg(feature = "dev-network")]
         {
             if let Some(dev_committee) = self.dev_committee_for_round(round)? {
                 return Ok(dev_committee);
@@ -366,7 +355,7 @@ impl<N: Network, C: ConsensusStorage<N>> LedgerService<N> for CoreLedgerService<
     }
 
     /// Returns the deterministic hotswapped dev committee for the given round, if active.
-    #[cfg(feature = "test_network")]
+    #[cfg(feature = "dev-network")]
     fn dev_committee_for_round(&self, round: u64) -> Result<Option<Committee<N>>> {
         CoreLedgerService::dev_committee_for_round(self, round)
     }

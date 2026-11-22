@@ -25,7 +25,7 @@ use crate::{
 };
 
 use snarkos_account::Account;
-use snarkos_utilities::{DevHotswapConfig, NodeDataDir, SignalHandler};
+use snarkos_utilities::{DevHotswapConfig, NodeDataDir, SignalHandler, locks::parking_lot::RwLock};
 
 use snarkvm::prelude::{
     Address,
@@ -44,10 +44,6 @@ use snarkvm::prelude::{
 
 use anyhow::{Result, bail};
 
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::RwLock;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::RwLock;
 use std::{
     cmp,
     collections::HashMap,

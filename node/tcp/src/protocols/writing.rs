@@ -17,10 +17,7 @@ use std::{any::Any, collections::HashMap, io, net::SocketAddr, sync::Arc, time::
 
 use async_trait::async_trait;
 use futures_util::sink::SinkExt;
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::RwLock;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::RwLock;
+use snarkos_utilities::locks::parking_lot::RwLock;
 use tokio::{
     io::AsyncWrite,
     sync::{mpsc, oneshot},

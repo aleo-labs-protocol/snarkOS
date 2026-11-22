@@ -45,7 +45,7 @@ pub mod built_info {
 /// Returns the list of bootstrap peers.
 #[allow(clippy::if_same_then_else)]
 pub fn bootstrap_peers<N: Network>(is_dev: bool) -> Vec<SocketAddr> {
-    if cfg!(any(test, feature = "test")) || is_dev {
+    if cfg!(any(test, feature = "test-helpers")) || is_dev {
         // Development testing contains optional bootstrap peers loaded from the environment.
         match std::env::var("TEST_BOOTSTRAP_PEERS") {
             Ok(peers) => peers.split(',').map(|peer| SocketAddr::from_str(peer).unwrap()).collect(),

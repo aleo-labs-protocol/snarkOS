@@ -50,10 +50,10 @@ cargo test -p snarkos-node-bft --lib
 ### 2. Build with test features
 
 The CI scripts invoke `snarkos` by name, so the binary must be on PATH. Build it with the
-`test_network` feature and prepend the output directory to PATH:
+`dev-network` feature and prepend the output directory to PATH:
 
 ```bash
-cargo build --features test_network
+cargo build --features dev-network
 export PATH="$PWD/target/debug:$PATH"
 ```
 

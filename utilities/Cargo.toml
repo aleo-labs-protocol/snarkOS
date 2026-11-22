@@ -18,7 +18,7 @@ edition = "2024"
 
 [features]
 test-helpers = [ ]
-test_network = [ ]
+dev-network = [ ]
 
 [dependencies.anyhow]
 workspace = true
@@ -30,12 +30,16 @@ features = [ "macros", "rt", "signal", "sync" ]
 [dependencies.tracing]
 workspace = true
 
-[dependencies.locktick]
-optional = true
-workspace = true
-
 [dependencies.parking_lot]
 workspace = true
+
+[target.'cfg(locktick)'.dependencies.snarkvm]
+workspace = true
+features = [ "utilities" ]
+
 [dev-dependencies.tokio]
 workspace = true
 features = [ "macros", "rt", "time" ]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [ 'cfg(locktick)' ] }

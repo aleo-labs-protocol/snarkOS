@@ -18,20 +18,6 @@ edition = "2024"
 
 [features]
 default = [ ]
-timer = [ "aleo-std/timer" ]
-locktick = [
-  "dep:locktick",
-  "snarkos-node-bft/locktick",
-  "snarkos-node-cdn/locktick",
-  "snarkos-node-consensus/locktick",
-  "snarkos-node-network/locktick",
-  "snarkos-node-rest/locktick",
-  "snarkos-node-router/locktick",
-  "snarkos-node-sync/locktick",
-  "snarkos-node-tcp/locktick",
-  "snarkos-utilities/locktick",
-  "snarkvm/locktick"
-]
 metrics = [
   "dep:snarkos-node-metrics",
   "snarkos-node-bft/metrics",
@@ -42,10 +28,6 @@ metrics = [
   "snarkvm/metrics",
   "snarkvm/rocks"
 ]
-# The compile-time history features no longer select snarkVM code.
-# The names stay so existing build commands keep resolving.
-history = []
-history-staking-rewards = []
 cuda = [
   "snarkvm/cuda",
   "snarkos-account/cuda",
@@ -56,15 +38,8 @@ cuda = [
   "snarkos-node-router/cuda",
   "snarkos-node-sync/cuda"
 ]
-serial = [
-  "snarkvm/serial",
-  "snarkos-node-bft/serial"
-]
-test = []
-test_network = [ "snarkos-node-bft/test_network", "snarkos-node-consensus/test_network", "snarkos-utilities/test_network" ]
-
-[dependencies.aleo-std]
-workspace = true
+test-helpers = []
+dev-network = [ "snarkos-node-bft/dev-network", "snarkos-node-consensus/dev-network", "snarkos-utilities/dev-network" ]
 
 [dependencies.anyhow]
 workspace = true
@@ -85,18 +60,10 @@ workspace = true
 workspace = true
 features = [ "sink" ]
 
-[dependencies.locktick]
-workspace = true
-features = [ "parking_lot", "tokio" ]
-optional = true
-
 [dependencies.lru]
 workspace = true
 
 [dependencies.num_cpus]
-workspace = true
-
-[dependencies.parking_lot]
 workspace = true
 
 [dependencies.rand]
@@ -180,7 +147,7 @@ workspace = true
 
 [dev-dependencies.snarkos-node-router]
 workspace = true
-features = [ "test" ]
+features = [ "test-helpers" ]
 
 [dev-dependencies.snarkvm]
 workspace = true
@@ -198,6 +165,5 @@ workspace = true
 
 [package.metadata.cargo-machete]
 ignored = [
-  "aleo-std", # Only the timer feature uses it
   "serde_json", # Need to set preserve_order feature
 ]

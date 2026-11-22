@@ -18,23 +18,9 @@ edition = "2024"
 
 [features]
 default = [ ]
-locktick = [
-  "dep:locktick",
-  "snarkos-node-bft/locktick",
-  "snarkos-node-bft-ledger-service/locktick",
-  "snarkos-node-bft-storage-service/locktick",
-  "snarkos-node-metrics/locktick",
-  "snarkvm/locktick"
-]
 metrics = [ "dep:snarkos-node-metrics", "snarkos-node-bft/metrics" ]
 cuda = [ "snarkvm/cuda", "snarkos-account/cuda", "snarkos-node-bft-ledger-service/cuda" ]
-serial = [ 
-  "snarkos-node-bft/serial",
-  "snarkos-node-bft-ledger-service/serial",
-  "snarkos-node-metrics/serial",
-  "snarkvm/serial"
-]
-test_network = [ "snarkos-node-bft-ledger-service/test_network" ]
+dev-network = [ "snarkos-node-bft-ledger-service/dev-network" ]
 
 [dependencies.anyhow]
 workspace = true
@@ -46,20 +32,12 @@ workspace = true
 workspace = true
 features = [ "serde", "rayon" ]
 
-[dependencies.locktick]
-workspace = true
-features = [ "parking_lot" ]
-optional = true
-
 [dependencies.lru]
 workspace = true
 
 [dependencies.snarkos-node-metrics]
 workspace = true
 optional = true
-
-[dependencies.parking_lot]
-workspace = true
 
 [dependencies.snarkos-account]
 workspace = true
@@ -69,11 +47,9 @@ workspace = true
 
 [dependencies.snarkos-node-bft-ledger-service]
 workspace = true
-features = [ "ledger", "ledger-write" ]
 
 [dependencies.snarkos-node-bft-storage-service]
 workspace = true
-features = [ "persistent" ]
 
 [dependencies.snarkos-node-sync]
 workspace = true

@@ -18,24 +18,10 @@ edition = "2024"
 
 [features]
 default = [ ]
-# The compile-time history features no longer select snarkVM code.
-# The names stay so existing build commands keep resolving.
-history = []
-history-staking-rewards = []
 metrics = [ "dep:snarkos-node-metrics", "snarkos-node-consensus/metrics" ]
 cuda = [ "snarkvm/cuda", "snarkos-node-consensus/cuda", "snarkos-node-router/cuda" ]
-locktick = [
-  "dep:locktick",
-  "snarkos-node-consensus/locktick",
-  "snarkos-node-router/locktick",
-  "snarkvm/locktick"
-]
 # Lets benches advance a test ledger to the latest consensus version.
-test_consensus_heights = [ "snarkvm/test_consensus_heights" ]
-serial = [
-  "snarkos-node-router/serial",
-  "snarkos-node-consensus/serial"
-] 
+dev-network = [ "snarkvm/dev-network" ]
 
 [dependencies.anyhow]
 workspace = true
@@ -59,18 +45,10 @@ version = "11.1"
 default-features = false
 features = [ "aws_lc_rs" ]
 
-[dependencies.locktick]
-workspace = true
-features = [ "parking_lot" ]
-optional = true
-
 [dependencies.lru]
 workspace = true
 
 [dependencies.once_cell]
-workspace = true
-
-[dependencies.parking_lot]
 workspace = true
 
 [dependencies.serde]
@@ -101,6 +79,9 @@ workspace = true
 workspace = true
 
 [dependencies.snarkos-node-sync]
+workspace = true
+
+[dependencies.snarkos-utilities]
 workspace = true
 
 [dependencies.snarkvm]

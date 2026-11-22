@@ -18,6 +18,7 @@ use super::*;
 use snarkos_node_network::harden_socket;
 use snarkos_node_router::messages::{
     BlockRequest,
+    BlockResponseStatus,
     DisconnectReason,
     Message,
     MessageCodec,
@@ -195,12 +196,18 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Prover<N, C> {
         false
     }
 
+    /// Handles a `BlockResponse` that says the peer cannot serve `request`.
+    fn block_unavailable(&self, peer_ip: SocketAddr, _request: BlockRequest, _status: BlockResponseStatus) -> bool {
+        debug!("Disconnecting '{peer_ip}' for the following reason - {}", DisconnectReason::ProtocolViolation);
+        false
+    }
+
     /// Processes the block locators and sends back a `Pong` message.
     fn ping(&self, peer_ip: SocketAddr, message: Ping<N>) -> bool {
         // If block locators were provided, then update the peer in the sync pool.
         if let Some(block_locators) = message.block_locators {
             // Check the block locators are valid, and update the peer in the sync pool.
-            if let Err(error) = self.sync.update_peer_locators(peer_ip, &block_locators) {
+            if let Err(error) = self.sync.update_peer_locators(peer_ip, &block_locators, message.oldest_retained) {
                 warn!("Peer '{peer_ip}' sent invalid block locators: {error}");
                 return false;
             }

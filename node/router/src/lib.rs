@@ -24,7 +24,10 @@ extern crate tracing;
 extern crate snarkos_node_metrics as metrics;
 
 pub use snarkos_node_router_messages as messages;
-use snarkos_utilities::NodeDataDir;
+use snarkos_utilities::{
+    NodeDataDir,
+    locks::parking_lot::{Mutex, RwLock},
+};
 
 mod handshake;
 
@@ -68,11 +71,7 @@ use snarkos_node_tcp::{Config, ConnectionSide, Tcp};
 use snarkvm::prelude::{Address, Network, PrivateKey, ViewKey};
 
 use anyhow::Result;
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::{Mutex, RwLock};
-#[cfg(not(feature = "locktick"))]
-use parking_lot::{Mutex, RwLock};
-use std::{collections::HashMap, future::Future, io, net::SocketAddr, ops::Deref, sync::Arc};
+use std::{collections::HashMap, future::Future, io, net::SocketAddr, ops::Deref, sync::Arc, time::Duration};
 use tokio::task::JoinHandle;
 
 /// The default port used by the router.
@@ -147,7 +146,7 @@ impl<N: Network> Router<N> {
     /// The minimum permitted interval between connection attempts for an IP; anything shorter is considered malicious.
     const CONNECTION_ATTEMPTS_SINCE_SECS: i64 = 10;
     /// The maximum amount of connection attempts within a 10 second threshold.
-    #[cfg(not(feature = "test"))]
+    #[cfg(not(feature = "test-helpers"))]
     const MAX_CONNECTION_ATTEMPTS: usize = 10;
     /// The time frame to enforce the `MESSAGE_LIMIT`.
     const MESSAGE_LIMIT_TIME_FRAME_IN_SECS: i64 = 5;
@@ -304,6 +303,11 @@ impl<N: Network> CommunicationService for Router<N> {
     fn prepare_block_request(start_height: u32, end_height: u32) -> Self::Message {
         debug_assert!(start_height < end_height, "Invalid block request format");
         Message::BlockRequest(BlockRequest { start_height, end_height })
+    }
+
+    /// Returns the block request limit that `Inbound` enforces.
+    fn block_request_limit(&self) -> Option<(usize, Duration)> {
+        Some((MAXIMUM_BLOCK_REQUESTS_PER_INTERVAL, Duration::from_secs(BLOCK_REQUEST_INTERVAL_IN_SECS as u64)))
     }
 
     /// Sends the given message to specified peer.

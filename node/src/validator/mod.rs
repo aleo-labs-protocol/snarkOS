@@ -18,7 +18,7 @@ mod router;
 use crate::traits::NodeInterface;
 
 use snarkos_account::Account;
-#[cfg(feature = "test_network")]
+#[cfg(feature = "dev-network")]
 use snarkos_node_bft::ledger_service::{persist_dev_committee_start_round_if_unwritten, prepare_dev_committee_options};
 use snarkos_node_bft::{helpers::UpgradeMonitor, ledger_service::CoreLedgerService, spawn_blocking};
 use snarkos_node_cdn::CdnBlockSync;
@@ -38,7 +38,7 @@ use snarkos_node_tcp::{
     P2P,
     protocols::{Disconnect, Handshake, OnConnect, Reading},
 };
-use snarkos_utilities::{DevHotswapConfig, NodeDataDir, SignalHandler};
+use snarkos_utilities::{DevHotswapConfig, NodeDataDir, SignalHandler, locks::parking_lot::Mutex};
 
 use snarkvm::prelude::{
     Ledger,
@@ -51,10 +51,6 @@ use snarkvm::prelude::{
 use anyhow::{Context, Result};
 use cfg_if::cfg_if;
 use core::future::Future;
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::Mutex;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::Mutex;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::task::JoinHandle;
 
@@ -97,8 +93,8 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         trusted_peers_only: bool,
         dev_txs: bool,
         dev: Option<u16>,
-        #[cfg(feature = "test_network")] dev_hotswap_config: Option<DevHotswapConfig>,
-        #[cfg(not(feature = "test_network"))] _dev_hotswap_config: Option<DevHotswapConfig>,
+        #[cfg(feature = "dev-network")] dev_hotswap_config: Option<DevHotswapConfig>,
+        #[cfg(not(feature = "dev-network"))] _dev_hotswap_config: Option<DevHotswapConfig>,
         proposal_spent_limit_multiplier: u64,
         signal_handler: Arc<SignalHandler>,
     ) -> Result<Self> {
@@ -109,7 +105,7 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
             let genesis = genesis.clone();
 
             cfg_if! {
-                if #[cfg(feature = "test_network")] {
+                if #[cfg(feature = "dev-network")] {
                     if let Some(config) = dev_hotswap_config
                         .map(|cfg| prepare_dev_committee_options(&node_data_dir, cfg)) {
                             spawn_blocking!(Ledger::<N, C>::load_with_dev_committee(genesis, storage_mode, config?))
@@ -130,7 +126,7 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
 
         // If snarkVM picked the start round itself (no CLI flag and no persisted file),
         // record it now so subsequent restarts are stable.
-        #[cfg(feature = "test_network")]
+        #[cfg(feature = "dev-network")]
         if let Some(committee) = ledger.dev_committee() {
             persist_dev_committee_start_round_if_unwritten(&node_data_dir, committee.starting_round())?;
         }
@@ -153,7 +149,9 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         .await?;
 
         // Initialize the block synchronization logic.
-        let sync = Arc::new(BlockSync::new(ledger_service.clone(), ConnectionMode::Gateway));
+        let sync = Arc::new(
+            BlockSync::new(ledger_service.clone(), ConnectionMode::Gateway).with_trusted_peers_only(trusted_peers_only),
+        );
         let locators = sync.get_block_locators()?;
         let ping = Arc::new(Ping::new(router.clone(), locators));
 
@@ -591,7 +589,7 @@ mod tests {
 
     type CurrentNetwork = MainnetV0;
 
-    /// Use `RUST_MIN_STACK=67108864 cargo test --release profiler --features timer` to run this test.
+    /// Use `RUST_MIN_STACK=67108864 cargo test --release profiler` to run this test.
     #[ignore]
     #[tokio::test]
     async fn test_profiler() -> Result<()> {

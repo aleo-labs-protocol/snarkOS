@@ -42,14 +42,10 @@ members = [
   "utilities",
 ]
 
-[workspace.dependencies.aleo-std]
-version = "1.0.4"
-default-features = false
-
 [workspace.dependencies.snarkvm]
 #path = "../snarkVM"
 git = "https://github.com/aleo-labs-protocol/snarkVM.git"
-rev = "bfbc357ab9b2189eb048d13f8ae62ca5e5824376" #staging
+rev = "a33f170b2c75dadcb91891c60f761c817fbde79f" #staging
 #version = "=4.12.0"
 default-features = false
 
@@ -102,9 +98,6 @@ version = "0.3"
 
 [workspace.dependencies.futures-util]
 version = "0.3"
-
-[workspace.dependencies.locktick]
-version = "0.6"
 
 [workspace.dependencies.lru]
 version = "0.19.0"
@@ -281,14 +274,8 @@ name = "snarkos"
 path = "snarkos/main.rs"
 
 [features]
-default = [ "snarkos-cli/metrics", "snarkos-node-metrics", "snarkos-node/metrics", "snarkos-node-cdn/metrics" ]
-# The compile-time history features no longer select snarkVM code.
-# The names stay so existing build commands keep resolving.
-history = []
-history-staking-rewards = []
-# Deprecated alias for the metrics feature, which now carries the validator telemetry.
-# Retained so that build commands naming this feature keep resolving.
-telemetry = [ "snarkos-node/metrics" ]
+default = [ "metrics" ]
+metrics = [ "snarkos-cli/metrics", "dep:snarkos-node-metrics", "snarkos-node/metrics", "snarkos-node-cdn/metrics" ]
 cuda = [
   "snarkos-account/cuda",
   "snarkos-cli/cuda",
@@ -300,41 +287,12 @@ cuda = [
   "snarkos-node-router/cuda",
   "snarkos-node-sync/cuda"
 ]
-locktick = [
-  "dep:locktick",
-  "snarkos-node/locktick",
-  "snarkos-node-bft/locktick",
-  "snarkos-node-consensus/locktick",
-  "snarkos-node-metrics/locktick",
-  "snarkos-node-rest/locktick",
-  "snarkos-node-router/locktick",
-  "snarkos-node-sync/locktick",
-  "snarkos-node-tcp/locktick",
-  "snarkvm/locktick"
-]
-serial = [
-  "snarkos-cli/serial",
-  "snarkos-node/serial",
-  "snarkos-node-bft/serial",
-  "snarkos-node-consensus/serial",
-  "snarkos-node-metrics/serial",
-  "snarkos-node-rest/serial",
-  "snarkos-node-router/serial",
-  "snarkos-node-sync/serial",
-  "snarkvm/serial"
-]
-test_targets = [ "snarkos-cli/test_targets" ]
-test_consensus_heights = [ "snarkos-cli/test_consensus_heights" ]
-test_network = [ "snarkos-cli/test_network", "snarkos-node/test_network" ]
+dev-network = [ "snarkos-cli/dev-network", "snarkos-node/dev-network" ]
 tokio_console = [ "snarkos-cli/tokio_console" ]
 
 [dependencies.clap]
 workspace = true
 features = [ "derive" ]
-
-[dependencies.locktick]
-workspace = true
-optional = true
 
 [dependencies.snarkos-account]
 workspace = true
@@ -367,7 +325,7 @@ workspace = true
 [dependencies.snarkos-node-sync]
 workspace = true
 
-[dependencies.snarkos-node-tcp]
+[dependencies.snarkos-utilities]
 workspace = true
 
 [dependencies.snarkvm]
@@ -398,12 +356,11 @@ opt-level = 2
 ignored = [
   "snarkos-account", # Needed for cuda feature
   "snarkos-node", # Needed for metrics feature
-  "snarkos-node-bft", # Needed for cuda and locktick features
-  "snarkos-node-cdn", # Needed for cuda and locktick features
-  "snarkos-node-consensus", # Needed for cuda and locktick features
-  "snarkos-node-tcp", # Needed for locktick feature
-  "snarkos-node-rest", # Needed for cuda and locktick features
-  "snarkos-node-sync", # Needed for cuda and locktick features
-  "snarkos-node-router", # Needed for cuda and locktick features
-  "snarkos-node-metrics", # Needed for locktick feature
+  "snarkos-node-bft", # Needed for cuda feature
+  "snarkos-node-cdn", # Needed for cuda feature
+  "snarkos-node-consensus", # Needed for cuda feature
+  "snarkos-node-rest", # Needed for cuda feature
+  "snarkos-node-sync", # Needed for cuda feature
+  "snarkos-node-router", # Needed for cuda feature
+  "snarkos-node-metrics", # Needed for default and serial features
 ]

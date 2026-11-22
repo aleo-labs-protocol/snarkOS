@@ -20,7 +20,7 @@ use crate::{
     Router,
     messages::{ChallengeRequest, ChallengeResponse, DisconnectReason, Message, MessageCodec, MessageTrait},
 };
-use snarkos_node_network::{get_repo_commit_hash, log_repo_sha_comparison};
+use snarkos_node_network::{ConnectingPeerGuard, get_repo_commit_hash, log_repo_sha_comparison};
 use snarkos_node_tcp::{ConnectError, ConnectionSide, P2P, Tcp};
 use snarkvm::{
     ledger::narwhal::Data,
@@ -91,18 +91,14 @@ impl<N: Network> Router<N> {
         genesis_header: Header<N>,
         restrictions_id: Field<N>,
     ) -> Result<ChallengeRequest<N>, ConnectError> {
-        // If this is an inbound connection, we log it, but don't know the listening address yet.
-        // Otherwise, we can immediately register the listening address.
-        let mut listener_addr = if peer_side == ConnectionSide::Initiator {
+        if peer_side == ConnectionSide::Initiator {
             debug!("Received a connection request from '{peer_addr}'");
-            None
         } else {
             debug!("Shaking hands with '{peer_addr}'...");
-            Some(peer_addr)
-        };
+        }
 
         // Check (or impose) IP-level bans.
-        #[cfg(not(feature = "test"))]
+        #[cfg(not(feature = "test-helpers"))]
         if !self.is_dev() && peer_side == ConnectionSide::Initiator {
             // If the IP is already banned reject the connection.
             if self.is_ip_banned(peer_addr.ip()) {
@@ -121,48 +117,37 @@ impl<N: Network> Router<N> {
             }
         }
 
-        // Perform the handshake; we pass on a mutable reference to listener_addr in case the process is broken at any point in time.
         let handshake_result = match peer_side {
             ConnectionSide::Responder => {
                 self.handshake_inner_initiator(peer_addr, stream, genesis_header, restrictions_id).await
             }
             ConnectionSide::Initiator => {
-                self.handshake_inner_responder(peer_addr, &mut listener_addr, stream, genesis_header, restrictions_id)
-                    .await
+                self.handshake_inner_responder(peer_addr, stream, genesis_header, restrictions_id).await
             }
         };
 
-        if let Some(addr) = listener_addr {
-            match handshake_result {
-                Ok(ref cr) => {
-                    if let Some(peer) = self.peer_pool.write().get_mut(&addr) {
-                        self.resolver.write().insert_peer(peer.listener_addr(), peer_addr, Some(cr.address));
-                        peer.upgrade_to_connected(
-                            peer_addr,
-                            cr.listener_port,
-                            cr.address,
-                            cr.node_type,
-                            cr.version,
-                            cr.snarkos_sha,
-                            ConnectionMode::Router,
-                        );
-                    }
-
-                    #[cfg(feature = "metrics")]
-                    self.update_metrics();
-                }
-                Err(_) => {
-                    if let Some(peer) = self.peer_pool.write().get_mut(&addr) {
-                        // The peer may only be downgraded if it's a ConnectingPeer.
-                        if peer.is_connecting() {
-                            peer.downgrade_to_candidate(addr);
-                        }
-                    }
-                }
-            }
+        // On failure, the handshake has already returned any peer it marked as connecting to the
+        // candidates.
+        let (peer_request, connecting) = handshake_result?;
+        if let Some(peer) = self.peer_pool.write().get_mut(&connecting.listener_addr()) {
+            self.resolver.write().insert_peer(peer.listener_addr(), peer_addr, Some(peer_request.address));
+            peer.upgrade_to_connected(
+                peer_addr,
+                peer_request.listener_port,
+                peer_request.address,
+                peer_request.node_type,
+                peer_request.version,
+                peer_request.snarkos_sha,
+                ConnectionMode::Router,
+            );
         }
+        // The connecting peer takes the peer pool's lock when dropped.
+        drop(connecting);
 
-        handshake_result
+        #[cfg(feature = "metrics")]
+        self.update_metrics();
+
+        Ok(peer_request)
     }
 
     /// The connection initiator side of the handshake.
@@ -172,10 +157,10 @@ impl<N: Network> Router<N> {
         stream: &'a mut TcpStream,
         genesis_header: Header<N>,
         restrictions_id: Field<N>,
-    ) -> Result<ChallengeRequest<N>, ConnectError> {
+    ) -> Result<(ChallengeRequest<N>, ConnectingPeerGuard<'a, N>), ConnectError> {
         // Introduce the peer into the peer pool.
         // If we are connecting, the peer and listener address are identical.
-        self.add_connecting_peer(peer_addr)?;
+        let connecting = self.add_connecting_peer(peer_addr)?;
 
         // Construct the stream.
         let mut framed = Framed::new(stream, MessageCodec::<N>::handshake());
@@ -244,18 +229,17 @@ impl<N: Network> Router<N> {
         };
         send(&mut framed, peer_addr, Message::ChallengeResponse(our_response)).await?;
 
-        Ok(peer_request)
+        Ok((peer_request, connecting))
     }
 
     /// The connection responder side of the handshake.
     async fn handshake_inner_responder<'a>(
         &'a self,
         peer_addr: SocketAddr,
-        listener_addr: &mut Option<SocketAddr>,
         stream: &'a mut TcpStream,
         genesis_header: Header<N>,
         restrictions_id: Field<N>,
-    ) -> Result<ChallengeRequest<N>, ConnectError> {
+    ) -> Result<(ChallengeRequest<N>, ConnectingPeerGuard<'a, N>), ConnectError> {
         // Construct the stream.
         let mut framed = Framed::new(stream, MessageCodec::<N>::handshake());
 
@@ -273,8 +257,7 @@ impl<N: Network> Router<N> {
         };
 
         // Obtain the peer's listening address.
-        *listener_addr = Some(SocketAddr::new(peer_addr.ip(), peer_request.listener_port));
-        let listener_addr = listener_addr.unwrap();
+        let listener_addr = SocketAddr::new(peer_addr.ip(), peer_request.listener_port);
 
         // Knowing the peer's listening address, ensure it is allowed to connect.
         if let Err(reason) = self.ensure_peer_is_allowed(listener_addr) {
@@ -283,7 +266,7 @@ impl<N: Network> Router<N> {
         }
 
         // Introduce the peer into the peer pool.
-        self.add_connecting_peer(listener_addr)?;
+        let connecting = self.add_connecting_peer(listener_addr)?;
 
         // Verify the challenge request. If a disconnect reason was returned, send the disconnect message and abort.
         if let Some(reason) = self.verify_challenge_request(peer_addr, &peer_request) {
@@ -338,7 +321,7 @@ impl<N: Network> Router<N> {
             send(&mut framed, peer_addr, reason.into()).await?;
             Err(reason.into_connect_error(peer_addr))
         } else {
-            Ok(peer_request)
+            Ok((peer_request, connecting))
         }
     }
 
