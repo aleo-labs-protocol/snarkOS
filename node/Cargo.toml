@@ -44,8 +44,7 @@ dev-network = [ "snarkos-node-bft/dev-network", "snarkos-node-consensus/dev-netw
 dev-committee-override = [
   "snarkvm/dev-committee",
   "snarkos-node-bft/dev-committee-override",
-  "snarkos-node-consensus/dev-committee-override",
-  "snarkos-utilities/dev-committee-override"
+  "snarkos-node-consensus/dev-committee-override"
 ]
 
 [dependencies.anyhow]

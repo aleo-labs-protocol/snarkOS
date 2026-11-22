@@ -469,7 +469,7 @@ jobs:
               CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
               CARGO_PROFILE_RELEASE_OPT_LEVEL=2 CARGO_PROFILE_RELEASE_DEBUG=0 \
                 cargo build --release --locked --features dev-committee-override
-              export PATH="$CARGO_TARGET_DIR/release:$PATH"
+              export PATH="${CARGO_TARGET_DIR:-target}/release:$PATH"
               ./.ci/test_dev_on_prod_restart.sh
           - name: chaotic-minority-reset
             timeout: 45

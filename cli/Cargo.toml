@@ -36,8 +36,8 @@ cuda = [
 dev-network = [ "snarkvm/dev-network", "snarkvm/dev_genesis_state_root" ]
 # Lets `--dev-on-prod` extend a copy of a real ledger with blocks signed by a deterministic dev
 # committee. It keeps the production network parameters, so it is separate from `dev-network`, and a
-# build with both rejects `--dev-on-prod`. It skips the BFT's previous-certificate count check, and,
-# under a dev committee, the next-block check and, up to its starting round, the quorum wait. Never
+# build with both rejects `--dev-on-prod`. Under a dev committee, it skips the BFT's previous-certificate
+# count check, the next-block check and, up to the committee's starting round, the quorum wait. Never
 # enable it to join a public network.
 dev-committee-override = [ "snarkos-node/dev-committee-override" ]
 tokio_console = [ "dep:console-subscriber", "tokio/tracing" ]

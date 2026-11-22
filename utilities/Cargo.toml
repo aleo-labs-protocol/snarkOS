@@ -18,8 +18,6 @@ edition = "2024"
 
 [features]
 test-helpers = [ ]
-# See `cli/Cargo.toml`.
-dev-committee-override = [ ]
 
 [dependencies.anyhow]
 workspace = true
