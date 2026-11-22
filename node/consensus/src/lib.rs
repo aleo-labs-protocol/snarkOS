@@ -73,9 +73,6 @@ use tokio::{
     task::JoinHandle,
 };
 
-#[cfg(feature = "metrics")]
-use std::collections::HashMap;
-
 /// The capacity of the queue reserved for deployments.
 /// Note: This is an inbound queue capacity, not a Narwhal-enforced capacity.
 const CAPACITY_FOR_DEPLOYMENTS: usize = 1 << 10;
@@ -114,7 +111,7 @@ pub struct Consensus<N: Network> {
     /// The recently-seen unconfirmed transactions.
     seen_transactions: Arc<Mutex<LruCache<N::TransactionID, ()>>>,
     #[cfg(feature = "metrics")]
-    transmissions_tracker: Arc<Mutex<HashMap<TransmissionID<N>, i64>>>,
+    transmissions_tracker: Arc<Mutex<metrics::TransmissionTracker<N>>>,
     /// The spawned handles.
     handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
     /// The ping logic.
@@ -179,7 +176,14 @@ impl<N: Network> Consensus<N> {
             seen_solutions: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(1 << 16).unwrap()))),
             seen_transactions: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(1 << 16).unwrap()))),
             #[cfg(feature = "metrics")]
-            transmissions_tracker: Default::default(),
+            // Cover the inbound queues plus transmissions already handed to the BFT: up to
+            // `MAX_TRANSMISSIONS_TOLERANCE` in the workers, and as many again in certificates awaiting commit.
+            transmissions_tracker: Arc::new(Mutex::new(metrics::TransmissionTracker::new(
+                CAPACITY_FOR_DEPLOYMENTS
+                    + CAPACITY_FOR_EXECUTIONS
+                    + CAPACITY_FOR_SOLUTIONS
+                    + 2 * Primary::<N>::MAX_TRANSMISSIONS_TOLERANCE,
+            ))),
             handles: Default::default(),
             ping: ping.clone(),
             block_commit_notify: Arc::new(Notify::new()),
@@ -322,14 +326,20 @@ impl<N: Network> Consensus<N> {
                 bail!("Solution '{}' exists in the ledger (skipping)", fmt_id(solution_id));
             }
             // Add the solution to the memory pool.
-            if self.solutions_queue.lock().put(solution_id, solution).is_some() {
+            // Note: `push` returns the old entry for a duplicate, or the least recently used entry it evicted.
+            let pushed = self.solutions_queue.lock().push(solution_id, solution);
+            if matches!(pushed, Some((id, _)) if id == solution_id) {
                 bail!("Solution '{}' exists in the memory pool", fmt_id(solution_id));
             }
             #[cfg(feature = "metrics")]
             {
                 metrics::increment_counter(metrics::consensus::UNCONFIRMED_SOLUTIONS);
-                let timestamp = snarkos_node_bft::helpers::now();
-                self.transmissions_tracker.lock().insert(TransmissionID::Solution(solution_id, checksum), timestamp);
+                // An evicted solution can no longer reach a block from this node, so stop tracking it.
+                if let Some((evicted_id, _)) = pushed {
+                    let evicted = metrics::TrackedId::Solution(evicted_id);
+                    metrics::untrack_transmissions(&self.transmissions_tracker, [evicted]);
+                }
+                metrics::track_transmission(&self.transmissions_tracker, metrics::TrackedId::Solution(solution_id));
             }
             trace!("Received unconfirmed solution '{}' in the queue", fmt_id(solution_id));
         }
@@ -430,19 +440,24 @@ impl<N: Network> Consensus<N> {
             let insertion = self.transactions_queue.write().insert(transaction_id, transaction, priority_fee);
             #[cfg(feature = "metrics")]
             metrics::record_mempool_transaction(kind, match insertion {
-                Ok(QueueInsertion::Inserted | QueueInsertion::InsertedWithEviction) => "accepted",
+                Ok(QueueInsertion::Inserted | QueueInsertion::InsertedWithEviction(_)) => "accepted",
                 Ok(QueueInsertion::Duplicate) => "already_queued",
                 // The queue returns an error only when it is full.
                 Err(_) => "rejected_pool_full",
             });
             // A duplicate was counted and tracked when its first copy was queued.
             #[cfg(feature = "metrics")]
-            if matches!(insertion, Ok(QueueInsertion::Inserted | QueueInsertion::InsertedWithEviction)) {
+            if matches!(insertion, Ok(QueueInsertion::Inserted | QueueInsertion::InsertedWithEviction(_))) {
                 metrics::increment_counter(metrics::consensus::UNCONFIRMED_TRANSACTIONS);
-                let timestamp = snarkos_node_bft::helpers::now();
-                self.transmissions_tracker
-                    .lock()
-                    .insert(TransmissionID::Transaction(transaction_id, checksum), timestamp);
+                // An evicted transaction can no longer reach a block from this node, so stop tracking it.
+                if let Ok(QueueInsertion::InsertedWithEviction(evicted_id)) = insertion {
+                    let evicted = metrics::TrackedId::Transaction(evicted_id);
+                    metrics::untrack_transmissions(&self.transmissions_tracker, [evicted]);
+                }
+                metrics::track_transmission(
+                    &self.transmissions_tracker,
+                    metrics::TrackedId::Transaction(transaction_id),
+                );
             }
             insertion?;
             trace!("Received unconfirmed transaction '{}' in the queue", fmt_id(transaction_id));
@@ -642,86 +657,99 @@ impl<N: Network> Consensus<N> {
         let current_block_timestamp = self.ledger.latest_block().header().metadata().timestamp();
 
         // Create the candidate next block.
-        let ledger_update = self.ledger.begin_ledger_update()?;
-
-        let prepare_instant = std::time::Instant::now();
-        let block = match ledger_update.prepare_advance_to_next_quorum_block(subdag, transmissions) {
-            Ok(block) => block,
-            Err(CheckBlockError::BlockAlreadyExists { .. }) => {
-                debug!("The given block hash already exists in the ledger");
-                return Ok(false);
-            }
-            Err(CheckBlockError::InvalidHeight { .. }) => {
-                debug!("The ledger advanced while we were constructing the next block");
-                return Ok(false);
-            }
-            Err(CheckBlockError::InvalidRound { new, previous }) => {
-                debug!("The subDAG round is too low. Expected >{previous}, got {new}");
-                return Ok(false);
-            }
-            Err(err) => return Err(err.into_anyhow()),
-        };
-        let prepare_elapsed = prepare_instant.elapsed();
-        trace!("prepare_advance_to_next_quorum_block took {:.3}s", prepare_elapsed.as_secs_f64());
         #[cfg(feature = "metrics")]
-        metrics::histogram(metrics::consensus::PREPARE_ADVANCE_SECS, prepare_elapsed.as_secs_f64());
+        let mut stages = Vec::with_capacity(3);
+        let result: Result<_> = (|| {
+            let ledger_update = self.ledger.begin_ledger_update()?;
 
-        let check_instant = std::time::Instant::now();
-        cfg_if! {
-            if #[cfg(feature = "dev-network")] {
-                // If we are using a hotswapped dev committee, skip checking the block.
-                let result = if self.ledger.dev_committee_for_round(block.round())?.is_some() {
-                    Ok(block)
+            let prepare_instant = std::time::Instant::now();
+            let block = match ledger_update.prepare_advance_to_next_quorum_block(subdag, transmissions) {
+                Ok(block) => block,
+                Err(CheckBlockError::BlockAlreadyExists { .. }) => {
+                    debug!("The given block hash already exists in the ledger");
+                    return Ok(None);
+                }
+                Err(CheckBlockError::InvalidHeight { .. }) => {
+                    debug!("The ledger advanced while we were constructing the next block");
+                    return Ok(None);
+                }
+                Err(CheckBlockError::InvalidRound { new, previous }) => {
+                    debug!("The subDAG round is too low. Expected >{previous}, got {new}");
+                    return Ok(None);
+                }
+                Err(err) => return Err(err.into_anyhow()),
+            };
+            let prepare_elapsed = prepare_instant.elapsed();
+            trace!("prepare_advance_to_next_quorum_block took {:.3}s", prepare_elapsed.as_secs_f64());
+            #[cfg(feature = "metrics")]
+            stages.push((metrics::consensus::PREPARE_ADVANCE_SECS, prepare_elapsed));
+
+            let check_instant = std::time::Instant::now();
+            cfg_if! {
+                if #[cfg(feature = "dev-network")] {
+                    // If we are using a hotswapped dev committee, skip checking the block.
+                    let result = if self.ledger.dev_committee_for_round(block.round())?.is_some() {
+                        Ok(block)
+                    } else {
+                        ledger_update.check_next_block(block)
+                    };
                 } else {
-                    ledger_update.check_next_block(block)
-                };
-            } else {
-                let result = ledger_update.check_next_block(block);
+                    let result = ledger_update.check_next_block(block);
+                }
             }
+
+            let block = match result {
+                Ok(block) => block,
+                Err(CheckBlockError::BlockAlreadyExists { .. }) => {
+                    debug!("The given block hash already exists in the ledger");
+                    return Ok(None);
+                }
+                Err(CheckBlockError::InvalidHeight { .. }) => {
+                    debug!("The ledger advanced while we were constructing the next block");
+                    return Ok(None);
+                }
+                Err(CheckBlockError::InvalidRound { new, previous }) => {
+                    debug!("The subDAG round is too low. Expected >{previous}, got {new}");
+                    return Ok(None);
+                }
+                Err(err) => return Err(err.into_anyhow()),
+            };
+
+            let check_elapsed = check_instant.elapsed();
+            trace!("check_next_block took {:.3}s", check_elapsed.as_secs_f64());
+            #[cfg(feature = "metrics")]
+            stages.push((metrics::consensus::CHECK_NEXT_BLOCK_SECS, check_elapsed));
+
+            let block_height = block.height();
+
+            // Build no block while validators may run a consensus version this build lacks. The BFT
+            // retries the subdag with its next commit. A subdag that the ledger already passed has
+            // returned early above, so this function reports `Ok(false)`, which lets the BFT mark it
+            // as committed.
+            self.bft.primary().gateway().ensure_block_may_be_built(block_height)?;
+
+            // Advance to the next block.
+            let advance_instant = std::time::Instant::now();
+            ledger_update.advance_to_next_block(&block)?;
+            let advance_elapsed = advance_instant.elapsed();
+            trace!("advance_to_next_block took {:.3}s", advance_elapsed.as_secs_f64());
+            #[cfg(feature = "metrics")]
+            stages.push((metrics::consensus::ADVANCE_TO_NEXT_BLOCK_SECS, advance_elapsed));
+
+            Ok(Some(block))
+        })();
+        #[cfg(feature = "metrics")]
+        for (metric, elapsed) in stages {
+            metrics::histogram(metric, elapsed.as_secs_f64());
         }
-
-        let block = match result {
-            Ok(block) => block,
-            Err(CheckBlockError::BlockAlreadyExists { .. }) => {
-                debug!("The given block hash already exists in the ledger");
-                return Ok(false);
-            }
-            Err(CheckBlockError::InvalidHeight { .. }) => {
-                debug!("The ledger advanced while we were constructing the next block");
-                return Ok(false);
-            }
-            Err(CheckBlockError::InvalidRound { new, previous }) => {
-                debug!("The subDAG round is too low. Expected >{previous}, got {new}");
-                return Ok(false);
-            }
-            Err(err) => return Err(err.into_anyhow()),
-        };
-
-        let check_elapsed = check_instant.elapsed();
-        trace!("check_next_block took {:.3}s", check_elapsed.as_secs_f64());
-        #[cfg(feature = "metrics")]
-        metrics::histogram(metrics::consensus::CHECK_NEXT_BLOCK_SECS, check_elapsed.as_secs_f64());
-
+        let Some(block) = result? else { return Ok(false) };
         let block_height = block.height();
-
-        // Build no block while validators may run a consensus version this build lacks. The BFT
-        // retries the subdag with its next commit. A subdag that the ledger already passed has
-        // returned `Ok(false)` above, which lets the BFT mark it as committed.
-        self.bft.primary().gateway().ensure_block_may_be_built(block_height)?;
-
-        // Advance to the next block.
-        let advance_instant = std::time::Instant::now();
-        ledger_update.advance_to_next_block(&block)?;
-        let advance_elapsed = advance_instant.elapsed();
-        trace!("advance_to_next_block took {:.3}s", advance_elapsed.as_secs_f64());
-        #[cfg(feature = "metrics")]
-        metrics::histogram(metrics::consensus::ADVANCE_TO_NEXT_BLOCK_SECS, advance_elapsed.as_secs_f64());
 
         #[cfg(feature = "metrics")]
         // Fetch the committee lookback for the latest round.
         // Note: Do not abort here if this returns an error, because the committee is only needed for telemetry,
         // not for block advancement itself.
-        let latest_committee = self.ledger.get_committee_lookback_for_round(self.ledger.latest_round());
+        let latest_committee = self.ledger.get_committee_lookback_for_round(block.round());
 
         // If the next block starts a new epoch, clear the existing solutions.
         if block_height.is_multiple_of(N::NUM_BLOCKS_PER_EPOCH) {
@@ -763,6 +791,12 @@ impl<N: Network> Consensus<N> {
 
             // Calculate latency for all transmissions included in this block.
             metrics::add_transmission_latency_metric(&self.transmissions_tracker, &block);
+            // The epoch boundary above cleared every unconfirmed solution (in the queue and in the workers),
+            // and none of them can be included anymore, so stop tracking them. This runs after the latency
+            // samples so that solutions included in this block are still recorded.
+            if block_height.is_multiple_of(N::NUM_BLOCKS_PER_EPOCH) {
+                metrics::untrack_solutions(&self.transmissions_tracker);
+            }
 
             metrics::gauge(metrics::consensus::COMMITTED_CERTIFICATES, num_committed_certificates as f64);
             metrics::histogram(metrics::consensus::CERTIFICATE_COMMIT_LATENCY, elapsed_secs);
