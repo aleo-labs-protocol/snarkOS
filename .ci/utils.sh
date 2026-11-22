@@ -825,7 +825,7 @@ function ci_cargo_install_snarkos() {
   CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
   CARGO_PROFILE_RELEASE_OPT_LEVEL=2 \
   CARGO_PROFILE_RELEASE_DEBUG=0 \
-    cargo install --locked --path . --features test_network "$@"
+    cargo install --locked --path . --features dev-network "$@"
 }
 
 # Download and build the latest snarkOS release from GitHub.

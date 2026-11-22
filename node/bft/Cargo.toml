@@ -36,8 +36,8 @@ test-helpers = [
   "snarkos-node-bft-ledger-service/test-helpers",
   "snarkos-node-bft-storage-service/test-helpers"
 ]
-test_network = [
-  "snarkos-node-bft-ledger-service/test_network",
+dev-network = [
+  "snarkos-node-bft-ledger-service/dev-network",
 ]
 
 [dependencies.anyhow]

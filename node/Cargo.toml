@@ -39,7 +39,7 @@ cuda = [
   "snarkos-node-sync/cuda"
 ]
 test-helpers = []
-test_network = [ "snarkos-node-bft/test_network", "snarkos-node-consensus/test_network", "snarkos-utilities/test_network" ]
+dev-network = [ "snarkos-node-bft/dev-network", "snarkos-node-consensus/dev-network", "snarkos-utilities/dev-network" ]
 
 [dependencies.anyhow]
 workspace = true

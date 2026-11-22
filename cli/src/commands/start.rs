@@ -802,9 +802,9 @@ impl Start {
             println!("{}", crate::helpers::welcome_message());
         }
 
-        // Only allow dev mode if we built with the 'test_network' feature.
-        if self.dev.is_some() && cfg!(not(feature = "test_network")) {
-            bail!("The 'dev' flag is set, but the 'test_network' feature is not enabled");
+        // Only allow dev mode if we built with the 'dev-network' feature.
+        if self.dev.is_some() && cfg!(not(feature = "dev-network")) {
+            bail!("The 'dev' flag is set, but the 'dev-network' feature is not enabled");
         }
 
         // Parse the trusted peers to connect to.

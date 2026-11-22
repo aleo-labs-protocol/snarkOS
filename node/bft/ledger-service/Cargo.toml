@@ -22,10 +22,10 @@ metrics = [ "dep:snarkos-node-metrics", "snarkvm/metrics" ]
 mock = [ ]
 cuda = [ "snarkvm/cuda" ]
 test-helpers = [ "mock" ]
-test_network = [
+dev-network = [
   "snarkvm/dev-committee",
   "snarkvm/dev_genesis_state_root",
-  "snarkos-utilities/test_network"
+  "snarkos-utilities/dev-network"
 ]
 
 [dependencies.anyhow]

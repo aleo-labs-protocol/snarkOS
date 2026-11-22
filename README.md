@@ -621,8 +621,10 @@ cargo run --release -- clean --dev <NODE_ID>
   telemetry described in [Validator Telemetry Metrics](#321-validator-telemetry-metrics).
 * **cuda** -
   Allows some operations to run on the (NVidia) GPU, instead of on the CPU. See [CUDA acceleration for provers](#optional-cuda-acceleration-for-provers) for install tips and current puzzle status.
-* **test_targets** -
-  This feature allows the lowering of coinbase and proof targets for testing.
+* **dev-network** -
+  Builds a node for a local development network: it lowers the coinbase and proof targets and the
+  consensus version heights, and allows the `--dev` flag. Never enable it to join a public network,
+  including testnet.
 
 ### Lock instrumentation
 

@@ -99,8 +99,8 @@ binary_path=""
 
 if [[ $build_binary == "y" ]]; then
   # Ask the user for additional crate features (comma-separated)
-  read -r -p "Enter crate features to enable (comma separated, default: test_network): " crate_features
-  crate_features=${crate_features:-test_network}
+  read -r -p "Enter crate features to enable (comma separated, default: dev-network): " crate_features
+  crate_features=${crate_features:-dev-network}
 
   # Build command
   build_cmd=(cargo install --locked --path "$repo_root")

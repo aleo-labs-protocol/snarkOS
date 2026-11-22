@@ -320,9 +320,9 @@ fn bench_mapping_lookups(c: &mut Criterion) {
 /// Advances `ledger` to the latest consensus version with empty blocks.
 ///
 /// A ledger at genesis is at `ConsensusVersion::V1`, which verifies with Varuna V1, a verifier the
-/// network no longer runs. Under `test_consensus_heights` each version from V2 onward lasts one
+/// network no longer runs. Under `dev-network` each version from V2 onward lasts one
 /// block, so only the latest version stays put across the blocks a benchmark adds.
-#[cfg(feature = "test_consensus_heights")]
+#[cfg(feature = "dev-network")]
 fn advance_to_latest(
     ledger: &Ledger<CurrentNetwork, CurrentStorage>,
     private_key: &PrivateKey<CurrentNetwork>,
@@ -355,7 +355,7 @@ fn advance_to_latest(
 /// Each transaction is built fresh, checked, but never applied to its ledger. Both pay with a
 /// public fee, not a fee record -- see the comment on the equivalent deploy in
 /// `build_chain_fixture` for why.
-#[cfg(feature = "test_consensus_heights")]
+#[cfg(feature = "dev-network")]
 fn bench_transaction_verification(c: &mut Criterion) {
     let mut group = c.benchmark_group("transaction_verification");
 
@@ -447,10 +447,10 @@ criterion_group!(
     bench_mapping_lookups,
     bench_db_backup,
 );
-#[cfg(feature = "test_consensus_heights")]
+#[cfg(feature = "dev-network")]
 criterion_group!(verification, bench_transaction_verification);
 
-#[cfg(feature = "test_consensus_heights")]
+#[cfg(feature = "dev-network")]
 criterion_main!(handlers, verification);
-#[cfg(not(feature = "test_consensus_heights"))]
+#[cfg(not(feature = "dev-network"))]
 criterion_main!(handlers);
