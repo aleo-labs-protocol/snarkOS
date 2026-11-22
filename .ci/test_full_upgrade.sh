@@ -27,7 +27,8 @@ network_id=$3
 # Default values if not provided
 : "${total_validators:=4}"
 : "${total_clients:=2}"
-: "${network_id:=0}"
+# Testnet, where the latest release and this build share a dev genesis.
+: "${network_id:=1}"
 
 # Node verbosity
 NODE_VERBOSITY=4

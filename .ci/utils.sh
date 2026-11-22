@@ -821,7 +821,7 @@ SNARKOS_RELEASE_VERSION_FILE="${SNARKOS_RELEASE_VERSION_FILE:-$SNARKOS_RELEASE_D
 
 # Build snarkos with optimized settings for CI (faster builds).
 function ci_cargo_install_snarkos() {
-  # Releases up to 4.13.1 name this feature `test_network`.
+  # Releases from before `dev-network` name this feature `test_network`.
   local feature=dev-network
   grep -q '^test_network = ' Cargo.toml && feature=test_network
   CARGO_PROFILE_RELEASE_LTO=off \
