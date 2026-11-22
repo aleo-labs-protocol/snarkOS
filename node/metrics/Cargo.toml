@@ -20,9 +20,6 @@ edition = "2024"
 default = [ "metrics" ]
 metrics = [ "snarkvm/metrics" ]
 
-[dependencies.metrics]
-version = "0.22"
-
 [dependencies.metrics-exporter-prometheus]
 version = "0.13"
 default-features = false

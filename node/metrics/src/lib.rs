@@ -18,7 +18,8 @@ pub mod names;
 // Expose the names at the crate level for easy access.
 pub use names::*;
 
-// Re-export the snarkVM metrics.
+// Re-export the snarkVM metrics. This includes snarkVM's re-export of the `metrics` crate, which
+// this crate uses as `metrics::`.
 pub use snarkvm::metrics::*;
 
 use rayon::prelude::*;
@@ -228,48 +229,48 @@ pub fn add_transmission_latency_metric<N: Network>(
 }
 
 pub fn gauge_label<V: Into<f64>>(name: &'static str, label_key: &'static str, label_value: String, value: V) {
-    ::metrics::gauge!(name, label_key => label_value).set(value.into());
+    metrics::gauge!(name, label_key => label_value).set(value.into());
 }
 
-pub fn increment_counter_1(name: &'static str, key: &'static str, value: impl Into<::metrics::SharedString>) {
-    ::metrics::counter!(name, key => value).increment(1);
+pub fn increment_counter_1(name: &'static str, key: &'static str, value: impl Into<metrics::SharedString>) {
+    metrics::counter!(name, key => value).increment(1);
 }
 
-pub fn counter_1(name: &'static str, key: &'static str, value: impl Into<::metrics::SharedString>, amount: u64) {
-    ::metrics::counter!(name, key => value).increment(amount);
+pub fn counter_1(name: &'static str, key: &'static str, value: impl Into<metrics::SharedString>, amount: u64) {
+    metrics::counter!(name, key => value).increment(amount);
 }
 
 pub fn increment_counter_2(
     name: &'static str,
     key_a: &'static str,
-    value_a: impl Into<::metrics::SharedString>,
+    value_a: impl Into<metrics::SharedString>,
     key_b: &'static str,
-    value_b: impl Into<::metrics::SharedString>,
+    value_b: impl Into<metrics::SharedString>,
 ) {
-    ::metrics::counter!(name, key_a => value_a, key_b => value_b).increment(1);
+    metrics::counter!(name, key_a => value_a, key_b => value_b).increment(1);
 }
 
 pub fn increment_counter_3(
     name: &'static str,
     key_a: &'static str,
-    value_a: impl Into<::metrics::SharedString>,
+    value_a: impl Into<metrics::SharedString>,
     key_b: &'static str,
-    value_b: impl Into<::metrics::SharedString>,
+    value_b: impl Into<metrics::SharedString>,
     key_c: &'static str,
-    value_c: impl Into<::metrics::SharedString>,
+    value_c: impl Into<metrics::SharedString>,
 ) {
-    ::metrics::counter!(name, key_a => value_a, key_b => value_b, key_c => value_c).increment(1);
+    metrics::counter!(name, key_a => value_a, key_b => value_b, key_c => value_c).increment(1);
 }
 
 pub fn histogram_2<V: Into<f64>>(
     name: &'static str,
     key_a: &'static str,
-    value_a: impl Into<::metrics::SharedString>,
+    value_a: impl Into<metrics::SharedString>,
     key_b: &'static str,
-    value_b: impl Into<::metrics::SharedString>,
+    value_b: impl Into<metrics::SharedString>,
     value: V,
 ) {
-    ::metrics::histogram!(name, key_a => value_a, key_b => value_b).record(value.into());
+    metrics::histogram!(name, key_a => value_a, key_b => value_b).record(value.into());
 }
 
 /// Returns the `kind` label value for the given transaction.
@@ -328,8 +329,8 @@ pub fn set_build_info() {
     let git_branch = built_info::GIT_HEAD_REF.unwrap_or("unknown");
     let features = built_info::FEATURES_LOWERCASE_STR.replace(' ', "");
 
-    ::metrics::gauge!(build::BUILD_INFO, "version" => version.to_string()).set(1.0);
-    ::metrics::gauge!(build::BUILD_INFO, "git_commit" => git_commit.to_string()).set(1.0);
-    ::metrics::gauge!(build::BUILD_INFO, "git_branch" => git_branch.to_string()).set(1.0);
-    ::metrics::gauge!(build::BUILD_INFO, "features" => features).set(1.0);
+    metrics::gauge!(build::BUILD_INFO, "version" => version.to_string()).set(1.0);
+    metrics::gauge!(build::BUILD_INFO, "git_commit" => git_commit.to_string()).set(1.0);
+    metrics::gauge!(build::BUILD_INFO, "git_branch" => git_branch.to_string()).set(1.0);
+    metrics::gauge!(build::BUILD_INFO, "features" => features).set(1.0);
 }
