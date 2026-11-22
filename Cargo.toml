@@ -288,7 +288,7 @@ cuda = [
   "snarkos-node-sync/cuda"
 ]
 # See `cli/Cargo.toml`. `snarkos-node/dev-network` also skips the BFT's previous-certificate count check,
-# and, under a dev committee, the next-block check and the quorum wait before a proposal.
+# and, under a dev committee, the next-block check and, up to its starting round, the quorum wait.
 dev-network = [ "snarkos-cli/dev-network", "snarkos-node/dev-network" ]
 tokio_console = [ "snarkos-cli/tokio_console" ]
 

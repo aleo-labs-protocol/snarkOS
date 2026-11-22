@@ -30,8 +30,9 @@ cuda = [
 # dev genesis state root, for local test and development networks. Never enable it to join a public
 # network, including testnet. Such a build rejects the shipped genesis block at startup, as its genesis
 # targets differ. The router handshake rejects a peer with another genesis header, and the gateway one
-# that sends another genesis hash; peers at event versions 10 and 11 may send none. `snarkos developer`
-# commands sent to a public endpoint pass no genesis check and use the lowered consensus heights.
+# that sends another genesis hash; peers below `HandshakeTrailer::GENESIS_VERSION` may send none.
+# `snarkos developer` commands sent to a public endpoint pass no genesis check and use the lowered
+# consensus heights.
 # The dev committee and `--dev-on-prod` will get their own feature, as this one rejects a production genesis.
 dev-network = [ "snarkvm/dev-network", "snarkvm/dev-committee", "snarkvm/dev_genesis_state_root" ]
 tokio_console = [ "dep:console-subscriber", "tokio/tracing" ]
