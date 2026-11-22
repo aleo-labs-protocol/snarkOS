@@ -79,8 +79,8 @@ jobs run on every event.
 | `test (light)` | hosted | all | 90 | `snarkos-account`, `-utilities`, `-node-tcp`, `-node-sync-locators`, `-node-network` |
 | `test (cdn)` | hosted | all | 90 | `snarkos-node-cdn` |
 | `test (messages)` | hosted | all | 90 | `snarkos-node-bft-events`, `-node-router-messages`, `-node-bft-ledger-service` |
-| `test (services)` | `cpu` | all | 90 | `snarkos-node-consensus`, `-cli`; then `-node-rest` |
-| `test (node)` | `cpu` | all | 90 | `snarkos-node`, `-node-bft-storage-service` |
+| `test (services)` | `cpu` | all | 90 | `snarkos-node-consensus`, `-cli` |
+| `test (node-rest-distribution)` | `cpu` | all | 90 | `snarkos-node`, `-node-bft-storage-service`; then `-node-rest`, `snarkos-ledger-distribution`; one build |
 | `test (bft)` | `cpu` | all | 90 | `snarkos-node-bft` with `metrics` |
 | `test (router-sync)` | `cpu` | all | 90 | `snarkos-node-router`; then `-node-sync` |
 | `build-snarkos` | `cpu` | all | 60 | release `snarkos` with `test_network`, as an artifact |
@@ -110,8 +110,11 @@ such a pull request cannot merge until a workflow reports that check for it.
 
 ## Test groups
 
-Each line of a `test` entry is one cargo build. `cargo test -p a -p b` unifies
-the features of `a` and `b`, and several crates enable features on their
+Each line of a `test` entry is one cargo command. Lines with the same `-p` set
+and cargo flags share one build, as the two lines of
+`test (node-rest-distribution)` do: nextest's `-E` filters split that build's
+tests between them. `cargo test -p a -p b` unifies the features of `a` and
+`b`, and several crates enable features on their
 dependencies that change what those dependencies do, such as
 `snarkos-node-router/test-helpers` and `snarkvm-ledger-block/test`. So crates
 share a line only where that unification enables no such feature on any crate.
@@ -123,8 +126,9 @@ this before moving a crate between lines, for example by comparing
 
 `test (bft)` runs with `metrics`, which the `snarkos` binary enables by
 default, so the tests in `helpers::telemetry` compile. The `each-feature` job
-checks the crate without `metrics`. The `simple_node` line passes
-`--no-tests=fail`, because the step otherwise lets a command match no tests.
+checks the crate without `metrics`. The `simple_node` line and the two
+`node-rest-distribution` lines pass `--no-tests=fail`, because the step
+otherwise lets a command match no tests.
 
 [`.config/nextest.toml`](.config/nextest.toml) sets two test threads, which
 the hosted entries use. The fleet entries run 16 tests at a time through
