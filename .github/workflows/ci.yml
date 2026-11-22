@@ -479,8 +479,9 @@ jobs:
             timeout: 90
             runs: |
               export CARGO_TARGET_DIR="$SNARKOS_RELEASE_DIR/target"
-              ./.ci/test_full_upgrade.sh
-              ./.ci/test_partial_upgrade.sh
+              # Testnet (network 1), where the latest release and this build share a dev genesis.
+              ./.ci/test_full_upgrade.sh 4 2 1
+              ./.ci/test_partial_upgrade.sh 4 1
     # No expression: GitHub shows a skipped job's `name` unevaluated.
     name: devnet-merge
     steps: *devnet-steps

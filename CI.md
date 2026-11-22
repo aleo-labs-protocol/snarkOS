@@ -89,7 +89,7 @@ jobs run on every event.
 | `devnet-merge (dev-on-prod-restart)` | `cpu` | merge | 45 | `test_dev_on_prod_restart.sh` |
 | `devnet-merge (chaotic-minority-reset)` | `cpu` | merge | 45 | `test_reset_minority.sh`, with delays |
 | `devnet-merge (chaotic-majority-restart)` | `cpu` | merge | 45 | `test_restart_majority.sh`, with delays |
-| `devnet-merge (upgrade)` | `cpu` | merge | 90 | `test_full_upgrade.sh`, `test_partial_upgrade.sh` |
+| `devnet-merge (upgrade)` | `cpu` | merge | 90 | `test_full_upgrade.sh`, `test_partial_upgrade.sh`, on testnet |
 | `devnet-release (upgrade-required)` | `cpu` | release | 30 | `test_upgrade_required.sh` |
 | `devnet-release (chaotic-restart-all)` | `cpu` | release | 45 | `test_restart_all.sh`, with delays |
 | `machete` | hosted | all | | `cargo machete` |
