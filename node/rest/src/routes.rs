@@ -37,7 +37,7 @@ use snarkvm::{
     },
 };
 
-use axum::{Json, extract::rejection::JsonRejection};
+use axum::{Json, extract::rejection::JsonRejection, response::IntoResponse};
 
 use anyhow::{Context, anyhow};
 use indexmap::IndexMap;
@@ -275,6 +275,21 @@ pub(crate) struct TransactionWithMetadata<T: Serialize, N: Network> {
     transaction: T,
     block_hash: Option<N::BlockHash>,
     block_height: Option<u32>,
+}
+
+/// The return value for a `programs/summary` query.
+#[derive(Serialize)]
+struct ProgramsSummary {
+    height: u32,
+    programs: Vec<ProgramSummary>,
+}
+
+/// A deployed program, its latest edition, and that edition's amendment count.
+#[derive(Serialize)]
+struct ProgramSummary {
+    program_id: String,
+    edition: u16,
+    amendment_count: u64,
 }
 
 /// The return value for a `sync_status` query.
@@ -887,6 +902,59 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         Path(id): Path<ProgramID<N>>,
     ) -> Result<ErasedJson, RestError> {
         Ok(ErasedJson::new(rest.ledger.get_latest_edition_for_program(&id)?))
+    }
+
+    /// GET /<network>/programs/summary
+    ///
+    /// Returns the deployed programs with their latest edition and that edition's amendment count,
+    /// sorted by ID, and a `height`. The list may include programs deployed after `height`, and an
+    /// edition or amendment count may be newer than it was at `height`. A storage read error during
+    /// the scan can shorten the list, since snarkVM's map iterator stops silently on a decode error.
+    /// The response is built once per height and cached.
+    pub(crate) async fn get_programs_summary(State(rest): State<Self>) -> Result<Response, RestError> {
+        let body = rest.programs_summary_body().await?;
+        Ok(([(CONTENT_TYPE, "application/json")], body).into_response())
+    }
+
+    /// Returns a `programs/summary` JSON body at least as new as the height the request first saw.
+    pub(crate) async fn programs_summary_body(&self) -> Result<Bytes, RestError> {
+        let seen = self.ledger.latest_height();
+        if let Some(body) = self.programs_summary.get(seen) {
+            return Ok(body);
+        }
+
+        let permit = self.programs_summary.acquire_build().await?;
+        // A build that finished while this request waited is new enough.
+        if let Some(body) = self.programs_summary.get(seen) {
+            return Ok(body);
+        }
+
+        // The ledger advances the height only after the block is written, so a scan started after
+        // this read covers every block up to it.
+        let height = self.ledger.latest_height();
+        let (ledger, cache) = (self.ledger.clone(), self.programs_summary.clone());
+        // The blocking task owns the permit, so a dropped request cannot release it mid-build.
+        let build = move || -> Result<Bytes, RestError> {
+            let _permit = permit;
+            let store = ledger.vm().block_store().transaction_store();
+            let mut programs = store
+                .program_ids_and_latest_editions()
+                .map(|(id, edition)| {
+                    let amendment_count = store.get_amendment_count(&id, *edition)?.unwrap_or(0);
+                    Ok(ProgramSummary { program_id: id.to_string(), edition: *edition, amendment_count })
+                })
+                .collect::<Result<Vec<_>, RestError>>()?;
+            programs.sort_unstable_by(|a, b| a.program_id.cmp(&b.program_id));
+            let summary = ProgramsSummary { height, programs };
+            let body = Bytes::from(serde_json::to_vec(&summary).context("Failed to serialize the summary")?);
+            cache.set(height, body.clone());
+            Ok(body)
+        };
+
+        match tokio::task::spawn_blocking(build).await {
+            Ok(body) => body,
+            Err(err) => Err(RestError::internal_server_error(anyhow!(err).context("Tokio error"))),
+        }
     }
 
     /// GET /<network>/program/{programID}/mappings
