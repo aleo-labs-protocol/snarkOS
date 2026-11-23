@@ -158,7 +158,7 @@ workspace = true
 features = [ "test-helpers" ]
 
 [target."cfg(target_family = \"unix\")".dependencies.nix]
-version = "0.31"
+version = "0.32"
 default-features = false
 features = [ "resource" ]
 
