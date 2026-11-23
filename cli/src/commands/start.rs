@@ -520,7 +520,7 @@ impl Start {
         ensure!(
             latest_message_version >= status_version,
             "--prune-authority-data needs router message version {status_version} (ConsensusVersion::V23), which \
-             this network has not scheduled. For a devnet, build with the `dev-network` feature."
+             this network has not scheduled."
         );
         AuthorityRetention::prune::<N>(self.dev_authority_retention_blocks.unwrap_or(AUTHORITY_RETENTION_BLOCKS))
     }
@@ -834,9 +834,6 @@ impl Start {
     /// Start the node and blocks until it terminates.
     #[rustfmt::skip]
     async fn parse_node<N: Network>(&mut self, handle: Handle, log_receiver: mpsc::Receiver<Vec<u8>>) -> Result<()> {
-        // Check the pruning flags before anything else.
-        let authority_retention = self.parse_authority_retention::<N>()?;
-
         if !self.nobanner {
             // Print the welcome banner.
             println!("{}", crate::helpers::welcome_message());
@@ -848,6 +845,9 @@ impl Start {
         } else if self.dev.is_some() && cfg!(not(feature = "dev-network")) {
             bail!("The 'dev' flag is set, but the 'dev-network' feature is not enabled");
         }
+
+        // Check the pruning flags before any other startup step.
+        let authority_retention = self.parse_authority_retention::<N>()?;
 
         // Parse the trusted peers to connect to.
         let mut trusted_peers = self.parse_trusted_addrs(&self.peers)?;
