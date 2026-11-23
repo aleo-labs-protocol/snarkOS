@@ -1434,7 +1434,7 @@ mod tests {
         let error = start.parse_authority_retention_with::<CurrentNetwork>(status_version - 1).unwrap_err();
         assert!(error.to_string().contains("has not scheduled"), "{error}");
         assert!(try_parse(&[]).unwrap().parse_authority_retention_with::<CurrentNetwork>(status_version - 1).is_ok());
-        // Mainnet has not scheduled V23; the test heights have.
+        // Mainnet has not scheduled V23; a `dev-network` build has.
         let result = start.parse_authority_retention::<CurrentNetwork>();
         assert_eq!(result.is_ok(), cfg!(feature = "dev-network"), "{result:?}");
     }
