@@ -41,5 +41,5 @@ jobs:
         with:
           slack-token: ${{ secrets.CI_SLACK_TOKEN }}
           channel: ${{ vars.CI_SLACK_CHANNEL || '#ci' }}
-          result: ${{ contains(needs.*.result, 'failure') && 'failure' || contains(needs.*.result, 'cancelled') && 'cancelled' || 'success' }}
+          result: ${{ needs.bump.result }}
           checked: 'true'
