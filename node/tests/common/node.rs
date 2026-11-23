@@ -36,6 +36,7 @@ pub async fn client() -> Client<CurrentNetwork, ConsensusMemory<CurrentNetwork>>
         false,  // Do not write JSON history.
         vec![], // Do not record program finalize history.
         false,  // Do not record all program history.
+        false,  // Do not accept reduced history coverage.
         Account::<CurrentNetwork>::from_str("APrivateKey1zkp2oVPTci9kKcUprnbzMwq95Di1MQERpYBhEeqvkrDirK1").unwrap(),
         &[],
         sample_genesis_block(),

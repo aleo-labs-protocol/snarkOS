@@ -29,8 +29,9 @@ snarkos start --client --archival
 With `--history-programs`, dependencies must be selected explicitly. `--archival` includes them automatically.
 These modes are mutually exclusive. Both work without `--history-json` and can be combined with it to also write the legacy credits snapshots.
 Neither can be combined with `--history-compat-mode`.
-The ledger stores the recording mode and selected programs. You can change them on restart.
-The node warns about the previous and new settings and when new coverage begins.
+The ledger stores the recording mode and selected programs. You can add coverage on restart.
+To stop recording previously covered programs, restart with `--allow-history-change`.
+The node rejects a coverage drop without that flag. It warns about changed settings and when new coverage begins.
 Existing ranges remain available. Missing blocks are not backfilled.
 
 Key versions and deletion markers are stored in the ledger RocksDB database. At startup, the client copies current mapping state at the ledger tip in bounded batches before importing more blocks. Later blocks extend that coverage. Older blocks remain unavailable unless already recorded. To serve full history, replay from genesis or a checkpoint that already contains history.
