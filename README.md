@@ -339,7 +339,7 @@ SUBCOMMANDS:
 The following are the options for the `snarkos start` command:
 ```
       --network <NETWORK>
-          Specify the network ID of this node [options: 0 = mainnet, 1 = testnet, 2 = canary]
+          Specify the network ID of this node [options: 0 = mainnet, 1 = testnet]
           
           [default: 0]
 

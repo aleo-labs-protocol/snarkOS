@@ -17,9 +17,9 @@ use super::{DEFAULT_ENDPOINT, Developer, ParsedQuery};
 use crate::{commands::StoreFormat, helpers::args::parse_private_key};
 
 use snarkvm::{
-    circuit::{Aleo, AleoCanaryV0, AleoTestnetV0, AleoV0},
+    circuit::{Aleo, AleoTestnetV0, AleoV0},
     console::{
-        network::{CanaryV0, MainnetV0, Network, TestnetV0},
+        network::{MainnetV0, Network, TestnetV0},
         program::ProgramOwner,
     },
     ledger::store::StorageMode,
@@ -117,7 +117,6 @@ impl Deploy {
         match N::ID {
             MainnetV0::ID => self.construct_deployment::<MainnetV0, AleoV0>(),
             TestnetV0::ID => self.construct_deployment::<TestnetV0, AleoTestnetV0>(),
-            CanaryV0::ID => self.construct_deployment::<CanaryV0, AleoCanaryV0>(),
             _ => unreachable!(),
         }
         .with_context(|| "Deployment failed")

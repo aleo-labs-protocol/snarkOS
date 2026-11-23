@@ -132,9 +132,6 @@ function get_network_name() {
     1)
       echo "testnet"
       ;;
-    2)
-      echo "canary"
-      ;;
     *)
       >&2 echo "Unknown network ID: $network_id, defaulting to mainnet"
       echo "mainnet"
@@ -753,7 +750,7 @@ function wait_for_stable_consensus_version() {
 #   - label: names the log file of the node
 #
 # Required variables (must be set before calling):
-#   - network_id: network ID (0=mainnet, 1=testnet, 2=canary)
+#   - network_id: network ID (0=mainnet, 1=testnet)
 #   - network_name: network name string
 #   - log_dir: directory for log files
 function query_default_consensus_version() {

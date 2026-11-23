@@ -18,13 +18,12 @@ read -r -p "Enter the total number of clients (default: 2): " total_clients
 total_clients=${total_clients:-2}
 
 # Read the network ID from user or use a default value of 1
-read -r -p "Enter the network ID (mainnet = 0, testnet = 1, canary = 2) (default: 1): " network_id
+read -r -p "Enter the network ID (mainnet = 0, testnet = 1) (default: 1): " network_id
 network_id=${network_id:-1}
 
 case "$network_id" in
   0) network_name="mainnet" ;;
   1) network_name="testnet" ;;
-  2) network_name="canary" ;;
   *) network_name="network-$network_id" ;;
 esac
 
