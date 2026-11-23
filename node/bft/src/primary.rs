@@ -1287,7 +1287,7 @@ impl<N: Network> Primary<N> {
 
         // Store the certified batch and broadcast it to all validators.
         if let Err(e) = self.store_and_broadcast_certificate(&proposal).await {
-            // Leave the `Certified` state if it is still set, as `propose_batch` does not run while it is.
+            // Clear `Certified` if it still holds this batch, as `propose_batch` does not run while it is set.
             let batch_id = proposal.batch_id();
             self.take_proposed_batch_if(|state| matches!(state, ProposedBatchState::Certified(id) if *id == batch_id));
             // Reinsert the transmissions back into the ready queue for the next proposal.
@@ -1725,7 +1725,7 @@ impl<N: Network> Primary<N> {
                 .check_proposed_batch_for_expiration()
                 .with_context(|| "Failed to clear the expired proposal while fast-forwarding")
             {
-                warn!("{}", flatten_error(&err));
+                error!("{}", flatten_error(&err));
             }
         }
 
