@@ -913,7 +913,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
     /// The response is built once per height and cached.
     pub(crate) async fn get_programs_summary(State(rest): State<Self>) -> Result<Response, RestError> {
         let body = rest.programs_summary_body().await?;
-        Ok(([(CONTENT_TYPE, HeaderValue::from_static("application/json"))], body).into_response())
+        Ok(([(CONTENT_TYPE, "application/json")], body).into_response())
     }
 
     /// Returns a `programs/summary` JSON body at least as new as the height the request first saw.
@@ -927,7 +927,8 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         // The ledger advances the height only after the block is written, so a scan started after
         // this read covers every block up to it.
         let height = self.ledger.latest_height();
-        // A build that finished while this request waited is new enough.
+        // A build that finished while this request waited is new enough. The upper bound skips a
+        // body from above the current height, left by a rollback.
         if let Some(body) = self.programs_summary.get(seen..=height) {
             return Ok(body);
         }

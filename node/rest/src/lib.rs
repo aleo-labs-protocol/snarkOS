@@ -827,13 +827,14 @@ mod route_tests {
             block::{Header, Transactions},
             committee::test_helpers::sample_committee,
             store::{StorageMode, helpers::memory::ConsensusMemory},
+            test_helpers::sample_genesis_committee,
         },
-        prelude::{MainnetV0, PrivateKey, Program, Transaction, store::ConsensusStore},
+        prelude::{MainnetV0, PrivateKey, Program, Transaction},
         utilities::TestRng,
     };
 
     use axum::body::to_bytes;
-    use std::{str::FromStr, task::Poll};
+    use std::str::FromStr;
     use tower::ServiceExt; // for `oneshot`
 
     type CurrentNetwork = MainnetV0;
@@ -1433,29 +1434,16 @@ mod route_tests {
         assert_eq!(hash, sample_genesis_block::<CurrentNetwork>().hash());
     }
 
-    /// Returns a test ledger whose genesis funds the returned key, since the mainnet genesis funds
-    /// no key we hold.
-    async fn funded_ledger(
-        rng: &mut TestRng,
-    ) -> (Ledger<CurrentNetwork, ConsensusMemory<CurrentNetwork>>, PrivateKey<CurrentNetwork>) {
-        // Ledger and VM calls panic in an async context, so move the rng into a blocking task and back.
-        let mut owned_rng = std::mem::take(rng);
-        let (ledger, private_key, owned_rng) = tokio::task::spawn_blocking(move || {
-            let private_key = PrivateKey::<CurrentNetwork>::new(&mut owned_rng).unwrap();
-            let store = ConsensusStore::open(StorageMode::new_test(None)).unwrap();
-            let genesis = VM::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>::from(store)
-                .unwrap()
-                .genesis_beacon(&private_key, &mut owned_rng)
-                .unwrap();
-            let ledger =
-                Ledger::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>::load(genesis, StorageMode::new_test(None))
-                    .unwrap();
-            (ledger, private_key, owned_rng)
+    /// Returns a test ledger and the key its genesis funds, since the mainnet genesis funds no key
+    /// we hold.
+    async fn funded_ledger() -> (Ledger<CurrentNetwork, ConsensusMemory<CurrentNetwork>>, PrivateKey<CurrentNetwork>) {
+        // Ledger and VM calls panic in an async context.
+        tokio::task::spawn_blocking(|| {
+            let (private_keys, genesis) = sample_genesis_committee();
+            (Ledger::load(genesis, StorageMode::new_test(None)).unwrap(), private_keys[0])
         })
         .await
-        .expect("the ledger task panicked");
-        *rng = owned_rng;
-        (ledger, private_key)
+        .expect("the ledger task panicked")
     }
 
     /// Advances the ledger by one block holding the given transactions.
@@ -1463,15 +1451,13 @@ mod route_tests {
         ledger: &Ledger<CurrentNetwork, ConsensusMemory<CurrentNetwork>>,
         private_key: &PrivateKey<CurrentNetwork>,
         transactions: Vec<Transaction<CurrentNetwork>>,
-        rng: &mut TestRng,
     ) {
-        let (ledger, private_key, mut owned_rng) = (ledger.clone(), *private_key, std::mem::take(rng));
-        *rng = tokio::task::spawn_blocking(move || {
-            let block = ledger
-                .prepare_advance_to_next_beacon_block(&private_key, vec![], vec![], transactions, &mut owned_rng)
-                .unwrap();
+        let (ledger, private_key) = (ledger.clone(), *private_key);
+        tokio::task::spawn_blocking(move || {
+            let rng = &mut TestRng::default();
+            let block =
+                ledger.prepare_advance_to_next_beacon_block(&private_key, vec![], vec![], transactions, rng).unwrap();
             ledger.advance_to_next_block(&block).unwrap();
-            owned_rng
         })
         .await
         .expect("the ledger task panicked");
@@ -1479,26 +1465,27 @@ mod route_tests {
 
     #[tokio::test]
     async fn programs_summary_lists_deployed_programs() {
-        let rng = &mut TestRng::default();
-        let (ledger, private_key) = funded_ledger(rng).await;
-        let (deployment, owned_rng) = {
-            let (ledger, mut owned_rng) = (ledger.clone(), std::mem::take(rng));
+        let (ledger, private_key) = funded_ledger().await;
+        let rest = sample_rest_with(ledger.clone()).await;
+        let before = rest.programs_summary_body().await.unwrap();
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&before).unwrap()["height"], 0);
+
+        let deployment = {
+            let ledger = ledger.clone();
             tokio::task::spawn_blocking(move || {
                 // Named to sort before `credits.aleo`.
                 let program = Program::<CurrentNetwork>::from_str(
                     "program aaa_summary.aleo;\n\nfunction hello:\n    input r0 as u32.private;\n    input r1 as u32.private;\n    add r0 r1 into r2;\n    output r2 as u32.private;\n",
                 )
                 .unwrap();
-                let deployment = ledger.vm().deploy(&private_key, &program, None, 600_000, None, &mut owned_rng).unwrap();
-                (deployment, owned_rng)
+                ledger.vm().deploy(&private_key, &program, None, 600_000, None, &mut TestRng::default()).unwrap()
             })
             .await
             .expect("the deploy task panicked")
         };
-        *rng = owned_rng;
-        advance(&ledger, &private_key, vec![deployment], rng).await;
-        let rest = sample_rest_with(ledger).await;
+        advance(&ledger, &private_key, vec![deployment]).await;
 
+        // The new height replaces the cached body.
         for prefix in ["/mainnet", "/v1/mainnet", "/v2/mainnet"] {
             let (status, body) = get_versioned(&rest, &format!("{prefix}/programs/summary")).await;
             assert_eq!(status, StatusCode::OK, "{prefix}: {body}");
@@ -1520,20 +1507,6 @@ mod route_tests {
     }
 
     #[tokio::test]
-    async fn programs_summary_is_rebuilt_at_a_new_height() {
-        let rng = &mut TestRng::default();
-        let (ledger, private_key) = funded_ledger(rng).await;
-        let rest = sample_rest_with(ledger.clone()).await;
-        let height = |body: &Bytes| serde_json::from_slice::<serde_json::Value>(body).unwrap()["height"].clone();
-
-        let before = rest.programs_summary_body().await.unwrap();
-        advance(&ledger, &private_key, vec![], rng).await;
-        let after = rest.programs_summary_body().await.unwrap();
-        assert_eq!(height(&before), 0);
-        assert_eq!(height(&after), 1);
-    }
-
-    #[tokio::test]
     async fn programs_summary_builds_once_for_concurrent_requests() {
         let rest = sample_rest().await;
 
@@ -1550,26 +1523,22 @@ mod route_tests {
 
     #[tokio::test]
     async fn programs_summary_waiter_accepts_a_newer_build() {
-        let rng = &mut TestRng::default();
-        let (ledger, private_key) = funded_ledger(rng).await;
+        let (ledger, private_key) = funded_ledger().await;
         let rest = sample_rest_with(ledger.clone()).await;
-
-        // Poll a request once, so it sees height 0, misses the cache and waits for the permit.
-        let permit = rest.programs_summary.acquire_build().await.unwrap();
-        let request = rest.programs_summary_body();
-        tokio::pin!(request);
-        let first_poll = std::future::poll_fn(|cx| Poll::Ready(request.as_mut().poll(cx))).await;
-        assert!(first_poll.is_pending());
-
-        // While it waits, another build finishes at height 1, and then the ledger moves to height 2.
-        advance(&ledger, &private_key, vec![], rng).await;
         let built = Bytes::from_static(b"built at height 1");
-        rest.programs_summary.set(1, built.clone());
-        advance(&ledger, &private_key, vec![], rng).await;
-        drop(permit);
+
+        // The request is polled first, so it sees height 0, misses the cache and waits for the
+        // permit. Meanwhile another build finishes at height 1, and the ledger moves to height 2.
+        let permit = rest.programs_summary.acquire_build().await.unwrap();
+        let (body, ()) = tokio::join!(biased; rest.programs_summary_body(), async {
+            advance(&ledger, &private_key, vec![]).await;
+            rest.programs_summary.set(1, built.clone());
+            advance(&ledger, &private_key, vec![]).await;
+            drop(permit);
+        });
 
         // The waiter returns the height-1 body instead of rebuilding.
-        assert_eq!(request.await.unwrap(), built);
+        assert_eq!(body.unwrap(), built);
     }
 
     /// The routes of the removed `history` feature, in history compatibility mode.
