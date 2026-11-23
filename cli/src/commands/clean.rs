@@ -50,10 +50,10 @@ pub struct Clean {
     #[clap(long, alias = "node-data-path", conflicts_with = "keep_node_data")]
     pub node_data_storage: Option<PathBuf>,
 
-    /// Remove the legacy RocksDB mapping-history prefixes and leave the ledger in place.
+    /// Remove RocksDB mapping history and leave the ledger in place.
     ///
-    /// Deletes `MappingUpdate`, `MappingUpdateHeights`, and `StakingRewards`. Node data and the
-    /// rest of the ledger stay.
+    /// Deletes program history, legacy history, and recording metadata. Node data and the rest of
+    /// the ledger stay.
     #[clap(long)]
     pub history: bool,
 }
@@ -61,9 +61,8 @@ pub struct Clean {
 impl Clean {
     /// Cleans the snarkOS node storage.
     pub fn parse(self) -> Result<String> {
-        // Legacy mapping history is a prefix delete. The ledger and node data stay.
         if self.history {
-            return self.delete_legacy_mapping_history();
+            return self.delete_mapping_history();
         }
 
         // Remove the specified node configuration from storage.
@@ -118,8 +117,8 @@ impl Clean {
         }
     }
 
-    /// Deletes the legacy mapping-history prefixes from an existing ledger.
-    fn delete_legacy_mapping_history(&self) -> Result<String> {
+    /// Deletes mapping-history prefixes from an existing ledger.
+    fn delete_mapping_history(&self) -> Result<String> {
         let storage_mode = match &self.ledger_storage {
             Some(path) => StorageMode::from(path.clone()),
             None => match self.dev {
@@ -138,13 +137,13 @@ impl Clean {
             TestnetV0::ID => Self::delete_network::<TestnetV0>(&storage_mode)?,
             id => bail!("Unsupported network id {id}"),
         }
-        Ok(format!("✅ Removed legacy mapping history {path_string}"))
+        Ok(format!("✅ Removed mapping history {path_string}"))
     }
 
-    /// Opens the ledger and deletes the three legacy mapping-history prefixes.
+    /// Opens the ledger and deletes mapping history.
     fn delete_network<N: Network>(storage_mode: &StorageMode) -> Result<()> {
         use snarkvm::ledger::store::helpers::rocksdb::{Database, RocksDB};
-        RocksDB::open(N::ID, storage_mode.clone())?.delete_legacy_mapping_history()
+        RocksDB::open(N::ID, storage_mode.clone())?.delete_mapping_history()
     }
 }
 

@@ -10,3 +10,41 @@ REST responses support gzip compression when the client sends `Accept-Encoding: 
 Responses smaller than 32 bytes are not compressed.
 
 The v1 API and the unversioned routes are deprecated. See [Migrating from the v1 REST API to v2](./MIGRATING_TO_V2.md).
+
+## Program mapping history
+
+Run a client with `--history-programs=shield_swap.aleo` to record per-key history for that program after each committed block.
+Use a comma-separated list or repeat the flag to select more programs:
+
+```sh
+snarkos start --client --history-programs=shield_swap.aleo,shield_swap_router.aleo
+```
+
+Use `--archival` instead to record mapping history for all programs, including new deployments:
+
+```sh
+snarkos start --client --archival
+```
+
+With `--history-programs`, dependencies must be selected explicitly. `--archival` includes them automatically.
+These modes are mutually exclusive. Both work without `--history-json` and can be combined with it to also write the legacy credits snapshots.
+Neither can be combined with `--history-compat-mode`.
+The ledger stores the recording mode and selected programs. You can change them on restart.
+The node warns about the previous and new settings and when new coverage begins.
+Existing ranges remain available. Missing blocks are not backfilled.
+
+Key versions and deletion markers are stored in the ledger RocksDB database. At startup, the client copies current mapping state at the ledger tip in bounded batches before importing more blocks. Later blocks extend that coverage. Older blocks remain unavailable unless already recorded. To serve full history, replay from genesis or a checkpoint that already contains history.
+
+Read history through `/v2/mainnet`:
+
+```text
+GET /program/{program}/mapping/{mapping}/{key}/history/{height}
+GET /program/{program}/mapping/{mapping}/history/{height}?keys=key1,key2
+GET /program/{program}/history/ranges
+```
+
+A missing key in covered history returns `null`. Missing coverage or mapping returns `404`.
+The ranges route returns inclusive `[start, end]` pairs in height order, or `[]` when no history exists.
+For history recorded at blocks 1 through 10 and 500 through 1000, it returns `[[1,10],[500,1000]]`.
+A key-history query for blocks 11 through 499 returns `404`.
+This mode does not evaluate historical views or expose state between transactions in the same block.

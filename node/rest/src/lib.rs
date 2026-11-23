@@ -423,7 +423,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         // Register the view-at-latest-height endpoint (always available, no history required).
         let routes = routes.route("/program/{id}/view/{function}", post(Self::evaluate_view_latest));
 
-        // JSON files written by `snarkos start --history-json`.
+        // The legacy credits JSON route and the per-key program history routes.
         let routes = routes.route("/block/{height}/history/{mapping}", get(Self::get_block_history));
 
         // In history compatibility mode, serve the routes of the removed `history` feature from the
@@ -436,6 +436,9 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
                 .route("/staking/rewards/{address}/{height}", get(Self::get_staking_reward_compat))
         } else {
             routes
+                .route("/program/{id}/history/ranges", get(Self::get_program_history_ranges))
+                .route("/program/{id}/mapping/{name}/{key}/history/{height}", get(Self::get_program_history))
+                .route("/program/{id}/mapping/{name}/history/{height}", get(Self::get_program_history_batch))
         };
 
         let trace_layer = TraceLayer::new_for_http()
@@ -866,6 +869,14 @@ mod route_tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
 
         (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn program_history_ranges_are_visible() {
+        let rest = sample_rest().await;
+        let (status, body) = get(&rest, "/program/credits.aleo/history/ranges").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "[]");
     }
 
     #[tokio::test]
