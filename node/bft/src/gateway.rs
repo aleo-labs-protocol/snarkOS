@@ -773,7 +773,7 @@ impl<N: Network> Gateway<N> {
                     }),
                     BlockRequestOutcome::Drop => {}
                     BlockRequestOutcome::OutdatedPeer(status) => {
-                        debug!(
+                        warn!(
                             "{CONTEXT} Disconnecting '{peer_ip}': the peer is on an older version and requested blocks \
                             {start_height} to {end_height}, which this node does not serve ({status:?})"
                         );

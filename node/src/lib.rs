@@ -193,7 +193,7 @@ fn send_block_response<N: Network, C: ConsensusStorage<N>>(
         Ok(BlockRequestOutcome::Drop) => true,
         Ok(BlockRequestOutcome::OutdatedPeer(status)) => {
             let BlockRequest { start_height, end_height } = request;
-            debug!(
+            warn!(
                 "Disconnecting '{peer_ip}': the peer is on an older version and requested blocks {start_height} to \
                 {end_height}, which this node does not serve ({status:?})"
             );
