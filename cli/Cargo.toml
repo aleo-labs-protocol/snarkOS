@@ -33,7 +33,7 @@ cuda = [
 # that sends another genesis hash; peers below `HandshakeTrailer::GENESIS_VERSION` may send none.
 # `snarkos developer` commands sent to a public endpoint pass no genesis check and use the lowered
 # consensus heights.
-dev-network = [ "snarkvm/dev-network", "snarkvm/dev_genesis_state_root" ]
+dev-network = [ "snarkvm/dev-network" ]
 # Lets `--dev-on-prod` extend a copy of a real ledger with blocks signed by a deterministic dev
 # committee. It keeps the production network parameters, so it is separate from `dev-network`, and a
 # build with both rejects `--dev-on-prod`. It relaxes some block and BFT checks for dev-committee rounds.

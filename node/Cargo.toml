@@ -42,7 +42,7 @@ test-helpers = []
 dev-network = [ "snarkos-node-bft/dev-network", "snarkos-node-consensus/dev-network" ]
 # See `cli/Cargo.toml`.
 dev-committee-override = [
-  "snarkvm/dev-committee",
+  "snarkvm/dev-committee-override",
   "snarkos-node-bft/dev-committee-override",
   "snarkos-node-consensus/dev-committee-override"
 ]
