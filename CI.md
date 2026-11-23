@@ -53,7 +53,10 @@ The `notify` job posts to Slack when the scheduled run turns red, and once when
 it is green again. A run that was not due changes nothing. The channel is the
 repository variable `CI_SLACK_CHANNEL`, `#ci` by default. The job runs in the
 `ci-notify` environment, which admits only `staging` and holds the
-`CI_SLACK_TOKEN` secret.
+`CI_SLACK_TOKEN` secret. The nightly run of
+[`bump-advisories.yml`](.github/workflows/bump-advisories.yml) has a `notify`
+job of its own, which posts when that run fails, and once when it passes again.
+Each workflow keeps its own state.
 
 A schedule fires only in the default branch's copy of `ci.yml`.
 `snarkOS-internal` mirrors `staging` with this file, so its schedule fires too.

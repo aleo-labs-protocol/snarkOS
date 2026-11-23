@@ -23,3 +23,23 @@ jobs:
     # workflow's job sets that environment and receives the value.
     secrets:
       MERGE_BOT_APP_KEY: ${{ secrets.MERGE_BOT_APP_KEY }}
+
+  # Posts to Slack when the nightly run on staging fails, and once when it
+  # passes again. Every scheduled run does the check, so `checked` is true.
+  notify:
+    if: always() && github.event_name == 'schedule' && github.repository == 'aleo-labs-protocol/snarkOS'
+    needs: [bump]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: { actions: read }
+    # Lives in the ci-notify environment, which admits only staging. The job
+    # receives CI_SLACK_TOKEN from it.
+    environment: ci-notify
+    steps:
+      # gh-actions is ours; check-shared-refs requires a @vN tag here, not a SHA.
+      - uses: aleo-labs-protocol/gh-actions/.github/actions/notify-ci-state@v2
+        with:
+          slack-token: ${{ secrets.CI_SLACK_TOKEN }}
+          channel: ${{ vars.CI_SLACK_CHANNEL || '#ci' }}
+          result: ${{ needs.bump.result }}
+          checked: 'true'
