@@ -70,7 +70,6 @@ use parking_lot::Mutex;
 use std::{
     net::SocketAddr,
     num::NonZeroUsize,
-    ops::RangeInclusive,
     sync::{Arc, LazyLock},
     time::Duration,
 };
@@ -220,9 +219,9 @@ impl Default for ProgramsSummaryCache {
 }
 
 impl ProgramsSummaryCache {
-    /// Returns the cached body if it was built at a height in `heights`.
-    fn get(&self, heights: RangeInclusive<u32>) -> Option<Bytes> {
-        self.latest.lock().as_ref().filter(|(h, _)| heights.contains(h)).map(|(_, body)| body.clone())
+    /// Returns the cached body if it was built at `min_height` or later.
+    fn get(&self, min_height: u32) -> Option<Bytes> {
+        self.latest.lock().as_ref().filter(|(h, _)| *h >= min_height).map(|(_, body)| body.clone())
     }
 
     /// Call only while holding the build permit.

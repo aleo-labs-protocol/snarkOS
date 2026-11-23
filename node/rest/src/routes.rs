@@ -919,25 +919,24 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
     /// Returns a `programs/summary` JSON body at least as new as the height the request first saw.
     pub(crate) async fn programs_summary_body(&self) -> Result<Bytes, RestError> {
         let seen = self.ledger.latest_height();
-        if let Some(body) = self.programs_summary.get(seen..=seen) {
+        if let Some(body) = self.programs_summary.get(seen) {
             return Ok(body);
         }
 
         let permit = self.programs_summary.acquire_build().await?;
-        // The ledger advances the height only after the block is written, so a scan started after
-        // this read covers every block up to it.
-        let height = self.ledger.latest_height();
-        // A build that finished while this request waited is new enough. The upper bound skips a
-        // body from above the current height, left by a rollback.
-        if let Some(body) = self.programs_summary.get(seen..=height) {
+        // A build that finished while this request waited is new enough.
+        if let Some(body) = self.programs_summary.get(seen) {
             return Ok(body);
         }
 
+        // The ledger advances the height only after the block is written, so a scan started after
+        // this read covers every block up to it.
+        let height = self.ledger.latest_height();
         let (ledger, cache) = (self.ledger.clone(), self.programs_summary.clone());
         // The blocking task owns the permit, so a dropped request cannot release it mid-build.
         let build = move || -> Result<Bytes, RestError> {
             let _permit = permit;
-            let store = ledger.vm().transaction_store();
+            let store = ledger.vm().block_store().transaction_store();
             let mut programs = store
                 .program_ids_and_latest_editions()
                 .map(|(id, edition)| {
