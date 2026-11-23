@@ -71,7 +71,7 @@ jobs run on every event.
 | `schedule-due` | hosted | schedule | 10 | decides whether `staging`'s head is due a check |
 | `check-shared-refs` | hosted | all | | checks that each `aleo-labs-protocol/gh-actions` ref is a release tag, and that each matrix `name` axis lists the same names as its `include` |
 | `fmt` | hosted | all | | `cargo fmt --check` on `FMT_TOOLCHAIN` |
-| `deny` | hosted | all | | `cargo deny --workspace check bans licenses sources`, plus `advisories` everywhere but `staging`, whose advisories [`bump-advisories.yml`](.github/workflows/bump-advisories.yml) bumps nightly |
+| `deny` | hosted | all | | `cargo deny --workspace check bans licenses sources`, plus `advisories` everywhere but `staging`, whose advisories and yanked crates [`bump-advisories.yml`](.github/workflows/bump-advisories.yml) bumps nightly. A yanked crate fails `advisories` |
 | `shellcheck` | hosted | all | | `.ci/*.sh`, `scripts/*.sh` |
 | `source-checks` | hosted | all | | `scripts/check_sources.py`: license headers in `.rs` files |
 | `lint` | `cpu` | all | 90 | clippy, default and `--all-features`; `cargo check --all-features` of `snarkos-node-metrics` and `snarkos-display` |
