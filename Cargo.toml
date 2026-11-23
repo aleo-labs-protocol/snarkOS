@@ -45,7 +45,7 @@ members = [
 [workspace.dependencies.snarkvm]
 #path = "../snarkVM"
 git = "https://github.com/aleo-labs-protocol/snarkVM.git"
-rev = "569de7c1359b7ae897a0b5385f50ebdc0054581a" # agent/prune-v23-integration-r4
+rev = "3358a45220e51c792ff47b77799a4309241aea36" # agent/prune-v23-integration-r5
 #version = "=4.12.0"
 default-features = false
 
@@ -98,9 +98,6 @@ version = "0.3"
 
 [workspace.dependencies.futures-util]
 version = "0.3"
-
-[workspace.dependencies.locktick]
-version = "0.6"
 
 [workspace.dependencies.lru]
 version = "0.19.0"
@@ -290,30 +287,15 @@ cuda = [
   "snarkos-node-router/cuda",
   "snarkos-node-sync/cuda"
 ]
-locktick = [
-  "dep:locktick",
-  "snarkos-node/locktick",
-  "snarkos-node-bft/locktick",
-  "snarkos-node-consensus/locktick",
-  "snarkos-node-metrics/locktick",
-  "snarkos-node-rest/locktick",
-  "snarkos-node-router/locktick",
-  "snarkos-node-sync/locktick",
-  "snarkos-node-tcp/locktick",
-  "snarkvm/locktick"
-]
-test_targets = [ "snarkos-cli/test_targets" ]
-test_consensus_heights = [ "snarkos-cli/test_consensus_heights" ]
-test_network = [ "snarkos-cli/test_network", "snarkos-node/test_network" ]
+# See `cli/Cargo.toml`.
+dev-network = [ "snarkos-cli/dev-network", "snarkos-node/dev-network" ]
+# See `cli/Cargo.toml`.
+dev-committee-override = [ "snarkos-cli/dev-committee-override", "snarkos-node/dev-committee-override" ]
 tokio_console = [ "snarkos-cli/tokio_console" ]
 
 [dependencies.clap]
 workspace = true
 features = [ "derive" ]
-
-[dependencies.locktick]
-workspace = true
-optional = true
 
 [dependencies.snarkos-account]
 workspace = true
@@ -346,7 +328,7 @@ workspace = true
 [dependencies.snarkos-node-sync]
 workspace = true
 
-[dependencies.snarkos-node-tcp]
+[dependencies.snarkos-utilities]
 workspace = true
 
 [dependencies.snarkvm]
@@ -377,12 +359,11 @@ opt-level = 2
 ignored = [
   "snarkos-account", # Needed for cuda feature
   "snarkos-node", # Needed for metrics feature
-  "snarkos-node-bft", # Needed for cuda and locktick features
-  "snarkos-node-cdn", # Needed for cuda and locktick features
-  "snarkos-node-consensus", # Needed for cuda and locktick features
-  "snarkos-node-tcp", # Needed for locktick feature
-  "snarkos-node-rest", # Needed for cuda and locktick features
-  "snarkos-node-sync", # Needed for cuda and locktick features
-  "snarkos-node-router", # Needed for cuda and locktick features
-  "snarkos-node-metrics", # Needed for locktick feature
+  "snarkos-node-bft", # Needed for cuda feature
+  "snarkos-node-cdn", # Needed for cuda feature
+  "snarkos-node-consensus", # Needed for cuda feature
+  "snarkos-node-rest", # Needed for cuda feature
+  "snarkos-node-sync", # Needed for cuda feature
+  "snarkos-node-router", # Needed for cuda feature
+  "snarkos-node-metrics", # Needed for default and serial features
 ]

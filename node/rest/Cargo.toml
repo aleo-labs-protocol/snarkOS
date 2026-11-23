@@ -20,14 +20,8 @@ edition = "2024"
 default = [ ]
 metrics = [ "dep:snarkos-node-metrics", "snarkos-node-consensus/metrics" ]
 cuda = [ "snarkvm/cuda", "snarkos-node-consensus/cuda", "snarkos-node-router/cuda" ]
-locktick = [
-  "dep:locktick",
-  "snarkos-node-consensus/locktick",
-  "snarkos-node-router/locktick",
-  "snarkvm/locktick"
-]
 # Lets benches advance a test ledger to the latest consensus version.
-test_consensus_heights = [ "snarkvm/test_consensus_heights" ]
+dev-network = [ "snarkvm/dev-network" ]
 
 [dependencies.anyhow]
 workspace = true
@@ -47,22 +41,14 @@ workspace = true
 features = [ "serde", "rayon" ]
 
 [dependencies.jsonwebtoken]
-version = "11.1"
+version = "12.0"
 default-features = false
 features = [ "aws_lc_rs" ]
-
-[dependencies.locktick]
-workspace = true
-features = [ "parking_lot" ]
-optional = true
 
 [dependencies.lru]
 workspace = true
 
 [dependencies.once_cell]
-workspace = true
-
-[dependencies.parking_lot]
 workspace = true
 
 [dependencies.serde]
@@ -93,6 +79,9 @@ workspace = true
 workspace = true
 
 [dependencies.snarkos-node-sync]
+workspace = true
+
+[dependencies.snarkos-utilities]
 workspace = true
 
 [dependencies.snarkvm]

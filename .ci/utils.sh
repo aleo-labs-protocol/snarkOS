@@ -132,9 +132,6 @@ function get_network_name() {
     1)
       echo "testnet"
       ;;
-    2)
-      echo "canary"
-      ;;
     *)
       >&2 echo "Unknown network ID: $network_id, defaulting to mainnet"
       echo "mainnet"
@@ -753,7 +750,7 @@ function wait_for_stable_consensus_version() {
 #   - label: names the log file of the node
 #
 # Required variables (must be set before calling):
-#   - network_id: network ID (0=mainnet, 1=testnet, 2=canary)
+#   - network_id: network ID (0=mainnet, 1=testnet)
 #   - network_name: network name string
 #   - log_dir: directory for log files
 function query_default_consensus_version() {
@@ -821,11 +818,14 @@ SNARKOS_RELEASE_VERSION_FILE="${SNARKOS_RELEASE_VERSION_FILE:-$SNARKOS_RELEASE_D
 
 # Build snarkos with optimized settings for CI (faster builds).
 function ci_cargo_install_snarkos() {
+  # Releases from before `dev-network` name this feature `test_network`.
+  local feature=dev-network
+  grep -q '^test_network = ' Cargo.toml && feature=test_network
   CARGO_PROFILE_RELEASE_LTO=off \
   CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
   CARGO_PROFILE_RELEASE_OPT_LEVEL=2 \
   CARGO_PROFILE_RELEASE_DEBUG=0 \
-    cargo install --locked --path . --features test_network "$@"
+    cargo install --locked --path . --features "$feature" "$@"
 }
 
 # Download and build the latest snarkOS release from GitHub.

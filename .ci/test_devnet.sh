@@ -132,7 +132,7 @@ if ! wait_for_stable_consensus_version 0 "$network_name"; then
 fi
 
 # Broadcast a transfer_public built from a static query.
-# The state root is the fixed dev genesis root (Field::one()), which a test_network
+# The state root is the fixed dev genesis root (Field::one()), which a dev-network
 # node stores at height 0. The height is the chain height after the consensus
 # version has stabilized, so proving uses that same consensus version.
 # Devnet consensus passes ConsensusVersion::V10 before the version stabilizes.

@@ -3,12 +3,13 @@ all-features = true
 
 [advisories]
 version = 2
+# A yanked crate is an error, so bump-advisories.yml updates it, or lists it in its issue if it
+# cannot. To accept one, add `{ crate = "name@version", reason = "..." }` to `ignore`.
+yanked = "deny"
 ignore = [
   # As the rust community considers the paste crate 'done', we can safely ignore this warning.
   # see https://users.rust-lang.org/t/paste-alternatives/126787/2
   "RUSTSEC-2024-0436",
-  # TODO find a suitable replacement for fxhash.
-  "RUSTSEC-2025-0057",
   # TODO remove once we migrate away from bincode, or it becomes maintained again.
   "RUSTSEC-2025-0141",
   # Ledger distribution and CLI diagnostics depend on these unmaintained crates.

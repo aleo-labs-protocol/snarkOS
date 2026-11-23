@@ -39,6 +39,7 @@ use snarkos_node_router::{
     messages::{Message, UnconfirmedTransaction},
 };
 use snarkos_node_sync::BlockSync;
+use snarkos_utilities::locks::parking_lot::Mutex;
 use snarkvm::{
     console::{program::ProgramID, types::Field},
     ledger::narwhal::Data,
@@ -47,7 +48,7 @@ use snarkvm::{
 
 use anyhow::{Context, Result, ensure};
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{ConnectInfo, DefaultBodyLimit, Query, State},
     http::{
         HeaderName,
@@ -62,11 +63,7 @@ use axum::{
     routing::{get, post},
 };
 use axum_extra::response::ErasedJson;
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::Mutex;
 use lru::LruCache;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::Mutex;
 use std::{
     net::SocketAddr,
     num::NonZeroUsize,
@@ -207,6 +204,36 @@ impl VerificationLane {
     }
 }
 
+/// The latest `programs/summary` response body, built at most once per block height.
+pub(crate) struct ProgramsSummaryCache {
+    /// The height and serialized JSON body of the latest summary.
+    latest: Mutex<Option<(u32, Bytes)>>,
+    /// One permit, so only one build runs at a time. Requests wait for it asynchronously.
+    build: Arc<Semaphore>,
+}
+
+impl Default for ProgramsSummaryCache {
+    fn default() -> Self {
+        Self { latest: Default::default(), build: Arc::new(Semaphore::new(1)) }
+    }
+}
+
+impl ProgramsSummaryCache {
+    /// Returns the cached body if it was built at `min_height` or later.
+    fn get(&self, min_height: u32) -> Option<Bytes> {
+        self.latest.lock().as_ref().filter(|(h, _)| *h >= min_height).map(|(_, body)| body.clone())
+    }
+
+    /// Call only while holding the build permit.
+    fn set(&self, height: u32, body: Bytes) {
+        *self.latest.lock() = Some((height, body));
+    }
+
+    async fn acquire_build(&self) -> Result<OwnedSemaphorePermit, RestError> {
+        self.build.clone().acquire_owned().await.map_err(|err| RestError::internal_server_error(anyhow::anyhow!(err)))
+    }
+}
+
 /// A REST API server for the ledger.
 #[derive(Clone)]
 pub struct Rest<N: Network, C: ConsensusStorage<N>, R: Routing<N>> {
@@ -226,6 +253,8 @@ pub struct Rest<N: Network, C: ConsensusStorage<N>, R: Routing<N>> {
     verification_slots: Arc<VerificationSlots>,
     /// A cache containing recently requested blocks.
     block_cache: Arc<Mutex<BlockCache<N>>>,
+    /// The latest `programs/summary` body, shared by all route prefixes.
+    programs_summary: Arc<ProgramsSummaryCache>,
     /// The upstream for the routes of the removed `history` feature, if `--history-compat-mode` is set.
     history_compat: Option<Arc<HistoryCompat>>,
 }
@@ -265,6 +294,7 @@ impl<N: Network, C: 'static + ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> 
             handles: Default::default(),
             verification_slots: Arc::new(VerificationSlots::new(rest_verification_limits)),
             block_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(BLOCK_CACHE_SIZE).unwrap()))),
+            programs_summary: Default::default(),
             history_compat,
         };
         // Spawn the server.
@@ -384,6 +414,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             .route("/program/{id}/mapping/{name}/{key}", get(Self::get_mapping_value))
             .route("/program/{id}/amendment_count", get(Self::get_program_amendment_count))
             .route("/program/{id}/{edition}/amendment_count", get(Self::get_program_amendment_count_for_edition))
+            .route("/programs/summary", get(Self::get_programs_summary))
 
             // GET ../sync/.. (with the deprecated ../sync_status alias)
             .route("/sync_status", get(Self::get_sync_status))
@@ -802,12 +833,14 @@ mod route_tests {
             block::{Header, Transactions},
             committee::test_helpers::sample_committee,
             store::{StorageMode, helpers::memory::ConsensusMemory},
+            test_helpers::sample_genesis_committee,
         },
-        prelude::MainnetV0,
+        prelude::{MainnetV0, PrivateKey, Program, Transaction},
         utilities::TestRng,
     };
 
     use axum::body::to_bytes;
+    use std::str::FromStr;
     use tower::ServiceExt; // for `oneshot`
 
     type CurrentNetwork = MainnetV0;
@@ -836,12 +869,13 @@ mod route_tests {
         .await
         .expect("the ledger task panicked")
         .expect("couldn't load the test ledger");
-        sample_rest_with_ledger(ledger).await
+        sample_rest_with(ledger).await
     }
 
-    /// Builds a `Rest` over `ledger` (see [`sample_rest`]).
-    async fn sample_rest_with_ledger(ledger: Ledger<CurrentNetwork, ConsensusMemory<CurrentNetwork>>) -> CurrentRest {
+    /// Builds a `Rest` over the given ledger, as `sample_rest` does.
+    async fn sample_rest_with(ledger: Ledger<CurrentNetwork, ConsensusMemory<CurrentNetwork>>) -> CurrentRest {
         let rng = &mut TestRng::default();
+
         let ledger_service = Arc::new(MockLedgerService::new(sample_committee(rng)));
 
         Rest {
@@ -857,6 +891,7 @@ mod route_tests {
                 num_verifying_solutions: 1,
             })),
             block_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(BLOCK_CACHE_SIZE).unwrap()))),
+            programs_summary: Default::default(),
             history_compat: None,
         }
     }
@@ -1134,7 +1169,7 @@ mod route_tests {
 
         // Cache block 1 while it is the latest, then advance until it is pruned.
         let ledger = advance(ledger, private_key, 1).await.unwrap();
-        let rest = sample_rest_with_ledger(ledger.clone()).await;
+        let rest = sample_rest_with(ledger.clone()).await;
         assert_eq!(get_versioned(&rest, "/v2/mainnet/block/latest").await.0, StatusCode::OK);
         let ledger = advance(ledger, private_key, TIP).await.unwrap();
         let w = ledger.vm().block_store().authority_pruned_below().unwrap().unwrap();
@@ -1465,6 +1500,113 @@ mod route_tests {
 
         let hash: <CurrentNetwork as Network>::BlockHash = serde_json::from_str(&body).unwrap();
         assert_eq!(hash, sample_genesis_block::<CurrentNetwork>().hash());
+    }
+
+    /// Returns a test ledger and the key its genesis funds, since the mainnet genesis funds no key
+    /// we hold.
+    async fn funded_ledger() -> (Ledger<CurrentNetwork, ConsensusMemory<CurrentNetwork>>, PrivateKey<CurrentNetwork>) {
+        // Ledger and VM calls panic in an async context.
+        tokio::task::spawn_blocking(|| {
+            let (private_keys, genesis) = sample_genesis_committee();
+            (Ledger::load(genesis, StorageMode::new_test(None)).unwrap(), private_keys[0])
+        })
+        .await
+        .expect("the ledger task panicked")
+    }
+
+    /// Advances the ledger by one block holding the given transactions.
+    async fn advance(
+        ledger: &Ledger<CurrentNetwork, ConsensusMemory<CurrentNetwork>>,
+        private_key: &PrivateKey<CurrentNetwork>,
+        transactions: Vec<Transaction<CurrentNetwork>>,
+    ) {
+        let (ledger, private_key) = (ledger.clone(), *private_key);
+        tokio::task::spawn_blocking(move || {
+            let rng = &mut TestRng::default();
+            let block =
+                ledger.prepare_advance_to_next_beacon_block(&private_key, vec![], vec![], transactions, rng).unwrap();
+            ledger.advance_to_next_block(&block).unwrap();
+        })
+        .await
+        .expect("the ledger task panicked");
+    }
+
+    #[tokio::test]
+    async fn programs_summary_lists_deployed_programs() {
+        let (ledger, private_key) = funded_ledger().await;
+        let rest = sample_rest_with(ledger.clone()).await;
+        let before = rest.programs_summary_body().await.unwrap();
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&before).unwrap()["height"], 0);
+
+        let deployment = {
+            let ledger = ledger.clone();
+            tokio::task::spawn_blocking(move || {
+                // Named to sort before `credits.aleo`.
+                let program = Program::<CurrentNetwork>::from_str(
+                    "program aaa_summary.aleo;\n\nfunction hello:\n    input r0 as u32.private;\n    input r1 as u32.private;\n    add r0 r1 into r2;\n    output r2 as u32.private;\n",
+                )
+                .unwrap();
+                ledger.vm().deploy(&private_key, &program, None, 600_000, None, &mut TestRng::default()).unwrap()
+            })
+            .await
+            .expect("the deploy task panicked")
+        };
+        advance(&ledger, &private_key, vec![deployment]).await;
+
+        // The new height replaces the cached body.
+        for prefix in ["/mainnet", "/v1/mainnet", "/v2/mainnet"] {
+            let (status, body) = get_versioned(&rest, &format!("{prefix}/programs/summary")).await;
+            assert_eq!(status, StatusCode::OK, "{prefix}: {body}");
+            assert_eq!(
+                body,
+                r#"{"height":1,"programs":[{"program_id":"aaa_summary.aleo","edition":0,"amendment_count":0},{"program_id":"credits.aleo","edition":0,"amendment_count":0}]}"#,
+                "{prefix}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn programs_summary_is_cached_per_height() {
+        let rest = sample_rest().await;
+        let first = rest.programs_summary_body().await.unwrap();
+        let second = rest.programs_summary_body().await.unwrap();
+        // The same allocation: the second request reused the cached body instead of rescanning.
+        assert_eq!(first.as_ptr(), second.as_ptr());
+    }
+
+    #[tokio::test]
+    async fn programs_summary_builds_once_for_concurrent_requests() {
+        let rest = sample_rest().await;
+
+        // Both requests miss the empty cache and wait for the permit, which is dropped after them.
+        let permit = rest.programs_summary.acquire_build().await.unwrap();
+        let (first, second, ()) = tokio::join!(
+            biased;
+            rest.programs_summary_body(),
+            rest.programs_summary_body(),
+            async { drop(permit) },
+        );
+        assert_eq!(first.unwrap().as_ptr(), second.unwrap().as_ptr());
+    }
+
+    #[tokio::test]
+    async fn programs_summary_waiter_accepts_a_newer_build() {
+        let (ledger, private_key) = funded_ledger().await;
+        let rest = sample_rest_with(ledger.clone()).await;
+        let built = Bytes::from_static(b"built at height 1");
+
+        // The request is polled first, so it sees height 0, misses the cache and waits for the
+        // permit. Meanwhile another build finishes at height 1, and the ledger moves to height 2.
+        let permit = rest.programs_summary.acquire_build().await.unwrap();
+        let (body, ()) = tokio::join!(biased; rest.programs_summary_body(), async {
+            advance(&ledger, &private_key, vec![]).await;
+            rest.programs_summary.set(1, built.clone());
+            advance(&ledger, &private_key, vec![]).await;
+            drop(permit);
+        });
+
+        // The waiter returns the height-1 body instead of rebuilding.
+        assert_eq!(body.unwrap(), built);
     }
 
     /// The routes of the removed `history` feature, in history compatibility mode.

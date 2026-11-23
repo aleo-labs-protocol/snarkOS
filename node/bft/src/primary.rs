@@ -56,7 +56,14 @@ use snarkos_node_bft_ledger_service::{LedgerService, deserialize_transaction_str
 use snarkos_node_network::ConnectionMode;
 use snarkos_node_network::PeerPoolHandling;
 use snarkos_node_sync::{BlockSync, DUMMY_SELF_IP, Ping};
-use snarkos_utilities::{CallbackHandle, NodeDataDir};
+use snarkos_utilities::{
+    CallbackHandle,
+    NodeDataDir,
+    locks::{
+        parking_lot::{Mutex, RwLock},
+        tokio::RwLock as TRwLock,
+    },
+};
 
 use snarkvm::{
     console::{
@@ -75,13 +82,6 @@ use snarkvm::{
 use anyhow::Context;
 use futures::stream::{FuturesUnordered, StreamExt};
 use indexmap::{IndexMap, IndexSet};
-#[cfg(feature = "locktick")]
-use locktick::{
-    parking_lot::{Mutex, RwLock},
-    tokio::RwLock as TRwLock,
-};
-#[cfg(not(feature = "locktick"))]
-use parking_lot::{Mutex, RwLock};
 use rayon::prelude::*;
 use std::{
     collections::{HashMap, HashSet},
@@ -91,8 +91,6 @@ use std::{
     sync::{Arc, OnceLock},
     time::Instant,
 };
-#[cfg(not(feature = "locktick"))]
-use tokio::sync::RwLock as TRwLock;
 use tokio::{sync::Notify, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -665,7 +663,7 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
             if previous_committee_lookback.is_quorum_threshold_reached(&authors) {
                 is_ready = true;
             }
-            #[cfg(feature = "test_network")]
+            #[cfg(feature = "dev-committee-override")]
             {
                 // If we are using a hotswapped dev committee, use simplified checks to more easily advance.
                 if let Some(dev_committee) = self.ledger.dev_committee_for_round(previous_round)?

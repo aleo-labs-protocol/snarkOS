@@ -22,7 +22,7 @@ use snarkos_node_bft::{
     helpers::{PrimarySender, Storage},
     storage_service::BFTMemoryService,
 };
-use snarkos_utilities::{NodeDataDir, SimpleStoppable};
+use snarkos_utilities::{NodeDataDir, SimpleStoppable, locks::parking_lot::RwLock};
 
 use snarkvm::{
     console::account::Address,
@@ -46,10 +46,6 @@ use std::{str::FromStr, sync::Arc, time::Duration};
 
 use ::bytes::Bytes;
 use indexmap::IndexMap;
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::RwLock;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::RwLock;
 use rand::{Rng, RngExt};
 use tokio::{sync::oneshot, task::JoinHandle, time::sleep};
 use tracing::*;

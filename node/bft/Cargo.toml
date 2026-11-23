@@ -18,16 +18,6 @@ edition = "2024"
 
 [features]
 default = [ ]
-locktick = [
-  "dep:locktick",
-  "snarkos-node-bft-ledger-service/locktick",
-  "snarkos-node-bft-storage-service/locktick",
-  "snarkos-node-sync/locktick",
-  "snarkos-node-tcp/locktick",
-  "snarkos-node-metrics/locktick",
-  "snarkos-utilities/locktick",
-  "snarkvm/locktick"
-]
 metrics = [
   "dep:snarkos-node-metrics",
   "snarkos-node-bft-events/metrics",
@@ -41,14 +31,15 @@ cuda = [
   "snarkos-node-sync/cuda"
 ]
 test-helpers = [
-  # "snarkvm/test" this breaks some of the tests
   "snarkvm/test-helpers",
   "snarkos-node-bft-ledger-service/test-helpers",
   "snarkos-node-bft-storage-service/test-helpers"
 ]
-test_network = [
-  "snarkos-node-bft-ledger-service/test_network",
+dev-network = [
+  "snarkos-node-bft-ledger-service/dev-network",
 ]
+# See `cli/Cargo.toml`.
+dev-committee-override = [ "snarkos-node-bft-ledger-service/dev-committee-override" ]
 
 [dependencies.anyhow]
 workspace = true
@@ -70,20 +61,12 @@ features = [ "thread-pool" ]
 workspace = true
 features = [ "serde", "rayon" ]
 
-[dependencies.locktick]
-workspace = true
-features = [ "parking_lot", "tokio" ]
-optional = true
-
 [dependencies.lru]
 workspace = true
 
 [dependencies.snarkos-node-metrics]
 workspace = true
 optional = true
-
-[dependencies.parking_lot]
-workspace = true
 
 [dependencies.rand]
 workspace = true

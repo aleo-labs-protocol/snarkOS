@@ -18,20 +18,13 @@ edition = "2024"
 
 [features]
 default = [ ]
-locktick = [
-  "dep:locktick",
-  "snarkvm/locktick",
-  "snarkos-utilities/locktick"
-]
 metrics = [ "dep:snarkos-node-metrics", "snarkvm/metrics" ]
 mock = [ ]
 cuda = [ "snarkvm/cuda" ]
 test-helpers = [ "mock" ]
-test_network = [
-  "snarkvm/dev-committee",
-  "snarkvm/dev_genesis_state_root",
-  "snarkos-utilities/test_network"
-]
+dev-network = [ "snarkvm/dev-network" ]
+# See `cli/Cargo.toml`.
+dev-committee-override = [ "snarkvm/dev-committee-override" ]
 
 [dependencies.anyhow]
 workspace = true
@@ -43,19 +36,11 @@ version = "0.1"
 workspace = true
 features = [ "serde", "rayon" ]
 
-[dependencies.locktick]
-workspace = true
-features = [ "parking_lot" ]
-optional = true
-
 [dependencies.snarkos-node-metrics]
 workspace = true
 optional = true
 
 [dependencies.snarkos-utilities]
-workspace = true
-
-[dependencies.parking_lot]
 workspace = true
 
 [dependencies.rand]

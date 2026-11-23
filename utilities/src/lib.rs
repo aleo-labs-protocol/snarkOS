@@ -21,6 +21,8 @@ pub use signals::*;
 pub mod node_data;
 pub use node_data::*;
 
+pub mod locks;
+
 mod callback_handle;
 pub use callback_handle::CallbackHandle;
 

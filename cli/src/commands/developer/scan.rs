@@ -20,22 +20,18 @@ use crate::{
 };
 
 use snarkos_node_cdn::CDN_BASE_URL;
-use snarkos_utilities::SimpleStoppable;
+use snarkos_utilities::{SimpleStoppable, locks::parking_lot::RwLock};
 
 use snarkvm::{
     console::network::Network,
     prelude::{Ciphertext, Field, Plaintext, PrivateKey, Record, ViewKey, block::Block},
 };
 
-#[cfg(not(feature = "test_targets"))]
+#[cfg(not(feature = "dev-network"))]
 use snarkvm::prelude::FromBytes;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{Parser, builder::NonEmptyStringValueParser};
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::RwLock;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::RwLock;
 use std::{
     io::{Write, stdout},
     str::FromStr,
@@ -217,12 +213,12 @@ impl Scan {
         print!("\rScanning {total_blocks} blocks for records (0% complete)...");
         stdout().flush()?;
 
-        // If the CLI was compiled with test targets, always assume the endpoint is on a development network.
-        #[cfg(feature = "test_targets")]
+        // If the CLI was compiled with `dev-network`, always assume the endpoint is on a development network.
+        #[cfg(feature = "dev-network")]
         let is_development_network = true;
 
         // Otherwise, determine if the endpoint is on a development network based on its genesis block.
-        #[cfg(not(feature = "test_targets"))]
+        #[cfg(not(feature = "dev-network"))]
         let is_development_network = {
             // Fetch the genesis block from the endpoint.
             let endpoint_genesis_block: Block<N> = match Developer::http_get_json::<N, _>(endpoint, "block/0")? {

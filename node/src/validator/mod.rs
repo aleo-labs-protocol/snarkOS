@@ -18,7 +18,7 @@ mod router;
 use crate::{AuthorityRetention, traits::NodeInterface};
 
 use snarkos_account::Account;
-#[cfg(feature = "test_network")]
+#[cfg(feature = "dev-committee-override")]
 use snarkos_node_bft::ledger_service::{persist_dev_committee_start_round_if_unwritten, prepare_dev_committee_options};
 use snarkos_node_bft::{helpers::UpgradeMonitor, ledger_service::CoreLedgerService, spawn_blocking};
 use snarkos_node_cdn::CdnBlockSync;
@@ -38,7 +38,7 @@ use snarkos_node_tcp::{
     P2P,
     protocols::{Disconnect, Handshake, OnConnect, Reading},
 };
-use snarkos_utilities::{DevHotswapConfig, NodeDataDir, SignalHandler};
+use snarkos_utilities::{DevHotswapConfig, NodeDataDir, SignalHandler, locks::parking_lot::Mutex};
 
 use snarkvm::prelude::{
     Ledger,
@@ -50,10 +50,6 @@ use snarkvm::prelude::{
 
 use anyhow::{Context, Result};
 use core::future::Future;
-#[cfg(feature = "locktick")]
-use locktick::parking_lot::Mutex;
-#[cfg(not(feature = "locktick"))]
-use parking_lot::Mutex;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::task::JoinHandle;
 
@@ -97,8 +93,8 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         trusted_peers_only: bool,
         dev_txs: bool,
         dev: Option<u16>,
-        #[cfg(feature = "test_network")] dev_hotswap_config: Option<DevHotswapConfig>,
-        #[cfg(not(feature = "test_network"))] _dev_hotswap_config: Option<DevHotswapConfig>,
+        #[cfg(feature = "dev-committee-override")] dev_hotswap_config: Option<DevHotswapConfig>,
+        #[cfg(not(feature = "dev-committee-override"))] _dev_hotswap_config: Option<DevHotswapConfig>,
         proposal_spent_limit_multiplier: u64,
         signal_handler: Arc<SignalHandler>,
     ) -> Result<Self> {
@@ -108,9 +104,9 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
             let storage_mode = storage_mode.clone();
             let genesis = genesis.clone();
 
-            #[cfg_attr(not(feature = "test_network"), allow(unused_mut))]
+            #[cfg_attr(not(feature = "dev-committee-override"), allow(unused_mut))]
             let mut options = authority_retention.load_options();
-            #[cfg(feature = "test_network")]
+            #[cfg(feature = "dev-committee-override")]
             if let Some(cfg) = dev_hotswap_config {
                 options = options.with_dev_committee(prepare_dev_committee_options(&node_data_dir, cfg)?);
             }
@@ -125,7 +121,7 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
 
         // If snarkVM picked the start round itself (no CLI flag and no persisted file),
         // record it now so subsequent restarts are stable.
-        #[cfg(feature = "test_network")]
+        #[cfg(feature = "dev-committee-override")]
         if let Some(committee) = ledger.dev_committee() {
             persist_dev_committee_start_round_if_unwritten(&node_data_dir, committee.starting_round())?;
         }

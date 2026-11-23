@@ -20,7 +20,7 @@ use sign::Sign;
 
 use snarkvm::console::{
     account::{Address, PrivateKey, Signature},
-    network::{CanaryV0, MainnetV0, Network, TestnetV0},
+    network::{MainnetV0, Network, TestnetV0},
     prelude::{Environment, Uniform},
     program::{ToFields, Value},
     types::Field,
@@ -52,7 +52,7 @@ pub enum Account {
     /// Generates a new Aleo account
     New {
         /// Specify the network to create an execution for.
-        /// [options: 0 = mainnet, 1 = testnet, 2 = canary]
+        /// [options: 0 = mainnet, 1 = testnet]
         #[clap(long, default_value_t=MainnetV0::ID, long, value_parser = network_id_parser())]
         network: u16,
         /// Seed the RNG with a numeric value
@@ -73,7 +73,7 @@ pub enum Account {
         /// Account private key
         private_key: Option<String>,
         /// Specify the network to create an execution for.
-        /// [options: 0 = mainnet, 1 = testnet, 2 = canary]
+        /// [options: 0 = mainnet, 1 = testnet]
         #[clap(long, default_value_t=MainnetV0::ID, long, value_parser = network_id_parser())]
         network: u16,
         /// Print sensitive information (such as the private key) discreetly in an alternate screen
@@ -86,7 +86,7 @@ pub enum Account {
     Sign(Sign),
     Verify {
         /// Specify the network to create an execution for.
-        /// [options: 0 = mainnet, 1 = testnet, 2 = canary]
+        /// [options: 0 = mainnet, 1 = testnet]
         #[clap(long, default_value_t=MainnetV0::ID, long, value_parser = network_id_parser())]
         network: u16,
         /// Address to use for verification
@@ -119,14 +119,12 @@ impl Account {
                     Some(vanity) => match network {
                         MainnetV0::ID => Self::new_vanity::<MainnetV0>(vanity.as_str(), discreet),
                         TestnetV0::ID => Self::new_vanity::<TestnetV0>(vanity.as_str(), discreet),
-                        CanaryV0::ID => Self::new_vanity::<CanaryV0>(vanity.as_str(), discreet),
                         unknown_id => bail!("Unknown network ID ({unknown_id})"),
                     },
                     // Generate a seeded account for the specified network.
                     None => match network {
                         MainnetV0::ID => Self::new_seeded::<MainnetV0>(seed, discreet, save_to_file),
                         TestnetV0::ID => Self::new_seeded::<TestnetV0>(seed, discreet, save_to_file),
-                        CanaryV0::ID => Self::new_seeded::<CanaryV0>(seed, discreet, save_to_file),
                         unknown_id => bail!("Unknown network ID ({unknown_id})"),
                     },
                 }
@@ -136,7 +134,6 @@ impl Account {
                 match network {
                     MainnetV0::ID => Self::import::<MainnetV0>(private_key, discreet, save_to_file),
                     TestnetV0::ID => Self::import::<TestnetV0>(private_key, discreet, save_to_file),
-                    CanaryV0::ID => Self::import::<CanaryV0>(private_key, discreet, save_to_file),
                     unknown_id => bail!("Unknown network ID ({unknown_id})"),
                 }
             }
@@ -146,7 +143,6 @@ impl Account {
                 match network {
                     MainnetV0::ID => Self::verify::<MainnetV0>(address, signature, message, raw),
                     TestnetV0::ID => Self::verify::<TestnetV0>(address, signature, message, raw),
-                    CanaryV0::ID => Self::verify::<CanaryV0>(address, signature, message, raw),
                     unknown_id => bail!("Unknown network ID ({unknown_id})"),
                 }
             }

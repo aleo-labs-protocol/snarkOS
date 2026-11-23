@@ -34,7 +34,7 @@ use snarkvm::{
     console::{
         account::{Address, PrivateKey},
         algorithms::Hash,
-        network::{CanaryV0, MainnetV0, Network, TestnetV0},
+        network::{MainnetV0, Network, TestnetV0},
     },
     ledger::{
         block::Block,
@@ -146,7 +146,7 @@ impl FromStr for BondedBalances {
 )]
 pub struct Start {
     /// Specify the network ID of this node
-    /// [options: 0 = mainnet, 1 = testnet, 2 = canary]
+    /// [options: 0 = mainnet, 1 = testnet]
     #[clap(long, default_value_t=MainnetV0::ID, long, value_parser = network_id_parser())]
     pub network: u16,
 
@@ -449,9 +449,6 @@ impl Start {
                 TestnetV0::ID => {
                     self_.parse_node::<TestnetV0>(handle, log_receiver).await.with_context(node_parse_error)?
                 }
-                CanaryV0::ID => {
-                    self_.parse_node::<CanaryV0>(handle, log_receiver).await.with_context(node_parse_error)?
-                }
                 _ => panic!("Invalid network ID specified"),
             };
 
@@ -477,8 +474,7 @@ impl Start {
 
     /// Returns the base URL of the historical staking API to serve the `history` routes from, if
     /// `--history-compat-mode` is set: the given URL, or by default the network's own instance,
-    /// `https://{network}.historical-staking.provable.com` (mainnet and testnet have one; canary
-    /// does not, so it needs an explicit URL).
+    /// `https://{network}.historical-staking.provable.com`.
     ///
     /// A `--dev` network has no upstream: its heights and addresses are unrelated to any public
     /// network's, so the default would serve unrelated data, and an explicit URL is required.
@@ -524,7 +520,7 @@ impl Start {
         ensure!(
             latest_message_version >= status_version,
             "--prune-authority-data needs router message version {status_version} (ConsensusVersion::V23), which \
-             this network has not scheduled. For a devnet, build with the `test_network` feature."
+             this network has not scheduled. For a devnet, build with the `dev-network` feature."
         );
         AuthorityRetention::prune::<N>(self.dev_authority_retention_blocks.unwrap_or(AUTHORITY_RETENTION_BLOCKS))
     }
@@ -846,9 +842,11 @@ impl Start {
             println!("{}", crate::helpers::welcome_message());
         }
 
-        // Only allow dev mode if we built with the 'test_network' feature.
-        if self.dev.is_some() && cfg!(not(feature = "test_network")) {
-            bail!("The 'dev' flag is set, but the 'test_network' feature is not enabled");
+        if self.dev_on_prod {
+            ensure!(cfg!(feature = "dev-committee-override"), "The 'dev-on-prod' flag is set, but the 'dev-committee-override' feature is not enabled");
+            ensure!(cfg!(not(feature = "dev-network")), "The 'dev-on-prod' flag needs production network parameters, so a build with the 'dev-network' feature rejects it");
+        } else if self.dev.is_some() && cfg!(not(feature = "dev-network")) {
+            bail!("The 'dev' flag is set, but the 'dev-network' feature is not enabled");
         }
 
         // Parse the trusted peers to connect to.
@@ -1261,20 +1259,6 @@ fn load_or_compute_genesis<N: Network>(
             preimage.extend(snarkvm::parameters::testnet::FeePublicVerifier::METADATA.as_bytes());
             preimage.extend(snarkvm::parameters::testnet::InclusionVerifier::METADATA.as_bytes());
         }
-        snarkvm::console::network::CanaryV0::ID => {
-            preimage.extend(snarkvm::parameters::canary::BondValidatorVerifier::METADATA.as_bytes());
-            preimage.extend(snarkvm::parameters::canary::BondPublicVerifier::METADATA.as_bytes());
-            preimage.extend(snarkvm::parameters::canary::UnbondPublicVerifier::METADATA.as_bytes());
-            preimage.extend(snarkvm::parameters::canary::ClaimUnbondPublicVerifier::METADATA.as_bytes());
-            preimage.extend(snarkvm::parameters::canary::SetValidatorStateVerifier::METADATA.as_bytes());
-            preimage.extend(snarkvm::parameters::canary::TransferPrivateVerifier::METADATA.as_bytes());
-            preimage.extend(snarkvm::parameters::canary::TransferPublicVerifier::METADATA.as_bytes());
-            preimage.extend(snarkvm::parameters::canary::TransferPrivateToPublicVerifier::METADATA.as_bytes());
-            preimage.extend(snarkvm::parameters::canary::TransferPublicToPrivateVerifier::METADATA.as_bytes());
-            preimage.extend(snarkvm::parameters::canary::FeePrivateVerifier::METADATA.as_bytes());
-            preimage.extend(snarkvm::parameters::canary::FeePublicVerifier::METADATA.as_bytes());
-            preimage.extend(snarkvm::parameters::canary::InclusionVerifier::METADATA.as_bytes());
-        }
         _ => {
             // Unrecognized Network ID
             bail!("Unrecognized Network ID: {}", N::ID);
@@ -1452,7 +1436,7 @@ mod tests {
         assert!(try_parse(&[]).unwrap().parse_authority_retention_with::<CurrentNetwork>(status_version - 1).is_ok());
         // Mainnet has not scheduled V23; the test heights have.
         let result = start.parse_authority_retention::<CurrentNetwork>();
-        assert_eq!(result.is_ok(), cfg!(feature = "test_consensus_heights"), "{result:?}");
+        assert_eq!(result.is_ok(), cfg!(feature = "dev-network"), "{result:?}");
     }
 
     #[test]
@@ -1546,6 +1530,8 @@ mod tests {
         Ok(())
     }
 
+    // A `dev-network` build rejects the production genesis block, which this test parses.
+    #[cfg(not(feature = "dev-network"))]
     #[test]
     fn test_parse_development_and_genesis() {
         let prod_genesis = Block::from_bytes_le(CurrentNetwork::genesis_bytes()).unwrap();

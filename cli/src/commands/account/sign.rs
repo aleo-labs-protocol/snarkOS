@@ -23,7 +23,7 @@ use clap::builder::NonEmptyStringValueParser;
 )]
 pub struct Sign {
     /// Specify the network to create an execution for.
-    /// [options: 0 = mainnet, 1 = testnet, 2 = canary]
+    /// [options: 0 = mainnet, 1 = testnet]
     #[clap(long, default_value_t=MainnetV0::ID, long, value_parser = network_id_parser())]
     pub(super) network: u16,
 
@@ -54,7 +54,6 @@ impl Sign {
         match self.network {
             MainnetV0::ID => self.sign::<MainnetV0>(),
             TestnetV0::ID => self.sign::<TestnetV0>(),
-            CanaryV0::ID => self.sign::<CanaryV0>(),
             unknown_id => bail!("Unknown network ID ({unknown_id})"),
         }
     }

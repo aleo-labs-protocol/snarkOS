@@ -20,7 +20,7 @@ LEDGER_SECONDARY_PATH=
 cargo run --release -p snarkos-ledger-distribution --bin ledger-distribution -- <network ID> [--dry-run]
 ```
 
-The network ID is `0` for mainnet, `1` for testnet, and `2` for canary.
+The network ID is `0` for mainnet and `1` for testnet.
 
 ## Runtime configuration
 

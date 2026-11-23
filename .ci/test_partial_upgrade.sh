@@ -25,7 +25,8 @@ network_id=$2
 
 # Default values if not provided
 : "${total_validators:=4}"
-: "${network_id:=0}"
+# Testnet, where the latest release and this build share a dev genesis.
+: "${network_id:=1}"
 
 # Node verbosity
 NODE_VERBOSITY=4
@@ -289,7 +290,24 @@ fi
 
 log "🎉 Test passed! Node synced to new consensus height ($new_consensus_height) after another node was upgraded."
 
-if check_logs "$log_dir" "$total_validators" 0 "$MAX_VALIDATOR_LOG_SIZE_BYTES"; then
+# Once two validators run the new version, they hold at least a third of the stake, so the
+# release validators shut down. Before that, the last node rejects the blocks of its outdated
+# peers.
+upgrade_stop="Validators holding at least a third of the stake run ConsensusVersion::V[0-9]+ from height [0-9]+, but this build does not schedule it at that height, and must be upgraded"
+outdated_peer="The peer's consensus version for height [0-9]+ is behind ours"
+# The release binary leaves a task running when it shuts down this way.
+surplus_tasks="There are [0-9]+ surplus live tasks"
+expected_errors="$upgrade_stop|$outdated_peer|$surplus_tasks"
+
+# Only the release validators may log the surplus task error.
+for ((node_index = penultimate_index; node_index < total_validators; node_index++)); do
+  if grep -E "ERROR.*$surplus_tasks" "$log_dir/validator-$node_index.log"; then
+    log "❌ Test failed! Upgraded validator #${node_index} left surplus live tasks."
+    exit 1
+  fi
+done
+
+if check_logs "$log_dir" "$total_validators" 0 "$MAX_VALIDATOR_LOG_SIZE_BYTES" "" "" "$expected_errors"; then
   exit 0
 else
   exit 1

@@ -103,8 +103,7 @@
 //!
 //! An unknown mapping name is also a 500, with a body listing the valid names. The root path and
 //! unfilled placeholders are an empty 404. There is one instance per network
-//! (`https://{network}.historical-staking.provable.com`); mainnet and testnet resolve, canary does
-//! not.
+//! (`https://{network}.historical-staking.provable.com`).
 //!
 //! Sizes at mainnet block 1,000,000: `unbonding` 437 B, `stakingrewards` 24 KB, `bonded` 31 KB,
 //! answered in 0.1-0.3 s. The whole mapping is fetched to answer a single key, so snapshots are
@@ -217,7 +216,7 @@ impl From<FetchError> for RestError {
 
 /// One fetch in progress, which every request for its key awaits. The outcome is set exactly
 /// once, by the request that performed the fetch.
-type Flight<T> = tokio::sync::Mutex<Option<Result<Arc<T>, FetchError>>>;
+type Flight<T> = snarkos_utilities::locks::tokio::Mutex<Option<Result<Arc<T>, FetchError>>>;
 
 /// A cache of snapshots with single-flight fetching: concurrent requests for one key share one
 /// upstream request, and its outcome -- success or failure.
@@ -261,7 +260,7 @@ impl<K: Copy + Eq + std::hash::Hash, T> SnapshotCache<K, T> {
         if let Some(snapshot) = self.snapshots.lock().get(&key) {
             return Ok(snapshot.clone());
         }
-        let flight = self.in_flight.lock().entry(key).or_default().clone();
+        let flight = self.in_flight.lock().entry(key).or_insert_with(|| Arc::new(Flight::new(None))).clone();
         let mut outcome = flight.lock().await;
         if let Some(result) = &*outcome {
             return result.clone();
