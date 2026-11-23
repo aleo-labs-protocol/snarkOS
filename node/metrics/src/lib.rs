@@ -90,7 +90,7 @@ pub fn initialize_metrics(ip: Option<SocketAddr>) {
     // Spawn the exporter, retaining its handle so that it can be stopped on shutdown.
     let task = tokio::spawn(async move {
         if let Err(error) = exporter.await {
-            tracing::error!("The metrics exporter has failed: {error}");
+            tracing::error!("The metrics exporter has failed: {error:?}");
         }
     });
     if let Err(task) = EXPORTER_TASK.set(task) {
