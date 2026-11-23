@@ -22,9 +22,9 @@ metrics = [ "dep:snarkos-node-metrics", "snarkvm/metrics" ]
 mock = [ ]
 cuda = [ "snarkvm/cuda" ]
 test-helpers = [ "mock" ]
-dev-network = [ "snarkvm/dev_genesis_state_root" ]
+dev-network = [ "snarkvm/dev-network" ]
 # See `cli/Cargo.toml`.
-dev-committee-override = [ "snarkvm/dev-committee" ]
+dev-committee-override = [ "snarkvm/dev-committee-override" ]
 
 [dependencies.anyhow]
 workspace = true

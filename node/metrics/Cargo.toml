@@ -21,7 +21,7 @@ default = [ "metrics" ]
 metrics = [ "snarkvm/metrics" ]
 
 [dependencies.metrics-exporter-prometheus]
-version = "0.13"
+version = "0.18"
 default-features = false
 features = [ "http-listener" ]
 
