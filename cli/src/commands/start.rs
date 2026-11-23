@@ -404,12 +404,18 @@ pub struct Start {
 impl Start {
     /// Parses and deduplicates the programs selected for finalize history recording.
     fn parse_history_programs<N: Network>(&self, node_type: NodeType) -> Result<Vec<ProgramID<N>>> {
-        if self.history_programs.is_empty() && !self.archival && !self.allow_history_change {
+        if self.allow_history_change {
+            ensure!(
+                matches!(node_type, NodeType::Client | NodeType::Validator),
+                "`--allow-history-change` is only supported on a client or validator"
+            );
+        }
+        if self.history_programs.is_empty() && !self.archival {
             return Ok(Vec::new());
         }
         ensure!(
             matches!(node_type, NodeType::Client),
-            "`--history-programs`, `--archival`, and `--allow-history-change` are only supported on a client"
+            "`--history-programs` and `--archival` are only supported on a client"
         );
 
         let mut programs = Vec::new();
@@ -1035,7 +1041,7 @@ impl Start {
 
         // Initialize the node.
         let node = match node_type {
-            NodeType::Validator => Node::new_validator(node_ip, self.bft, rest_ip, self.rest_rps, rest_verification_limits, history_api_url.clone(), self.history_json, account, &trusted_peers, &trusted_validators, genesis, cdn, storage_mode, node_data_dir, self.trusted_peers_only, self.auto_db_checkpoints.clone(), dev_txs, self.dev, dev_hotswap_config, self.proposal_spent_limit_multiplier, signal_handler.clone()).await,
+            NodeType::Validator => Node::new_validator(node_ip, self.bft, rest_ip, self.rest_rps, rest_verification_limits, history_api_url.clone(), self.history_json, self.allow_history_change, account, &trusted_peers, &trusted_validators, genesis, cdn, storage_mode, node_data_dir, self.trusted_peers_only, self.auto_db_checkpoints.clone(), dev_txs, self.dev, dev_hotswap_config, self.proposal_spent_limit_multiplier, signal_handler.clone()).await,
             NodeType::Prover => Node::new_prover(node_ip, account, &trusted_peers, genesis, node_data_dir, self.trusted_peers_only, self.dev, signal_handler.clone()).await,
             NodeType::Client => Node::new_client(node_ip, rest_ip, self.rest_rps, rest_verification_limits, history_api_url.clone(), self.history_json, history_programs, self.archival, self.allow_history_change, account, &trusted_peers, genesis, cdn, storage_mode, node_data_dir, self.trusted_peers_only, self.auto_db_checkpoints.clone(), self.dev, signal_handler.clone()).await,
             NodeType::BootstrapClient => Node::new_bootstrap_client(node_ip, account, *genesis.header(), genesis.hash(), self.dev).await,
@@ -1665,11 +1671,13 @@ mod tests {
     }
 
     #[test]
-    fn allow_history_change_flag_requires_client() {
+    fn allow_history_change_flag_requires_ledger_writer() {
         let client = Start::try_parse_from(["snarkos", "--client", "--allow-history-change"]).unwrap();
         assert!(client.allow_history_change);
         let validator = Start::try_parse_from(["snarkos", "--validator", "--allow-history-change"]).unwrap();
-        assert!(validator.parse_history_programs::<MainnetV0>(NodeType::Validator).is_err());
+        assert!(validator.parse_history_programs::<MainnetV0>(NodeType::Validator).is_ok());
+        let prover = Start::try_parse_from(["snarkos", "--prover", "--allow-history-change"]).unwrap();
+        assert!(prover.parse_history_programs::<MainnetV0>(NodeType::Prover).is_err());
     }
 
     #[test]

@@ -118,6 +118,47 @@ where
     Ok(if s.trim().is_empty() { Vec::new() } else { s.split(',').map(|x| x.trim().to_string()).collect() })
 }
 
+/// Splits historical key lists at commas outside composite plaintext values.
+fn de_historical_keys<'de, D>(de: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let input = String::deserialize(de)?;
+    if input.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut keys = Vec::new();
+    let mut depth = 0isize;
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut start = 0;
+    for (index, character) in input.char_indices() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                quoted = false;
+            }
+            continue;
+        }
+        match character {
+            '"' => quoted = true,
+            '[' | '{' | '(' => depth += 1,
+            ']' | '}' | ')' => depth -= 1,
+            ',' if depth == 0 => {
+                keys.push(input[start..index].trim().to_string());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    keys.push(input[start..].trim().to_string());
+    Ok(keys)
+}
+
 /// The query object for the routes serving a range of block heights.
 #[derive(Copy, Clone, Deserialize, Serialize)]
 pub(crate) struct BlockRange {
@@ -264,7 +305,7 @@ fn history_compat_mapping<N: Network>(
 /// The query object for `get_history_batch_compat`.
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct HistoricalKeys {
-    #[serde(deserialize_with = "de_csv")]
+    #[serde(deserialize_with = "de_historical_keys")]
     keys: Vec<String>,
 }
 

@@ -31,6 +31,7 @@ These modes are mutually exclusive. Both work without `--history-json` and can b
 Neither can be combined with `--history-compat-mode`.
 The ledger stores the recording mode and selected programs. You can add coverage on restart.
 To stop recording previously covered programs, restart with `--allow-history-change`.
+The same flag is required to start a validator on a ledger that has recorded mapping history.
 The node rejects a coverage drop without that flag. It warns about changed settings and when new coverage begins.
 Existing ranges remain available. Missing blocks are not backfilled.
 

@@ -1548,6 +1548,18 @@ mod route_tests {
         assert_eq!(body.unwrap(), built);
     }
 
+    #[tokio::test]
+    async fn program_history_batch_accepts_composite_keys() {
+        let rest = sample_rest().await;
+        let (status, body) = get(
+            &rest,
+            "/program/credits.aleo/mapping/bonded/history/0?keys=%5B1u8%2C%202u8%5D%2C%7Bfirst%3A%201u8%2C%20second%3A%202u8%7D",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(body.contains("No program history"), "{body}");
+    }
+
     /// The routes of the removed `history` feature, in history compatibility mode.
     mod history_compat {
         use super::*;
