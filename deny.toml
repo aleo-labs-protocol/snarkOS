@@ -3,6 +3,8 @@ all-features = true
 
 [advisories]
 version = 2
+# A yanked crate is an error, so bump-advisories.yml updates it, or opens an issue if it cannot.
+yanked = "deny"
 ignore = [
   # As the rust community considers the paste crate 'done', we can safely ignore this warning.
   # see https://users.rust-lang.org/t/paste-alternatives/126787/2
