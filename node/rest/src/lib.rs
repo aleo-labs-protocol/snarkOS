@@ -869,6 +869,7 @@ mod route_tests {
         .await
         .expect("the ledger task panicked")
         .expect("couldn't load the test ledger");
+
         sample_rest_with(ledger).await
     }
 
