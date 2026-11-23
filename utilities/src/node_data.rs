@@ -32,7 +32,6 @@ pub const CURRENT_PROPOSAL_CACHE_FILE: &str = "current-proposal-cache";
 pub const REQUIRED_CONSENSUS_UPGRADE_FILE: &str = "required-consensus-upgrade";
 
 /// The filename used to persist the hotswapped dev committee's starting round.
-#[cfg(feature = "dev-network")]
 pub const DEV_COMMITTEE_STATE_FILE: &str = "dev-committee-state";
 
 /// The filename of the JWT secret for a given address.
@@ -105,7 +104,6 @@ impl NodeDataDir {
     }
 
     /// The location used to persist the hotswapped dev committee's starting round.
-    #[cfg(feature = "dev-network")]
     pub fn dev_committee_state_path(&self) -> PathBuf {
         self.path.join(DEV_COMMITTEE_STATE_FILE)
     }

@@ -578,10 +578,13 @@ impl<N: Network> Storage<N> {
                 bail!("Missing certificates for the previous round {previous_round} in storage {gc_log}")
             }
             // Ensure the number of previous certificate IDs is at or below the number of committee members.
-            // As for the `dev-network` clause, a more robust approach would be to set the
-            // previous_committee_lookback appropriately when dev-on-prod is activated, or to only skip this
-            // check right at the hotswap height.
-            if !cfg!(feature = "dev-network")
+            // Skipped under a dev committee: its first rounds reference the real committee's
+            // certificates, which can outnumber it.
+            #[cfg(feature = "dev-committee-override")]
+            let under_dev_committee = self.ledger.dev_committee_for_round(previous_round)?.is_some();
+            #[cfg(not(feature = "dev-committee-override"))]
+            let under_dev_committee = false;
+            if !under_dev_committee
                 && batch_header.previous_certificate_ids().len() > previous_committee_lookback.num_members()
             {
                 bail!("Too many previous certificates for round {round} {gc_log}")

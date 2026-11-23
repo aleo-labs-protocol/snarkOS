@@ -802,8 +802,10 @@ impl Start {
             println!("{}", crate::helpers::welcome_message());
         }
 
-        // Only allow dev mode if we built with the 'dev-network' feature.
-        if self.dev.is_some() && cfg!(not(feature = "dev-network")) {
+        if self.dev_on_prod {
+            ensure!(cfg!(feature = "dev-committee-override"), "The 'dev-on-prod' flag is set, but the 'dev-committee-override' feature is not enabled");
+            ensure!(cfg!(not(feature = "dev-network")), "The 'dev-on-prod' flag needs production network parameters, so a build with the 'dev-network' feature rejects it");
+        } else if self.dev.is_some() && cfg!(not(feature = "dev-network")) {
             bail!("The 'dev' flag is set, but the 'dev-network' feature is not enabled");
         }
 

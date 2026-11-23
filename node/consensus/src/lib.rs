@@ -686,7 +686,7 @@ impl<N: Network> Consensus<N> {
 
             let check_instant = std::time::Instant::now();
             cfg_if! {
-                if #[cfg(feature = "dev-network")] {
+                if #[cfg(feature = "dev-committee-override")] {
                     // If we are using a hotswapped dev committee, skip checking the block.
                     let result = if self.ledger.dev_committee_for_round(block.round())?.is_some() {
                         Ok(block)

@@ -624,6 +624,9 @@ cargo run --release -- clean --dev <NODE_ID>
 * **dev-network** -
   Builds a node for a local development network and allows the `--dev` flag. Never enable it to join
   a public network, including testnet. The feature's comment in `cli/Cargo.toml` says what it changes.
+* **dev-committee-override** -
+  Allows `--dev --dev-on-prod`, which runs dev validators on a copy of a real ledger. Never enable it
+  to join a public network. The feature's comment in `cli/Cargo.toml` says what it changes.
 
 ### Lock instrumentation
 

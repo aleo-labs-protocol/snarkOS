@@ -18,7 +18,6 @@ edition = "2024"
 
 [features]
 test-helpers = [ ]
-dev-network = [ ]
 
 [dependencies.anyhow]
 workspace = true

@@ -39,7 +39,13 @@ cuda = [
   "snarkos-node-sync/cuda"
 ]
 test-helpers = []
-dev-network = [ "snarkos-node-bft/dev-network", "snarkos-node-consensus/dev-network", "snarkos-utilities/dev-network" ]
+dev-network = [ "snarkos-node-bft/dev-network", "snarkos-node-consensus/dev-network" ]
+# See `cli/Cargo.toml`.
+dev-committee-override = [
+  "snarkvm/dev-committee",
+  "snarkos-node-bft/dev-committee-override",
+  "snarkos-node-consensus/dev-committee-override"
+]
 
 [dependencies.anyhow]
 workspace = true
