@@ -100,7 +100,7 @@ pub struct Developer {
     #[clap(subcommand)]
     command: DeveloperCommand,
     /// Specify the network to create an execution for.
-    /// [options: 0 = mainnet, 1 = testnet, 2 = canary]
+    /// [options: 0 = mainnet, 1 = testnet]
     #[clap(long, default_value_t=MainnetV0::ID, long, global=true, value_parser = network_id_parser())]
     network: u16,
     /// Sets verbosity of log output. By default, no logs are shown.
@@ -148,7 +148,6 @@ impl Developer {
         match self.network {
             MainnetV0::ID => self.parse_inner::<MainnetV0>(),
             TestnetV0::ID => self.parse_inner::<TestnetV0>(),
-            CanaryV0::ID => self.parse_inner::<CanaryV0>(),
             unknown_id => bail!("Unknown network ID ({unknown_id})"),
         }
     }

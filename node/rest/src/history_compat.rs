@@ -103,8 +103,7 @@
 //!
 //! An unknown mapping name is also a 500, with a body listing the valid names. The root path and
 //! unfilled placeholders are an empty 404. There is one instance per network
-//! (`https://{network}.historical-staking.provable.com`); mainnet and testnet resolve, canary does
-//! not.
+//! (`https://{network}.historical-staking.provable.com`).
 //!
 //! Sizes at mainnet block 1,000,000: `unbonding` 437 B, `stakingrewards` 24 KB, `bonded` 31 KB,
 //! answered in 0.1-0.3 s. The whole mapping is fetched to answer a single key, so snapshots are

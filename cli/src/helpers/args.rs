@@ -18,7 +18,7 @@ use crate::{commands::ApiVersion, helpers::dev::get_development_key};
 use snarkos_utilities::NodeDataDir;
 
 use snarkvm::{
-    console::network::{CanaryV0, MainnetV0},
+    console::network::{MainnetV0, TestnetV0},
     ledger::store::aleo_dir,
     prelude::{Network, PrivateKey},
 };
@@ -30,7 +30,7 @@ use std::{path::PathBuf, str::FromStr};
 use ureq::http::{Uri, uri};
 
 pub(crate) fn network_id_parser() -> RangedU64ValueParser<u16> {
-    RangedU64ValueParser::<u16>::new().range((MainnetV0::ID as u64)..=(CanaryV0::ID as u64))
+    RangedU64ValueParser::<u16>::new().range((MainnetV0::ID as u64)..=(TestnetV0::ID as u64))
 }
 
 /// Make sure a proper scheme (http or https) is set for the endpoint, and that it names an API

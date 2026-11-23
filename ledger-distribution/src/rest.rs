@@ -45,7 +45,6 @@ async fn start_rest_server<N: Network>(blocks_bucket: BlocksBucket<N>) {
     let network = match N::ID {
         MainnetV0::ID => "mainnet",
         TestnetV0::ID => "testnet",
-        CanaryV0::ID => "canary",
         unknown_id => {
             eprintln!("Unknown network ID ({unknown_id})");
             return;

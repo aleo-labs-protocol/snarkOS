@@ -18,7 +18,7 @@ use crate::helpers::args::parse_node_data_dir;
 use snarkos_utilities::NodeDataDir;
 
 use snarkvm::{
-    console::network::{CanaryV0, MainnetV0, Network, TestnetV0},
+    console::network::{MainnetV0, Network, TestnetV0},
     ledger::store::{StorageMode, aleo_ledger_dir},
 };
 
@@ -30,8 +30,8 @@ use std::path::PathBuf;
 /// Cleans the snarkOS node storage.
 #[derive(Debug, Parser)]
 pub struct Clean {
-    /// Specify the network to remove from storage (0 = mainnet, 1 = testnet, 2 = canary)
-    #[clap(default_value_t=MainnetV0::ID, long = "network", value_parser = clap::value_parser!(u16).range((MainnetV0::ID as i64)..=(CanaryV0::ID as i64)))]
+    /// Specify the network to remove from storage (0 = mainnet, 1 = testnet)
+    #[clap(default_value_t=MainnetV0::ID, long = "network", value_parser = clap::value_parser!(u16).range((MainnetV0::ID as i64)..=(TestnetV0::ID as i64)))]
     pub network: u16,
 
     /// Enables development mode, specify the unique ID of the local node to clean.
@@ -136,7 +136,6 @@ impl Clean {
         match self.network {
             MainnetV0::ID => Self::delete_network::<MainnetV0>(&storage_mode)?,
             TestnetV0::ID => Self::delete_network::<TestnetV0>(&storage_mode)?,
-            CanaryV0::ID => Self::delete_network::<CanaryV0>(&storage_mode)?,
             id => bail!("Unsupported network id {id}"),
         }
         Ok(format!("✅ Removed legacy mapping history {path_string}"))
