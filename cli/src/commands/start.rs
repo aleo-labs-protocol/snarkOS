@@ -1443,6 +1443,8 @@ mod tests {
         Ok(())
     }
 
+    // A `dev-network` build rejects the production genesis block, which this test parses.
+    #[cfg(not(feature = "dev-network"))]
     #[test]
     fn test_parse_development_and_genesis() {
         let prod_genesis = Block::from_bytes_le(CurrentNetwork::genesis_bytes()).unwrap();
