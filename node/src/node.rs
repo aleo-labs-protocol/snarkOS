@@ -308,6 +308,38 @@ impl<N: Network> Node<N> {
         }
     }
 
+    /// Marks the given listener address as a trusted peer of the router.
+    /// A bootstrap client does not use trusted peers, so it ignores the address.
+    pub fn add_trusted_peer(&self, listener_addr: SocketAddr) {
+        match self {
+            Self::Validator(validator) => validator.router().add_trusted_peer(listener_addr),
+            Self::Prover(prover) => prover.router().add_trusted_peer(listener_addr),
+            Self::Client(client) => client.router().add_trusted_peer(listener_addr),
+            Self::BootstrapClient(_) => {}
+        }
+    }
+
+    /// Marks the given listener address as a trusted validator.
+    /// Only a validator connects to other validators, so other node types ignore the address.
+    pub fn add_trusted_validator(&self, listener_addr: SocketAddr) {
+        if let Self::Validator(validator) = self {
+            validator.add_trusted_validator(listener_addr);
+        }
+    }
+
+    /// Spawns a long-running task, which the node aborts when it shuts down.
+    /// A bootstrap client does not track its tasks, so the task runs until the process exits.
+    pub fn spawn<T: Future<Output = ()> + Send + 'static>(&self, future: T) {
+        match self {
+            Self::Validator(validator) => validator.spawn(future),
+            Self::Prover(prover) => prover.router().spawn(future),
+            Self::Client(client) => client.spawn(future),
+            Self::BootstrapClient(_) => {
+                tokio::spawn(future);
+            }
+        }
+    }
+
     /// Get the underlying ledger (if any).
     pub fn ledger(&self) -> Option<&Ledger<N, ConsensusDB<N>>> {
         match self {

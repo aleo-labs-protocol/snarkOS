@@ -307,6 +307,16 @@ pub trait PeerPoolHandling<N: Network>: P2P {
         }
     }
 
+    /// Marks the given listener address as trusted.
+    /// If the peer pool does not contain it, it is added as a candidate peer.
+    fn add_trusted_peer(&self, listener_addr: SocketAddr) {
+        self.peer_pool()
+            .write()
+            .entry(listener_addr)
+            .or_insert_with(|| Peer::new_candidate(listener_addr, true))
+            .set_trusted();
+    }
+
     /// Completely removes an entry from the peer pool.
     fn remove_peer(&self, listener_addr: SocketAddr) {
         self.peer_pool().write().remove(&listener_addr);
@@ -761,6 +771,28 @@ mod tests {
         assert!(!pool.is_connecting(listener_addr));
         assert_eq!(pool.number_of_candidate_peers(), 1);
         let _connecting = pool.add_connecting_peer(listener_addr).unwrap();
+    }
+
+    #[test]
+    fn test_add_trusted_peer() {
+        let pool = MockPeerPool::<CurrentNetwork>::new();
+        let mut rng = TestRng::default();
+
+        // A new address becomes a trusted candidate.
+        let new_addr = SocketAddr::from(([192, 0, 2, 1], 4000));
+        pool.add_trusted_peer(new_addr);
+        assert_eq!(pool.number_of_candidate_peers(), 1);
+        assert_eq!(pool.get_trusted_candidate_peers().len(), 1);
+        assert!(pool.is_trusted(new_addr));
+
+        // A known untrusted peer keeps its state and becomes trusted.
+        let (connected_addr, connected_peer) = make_connected_peer(4001, NodeType::Validator, &mut rng);
+        pool.peer_pool().write().insert(connected_addr, connected_peer);
+        assert!(!pool.is_trusted(connected_addr));
+        pool.add_trusted_peer(connected_addr);
+        assert!(pool.is_connected(connected_addr));
+        assert!(pool.is_trusted(connected_addr));
+        assert_eq!(pool.number_of_peers(), 2);
     }
 
     #[test]
