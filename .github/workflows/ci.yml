@@ -139,9 +139,13 @@ jobs:
       - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with: { tool: cargo-deny@0.20.2 }
       - run: cargo deny --workspace check bans licenses sources
-      # Only scheduled runs check advisories. bump-advisories.yml updates
-      # Cargo.lock past them nightly.
-      - if: github.event_name == 'schedule'
+      # Only scheduled and release runs check advisories. bump-advisories.yml
+      # updates staging's Cargo.lock past them nightly.
+      - if: >-
+          github.event_name == 'schedule' ||
+          github.event_name == 'workflow_dispatch' ||
+          startsWith(github.ref, 'refs/heads/release/') ||
+          startsWith(github.base_ref, 'release/')
         run: cargo deny --workspace check advisories
 
   shellcheck:
