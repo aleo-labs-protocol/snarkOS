@@ -317,7 +317,7 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
             Err(err) => {
                 error!("Block synchronization failed - {err}");
                 if let AdvanceBlockSyncError::InvalidBlock { peer_ip, .. } = err {
-                    self.router().ip_ban_peer(peer_ip, Some("sent an invalid block"));
+                    self.router().ip_ban_peer(peer_ip, Some(&err.to_string()));
                 }
                 return;
             }

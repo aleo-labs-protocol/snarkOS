@@ -46,9 +46,9 @@ pub struct MockLedgerService<N: Network> {
     /// The transmission IDs for which the containment check returns an error, as a failed ledger read would.
     unreadable_transmission_ids: HashSet<TransmissionID<N>>,
     /// The hashes of the blocks that `check_next_block` accepts.
-    valid_block_hashes: Mutex<HashSet<N::BlockHash>>,
+    valid_block_hashes: HashSet<N::BlockHash>,
     /// The hashes of the blocks for which `check_next_block` returns an error, as a failed ledger read would.
-    unreadable_block_hashes: Mutex<HashSet<N::BlockHash>>,
+    unreadable_block_hashes: HashSet<N::BlockHash>,
 }
 
 impl<N: Network> MockLedgerService<N> {
@@ -62,16 +62,6 @@ impl<N: Network> MockLedgerService<N> {
             valid_block_hashes: Default::default(),
             unreadable_block_hashes: Default::default(),
         }
-    }
-
-    /// Makes `check_next_block` accept the block with the given hash at the next height.
-    pub fn mark_block_valid(&self, hash: N::BlockHash) {
-        self.valid_block_hashes.lock().insert(hash);
-    }
-
-    /// Makes `check_next_block` fail for the block with the given hash, as a failed ledger read would.
-    pub fn mark_block_unreadable(&self, hash: N::BlockHash) {
-        self.unreadable_block_hashes.lock().insert(hash);
     }
 
     /// Initializes a new mock ledger service at the specified height.
@@ -90,6 +80,18 @@ impl<N: Network> MockLedgerService<N> {
         known_transmission_ids: HashSet<TransmissionID<N>>,
     ) -> Self {
         Self { known_transmission_ids, ..Self::new(committee) }
+    }
+
+    /// Makes `check_next_block` accept the blocks with the given hashes.
+    pub fn with_valid_block_hashes(mut self, hashes: impl IntoIterator<Item = N::BlockHash>) -> Self {
+        self.valid_block_hashes.extend(hashes);
+        self
+    }
+
+    /// Makes `check_next_block` fail for the blocks with the given hashes, as a failed ledger read would.
+    pub fn with_unreadable_block_hashes(mut self, hashes: impl IntoIterator<Item = N::BlockHash>) -> Self {
+        self.unreadable_block_hashes.extend(hashes);
+        self
     }
 
     /// Makes the containment check fail for the given transmission IDs.
@@ -294,12 +296,8 @@ impl<N: Network> LedgerService<N> for MockLedgerService<N> {
     }
 }
 
-/// A ledger update on a [`MockLedgerService`].
-///
-/// `check_next_block` checks in the order of `Ledger::check_next_block` for a block whose subDAG
-/// checks pass, as a Beacon block's do: known hash, height, validity, then round. A block not
-/// marked valid fails with `VerificationFailed`, or with `InvalidRound` if its round does not
-/// exceed the latest block's round.
+/// A ledger update on a [`MockLedgerService`]. `check_next_block` accepts only the blocks marked
+/// valid, and checks the round before it rejects a block, as `Ledger::check_next_block` does.
 struct MockLedgerUpdate<'a, N: Network> {
     ledger: &'a MockLedgerService<N>,
 }
@@ -318,23 +316,13 @@ impl<N: Network> LedgerUpdateService<N> for MockLedgerUpdate<'_, N> {
     }
 
     fn check_next_block(&self, block: Block<N>) -> Result<Block<N>, CheckBlockError<N>> {
-        let (latest_height, latest_round, known) = {
-            let blocks = self.ledger.height_to_round_and_hash.lock();
-            let (height, (round, _)) = blocks.last_key_value().map(|(h, r)| (*h, *r)).unwrap_or_default();
-            (height, round, blocks.values().any(|(_, hash)| *hash == block.hash()))
-        };
-        if known {
-            return Err(CheckBlockError::BlockAlreadyExists { hash: block.hash() });
-        }
-        if block.height() != latest_height + 1 {
-            return Err(CheckBlockError::InvalidHeight { expected: latest_height + 1, actual: block.height() });
-        }
-        if self.ledger.unreadable_block_hashes.lock().contains(&block.hash()) {
+        if self.ledger.unreadable_block_hashes.contains(&block.hash()) {
             return Err(CheckBlockError::Other(anyhow::anyhow!("failed ledger read")));
         }
-        if self.ledger.valid_block_hashes.lock().contains(&block.hash()) {
+        if self.ledger.valid_block_hashes.contains(&block.hash()) {
             return Ok(block);
         }
+        let latest_round = self.ledger.get_block_round(self.ledger.latest_block_height())?;
         if block.round() <= latest_round {
             return Err(CheckBlockError::InvalidRound { new: block.round(), previous: latest_round });
         }

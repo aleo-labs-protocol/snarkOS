@@ -108,11 +108,9 @@ type FailedRequests<H> = BTreeMap<u32, (Option<H>, Option<H>)>;
 struct OutstandingRequest<N: Network> {
     request: SyncRequest<N>,
     timestamp: Instant,
-    /// The corresponding response (if any).
+    /// The corresponding response (if any), and the peer that sent it.
     /// This is guaranteed to be Some if sync_ips for the given request are empty.
-    response: Option<Block<N>>,
-    /// The peer that sent `response`.
-    responder: Option<SocketAddr>,
+    response: Option<(Block<N>, SocketAddr)>,
 }
 
 /// A peer's block locators, and which of the blocks they advertise it serves.
@@ -897,6 +895,11 @@ impl<N: Network> BlockSync<N> {
     /// or `None` otherwise. This does not remove the block from the `responses` map.
     #[inline]
     pub fn peek_next_block(&self, next_height: u32) -> Option<Block<N>> {
+        self.peek_next_response(next_height).map(|(block, _)| block)
+    }
+
+    /// Returns the next block (see [`Self::peek_next_block`]) and the peer that sent it.
+    fn peek_next_response(&self, next_height: u32) -> Option<(Block<N>, SocketAddr)> {
         // Determine if the request is complete:
         // either there is no request for `next_height`, or the request has no peer socket addresses left.
         if let Some(entry) = self.requests.read().get(&next_height) {
@@ -950,7 +953,7 @@ impl<N: Network> BlockSync<N> {
         loop {
             let next_height = current_height + 1;
 
-            let Some(block) = self.peek_next_block(next_height) else {
+            let Some((block, peer_ip)) = self.peek_next_response(next_height) else {
                 break;
             };
 
@@ -962,7 +965,6 @@ impl<N: Network> BlockSync<N> {
 
             let ledger = self.ledger.clone();
 
-            // The error is paired with whether the ledger rejected the block.
             let result = tokio::task::spawn_blocking(move || {
                 let ledger_update = match ledger.begin_ledger_update() {
                     Ok(update) => update,
@@ -971,58 +973,47 @@ impl<N: Network> BlockSync<N> {
                         return Ok((false, true));
                     }
                     Err(err) => {
-                        return Err((anyhow!("Unexpected error when beginning ledger update: {err}"), false));
+                        return Err(anyhow!("Unexpected error when beginning ledger update: {err}").into());
                     }
                 };
+
+                if ledger.latest_block_height() >= next_height {
+                    debug!("Skipping a block at height {next_height}. The ledger already advanced",);
+                    return Ok((false, false));
+                }
 
                 // Try to check the next block and advance to it.
-                let block = match ledger_update.check_next_block(block) {
-                    Ok(block) => block,
-                    // These errors mean that the ledger already advanced only if its height shows it.
-                    // Otherwise the block is invalid: a peer can pick a round that fails this way.
-                    Err(
-                        CheckBlockError::InvalidHeight { .. }
-                        | CheckBlockError::BlockAlreadyExists { .. }
-                        | CheckBlockError::InvalidRound { .. },
-                    ) if ledger.latest_block_height() >= next_height => {
-                        debug!("Skipping a block at height {next_height}. The ledger already advanced",);
-                        return Ok((false, false));
-                    }
+                let block = ledger_update.check_next_block(block).map_err(|err| match err {
                     // This error is not specific to the block, e.g. a failed ledger read.
-                    Err(CheckBlockError::Other(err)) => return Err((err, false)),
-                    Err(err) => return Err((err.into_anyhow(), true)),
-                };
+                    CheckBlockError::Other(error) => AdvanceBlockSyncError::Other(error),
+                    err => {
+                        AdvanceBlockSyncError::InvalidBlock { height: next_height, peer_ip, error: err.into_anyhow() }
+                    }
+                })?;
 
-                ledger_update
-                    .advance_to_next_block(&block)
-                    .with_context(|| {
-                        format!(
-                            "Failed to advance to next block (height: {height}, hash: {hash})",
-                            height = block.height(),
-                            hash = block.hash(),
-                        )
-                    })
-                    .map_err(|err| (err, false))?;
+                ledger_update.advance_to_next_block(&block).with_context(|| {
+                    format!(
+                        "Failed to advance to next block (height: {height}, hash: {hash})",
+                        height = block.height(),
+                        hash = block.hash(),
+                    )
+                })?;
 
                 Ok((true, false))
             })
             .await
-            .unwrap_or_else(|err| Err((anyhow!("Failed to check the block at height {next_height}: {err}"), false)));
+            .unwrap_or_else(|err| Err(anyhow!("Failed to check the block at height {next_height}: {err}").into()));
 
             let (advanced, stop) = match result {
                 Ok(outcome) => outcome,
-                Err((error, is_invalid)) => {
+                Err(error) => {
                     warn!("{error}");
-                    let responder = self.requests.read().get(&next_height).and_then(|request| request.responder);
                     self.remove_block_response(next_height);
-                    return Err(match responder.filter(|_| is_invalid) {
-                        Some(peer_ip) => {
-                            self.remove_peer(&peer_ip);
-                            self.remove_block_responses_from(peer_ip);
-                            AdvanceBlockSyncError::InvalidBlock { height: next_height, peer_ip, error }
-                        }
-                        None => AdvanceBlockSyncError::Other(error),
-                    });
+                    if let AdvanceBlockSyncError::InvalidBlock { peer_ip, .. } = &error {
+                        self.remove_peer(peer_ip);
+                        self.remove_block_responses_from(*peer_ip);
+                    }
+                    return Err(error);
                 }
             };
 
@@ -1615,7 +1606,6 @@ impl<N: Network> BlockSync<N> {
             request: (hash, previous_hash, sync_ips),
             timestamp: Instant::now(),
             response: None,
-            responder: None,
         });
         Ok(())
     }
@@ -1669,14 +1659,13 @@ impl<N: Network> BlockSync<N> {
         // Remove the peer IP from the request entry.
         entry.sync_ips_mut().swap_remove(&peer_ip);
 
-        if let Some(existing_block) = &entry.response {
+        if let Some((existing_block, _)) = &entry.response {
             // If the candidate block was already present, ensure it is the same block.
             if block != *existing_block {
                 return Err(InsertBlockResponseError::MalformedBlock { height, peer_ip });
             }
         } else {
-            entry.response = Some(block.clone());
-            entry.responder = Some(peer_ip);
+            entry.response = Some((block.clone(), peer_ip));
         }
 
         trace!("Received a new and valid block response for height {height}");
@@ -1714,10 +1703,9 @@ impl<N: Network> BlockSync<N> {
     }
 
     /// Removes the block responses that `peer_ip` sent and that are not processed yet, with their
-    /// requests.
+    /// requests. The request loop then requests those heights as new requests.
     fn remove_block_responses_from(&self, peer_ip: SocketAddr) {
-        self.requests.write().retain(|_, request| request.response.is_none() || request.responder != Some(peer_ip));
-        // Wake the request loop to request the heights again.
+        self.requests.write().retain(|_, request| !matches!(request.response, Some((_, sender)) if sender == peer_ip));
         self.peer_notify.notify_one();
     }
 
@@ -2785,7 +2773,6 @@ mod tests {
             request: (block_hash, None, [peer_ip].into()),
             timestamp,
             response: None,
-            responder: None,
         });
 
         assert_eq!(sync.requests.read().len(), 1);
@@ -2818,7 +2805,6 @@ mod tests {
             request: (block_hash, None, [peer_ip].into()),
             timestamp,
             response: None,
-            responder: None,
         });
 
         // The peer recently answered a request that was sent after the one above.
@@ -2853,7 +2839,6 @@ mod tests {
             request: (block_hash, None, [peer_ip].into()),
             timestamp,
             response: None,
-            responder: None,
         });
 
         // The peer recently answered a request that was sent before the one above.
@@ -2883,7 +2868,6 @@ mod tests {
             request: (block_hash, None, [peer_ip].into()),
             timestamp,
             response: None,
-            responder: None,
         });
 
         // The peer recently answered a request that was sent after the one above.
@@ -2921,7 +2905,6 @@ mod tests {
             request: (block_hash1, None, [peer_ip1].into()),
             timestamp,
             response: None,
-            responder: None,
         });
 
         // Add a timed-out request
@@ -2929,7 +2912,6 @@ mod tests {
             request: (block_hash2, None, [peer_ip2].into()),
             timestamp: Instant::now(),
             response: None,
-            responder: None,
         });
 
         assert_eq!(sync.requests.read().len(), 2);
@@ -3166,8 +3148,7 @@ mod tests {
             requests.insert(height, OutstandingRequest {
                 request: (None, None, IndexSet::new()),
                 timestamp: Instant::now(),
-                response: Some(genesis.clone()),
-                responder: None,
+                response: Some((genesis.clone(), sample_peer_ip(1))),
             });
         }
     }
@@ -3213,7 +3194,6 @@ mod tests {
                 request: (None, None, indexset![peer_ip]),
                 timestamp,
                 response: None,
-                responder: None,
             });
         }
         fill_response_buffer(&sync, 1_006);
@@ -3483,13 +3463,14 @@ mod tests {
             request: (None, None, sync_ips),
             timestamp: Instant::now(),
             response,
-            responder: None,
         };
 
-        sync.requests.write().insert(6, request(indexset![sample_peer_ip(1)], Some(genesis.clone())));
+        sync.requests
+            .write()
+            .insert(6, request(indexset![sample_peer_ip(1)], Some((genesis.clone(), sample_peer_ip(2)))));
         assert!(is_stuck(&sync));
 
-        sync.requests.write().insert(1, request(IndexSet::new(), Some(genesis)));
+        sync.requests.write().insert(1, request(IndexSet::new(), Some((genesis, sample_peer_ip(2)))));
         assert!(!is_stuck(&sync));
         sync.requests.write().remove(&1);
 
@@ -4103,17 +4084,17 @@ mod tests {
         DataBlocks::<CurrentNetwork>::read_le(&bytes[..]).unwrap().0.pop().unwrap()
     }
 
-    /// Returns a mock ledger at height 1_000, and block sync on it with two peers ahead and block
-    /// responses from the first peer for `blocks`, from height 1_001.
+    /// Returns block sync on `ledger`, with two peers ahead and block responses from the first
+    /// peer for `blocks`, from height 1_001.
     fn sample_sync_with_responses(
+        ledger: MockLedgerService<CurrentNetwork>,
         blocks: Vec<Block<CurrentNetwork>>,
-    ) -> (Arc<MockLedgerService<CurrentNetwork>>, BlockSync<CurrentNetwork>) {
-        let ledger = Arc::new(sample_ledger_service(1_000));
-        let sync = BlockSync::<CurrentNetwork>::new(ledger.clone(), ConnectionMode::Router);
+    ) -> BlockSync<CurrentNetwork> {
+        let sync = BlockSync::<CurrentNetwork>::new(Arc::new(ledger), ConnectionMode::Router);
         add_peers(&sync, 1, 2, 1_200, 0);
         insert_requests_to(&sync, sample_peer_ip(1), 1_001..1_001 + blocks.len() as u32);
         sync.insert_block_responses(sample_peer_ip(1), blocks, None).unwrap();
-        (ledger, sync)
+        sync
     }
 
     /// Tests that a block the ledger rejects is removed with the sender's other blocks, that the
@@ -4124,7 +4105,9 @@ mod tests {
         let (sender, other) = (sample_peer_ip(1), sample_peer_ip(2));
         // The round of the mock ledger's latest block is 2_000.
         let blocks = vec![sample_beacon_block(1_001, 3_000, rng), sample_beacon_block(1_002, 3_002, rng)];
-        let (ledger, sync) = sample_sync_with_responses(blocks);
+        let good = sample_beacon_block(1_001, 2_002, rng);
+        let ledger = sample_ledger_service(1_000).with_valid_block_hashes([good.hash()]);
+        let sync = sample_sync_with_responses(ledger, blocks);
 
         let error = sync.try_advancing_block_synchronization().await.unwrap_err();
         assert!(
@@ -4136,8 +4119,6 @@ mod tests {
         assert!(!sync.locators.read().contains_key(&sender));
 
         assert_eq!(sent_by_request_passes(&sync).await.first(), Some(&(other, 1_001, 1_006)));
-        let good = sample_beacon_block(1_001, 2_002, rng);
-        ledger.mark_block_valid(good.hash());
         sync.insert_block_responses(other, vec![good], None).unwrap();
         assert!(sync.try_advancing_block_synchronization().await.unwrap());
         assert_eq!(sync.ledger.latest_block_height(), 1_001);
@@ -4151,10 +4132,8 @@ mod tests {
         let sender = sample_peer_ip(1);
         let mut blocks = vec![sample_beacon_block(1_001, 1_500, rng)];
         blocks.extend((1_002..1_006).map(|height| sample_beacon_block(height, 2 * height as u64, rng)));
-        let (ledger, sync) = sample_sync_with_responses(blocks.clone());
-        for block in &blocks[1..] {
-            ledger.mark_block_valid(block.hash());
-        }
+        let ledger = sample_ledger_service(1_000).with_valid_block_hashes(blocks[1..].iter().map(|block| block.hash()));
+        let sync = sample_sync_with_responses(ledger, blocks);
         let sync_height = sync.get_sync_height();
 
         let error = sync.try_advancing_block_synchronization().await.unwrap_err();
@@ -4174,8 +4153,8 @@ mod tests {
         let rng = &mut TestRng::default();
         let sender = sample_peer_ip(1);
         let block = sample_beacon_block(1_001, 2_002, rng);
-        let (ledger, sync) = sample_sync_with_responses(vec![block.clone()]);
-        ledger.mark_block_unreadable(block.hash());
+        let ledger = sample_ledger_service(1_000).with_unreadable_block_hashes([block.hash()]);
+        let sync = sample_sync_with_responses(ledger, vec![block]);
 
         let error = sync.try_advancing_block_synchronization().await.unwrap_err();
         assert!(matches!(error, AdvanceBlockSyncError::Other(_)), "{error}");
