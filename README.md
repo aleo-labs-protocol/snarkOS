@@ -339,7 +339,7 @@ SUBCOMMANDS:
 The following are the options for the `snarkos start` command:
 ```
       --network <NETWORK>
-          Specify the network ID of this node [options: 0 = mainnet, 1 = testnet, 2 = canary]
+          Specify the network ID of this node [options: 0 = mainnet, 1 = testnet]
           
           [default: 0]
 
@@ -621,8 +621,12 @@ cargo run --release -- clean --dev <NODE_ID>
   telemetry described in [Validator Telemetry Metrics](#321-validator-telemetry-metrics).
 * **cuda** -
   Allows some operations to run on the (NVidia) GPU, instead of on the CPU. See [CUDA acceleration for provers](#optional-cuda-acceleration-for-provers) for install tips and current puzzle status.
-* **test_targets** -
-  This feature allows the lowering of coinbase and proof targets for testing.
+* **dev-network** -
+  Builds a node for a local development network and allows the `--dev` flag. Never enable it to join
+  a public network, including testnet. The feature's comment in `cli/Cargo.toml` says what it changes.
+* **dev-committee-override** -
+  Allows `--dev --dev-on-prod`, which runs dev validators on a copy of a real ledger. Never enable it
+  to join a public network. The feature's comment in `cli/Cargo.toml` says what it changes.
 
 ### Lock instrumentation
 

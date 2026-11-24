@@ -57,8 +57,8 @@ jobs:
           gcloud storage cp gs://ci_testdata/sync-ledger-val40-250-9ec2291c57.zip ledger.zip
           unzip ledger.zip
  
-      - name: Install snarkOS (test_network)
-        run: cargo install --path=. --locked --features=test_network
+      - name: Install snarkOS (dev-network)
+        run: cargo install --path=. --locked --features=dev-network
 
       # Download previous benchmark result from cache (if exists)
       - name: Download previous benchmark data

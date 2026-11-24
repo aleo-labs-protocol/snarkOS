@@ -136,7 +136,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with: { tool: cargo-deny@0.20.2 }
       - run: cargo deny --workspace check bans licenses sources
       # staging's advisories are bumped nightly by bump-advisories.yml, which
@@ -220,14 +220,15 @@ jobs:
         run: cargo locktick-clippy -q -p snarkos-utilities --message-format=json | grep '"name":"locktick"' > /dev/null
       - run: cargo locktick-clippy --workspace --all-targets --all-features -- -D warnings
 
-  # Each line of `runs` is one build. `cargo test -p a -p b` unifies the
-  # features of a and b, and several crates enable features on their
-  # dependencies that change what those dependencies do:
-  # `snarkos-node-router/test-helpers`, `snarkos-node-network/test-helpers` and
-  # `snarkvm-ledger-block/test` skip checks, and `rocks` and `metrics` select
-  # other code paths. Crates share a line only where that unification enables
-  # none of these on any crate. Other helper features, such as `mock` and the
-  # other crates' `test-helpers`, can still be unified.
+  # Each line of `runs` is one cargo command. Lines with the same `-p` set and
+  # cargo flags share one build; nextest's `-E` and `--no-tests` are not cargo
+  # flags. `cargo test -p a -p b` unifies the features of a and b, and several
+  # crates enable features on their dependencies that change what those
+  # dependencies do: `snarkos-node-router/test-helpers` and
+  # `snarkos-node-network/test-helpers` skip checks, and `rocks` and `metrics`
+  # select other code paths. Crates share a line only where that unification
+  # enables none of these on any crate. Other helper features, such as `mock`
+  # and the other crates' `test-helpers`, can still be unified.
   #
   # Cheap entries run on free hosted runners and do not wait for the fleet.
   test-hosted:
@@ -279,7 +280,7 @@ jobs:
         with: &aleo-resources
           path: ~/.aleo/resources
           key: aleo-resources-${{ matrix.name }}-${{ hashFiles('Cargo.lock') }}
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with: { tool: cargo-nextest@0.9.114 }
       # Each line of `runs` is one cargo command, split on whitespace with no
       # shell parsing, so its arguments can hold neither quotes nor spaces.
@@ -327,11 +328,16 @@ jobs:
       matrix:
         include:
           - name: services
+            runs: nextest run -p snarkos-node-consensus -p snarkos-cli
+          # Both lines name the same packages, so they share one build, and the
+          # filters split the run in two. A package named in `-p` but in neither
+          # filter is built and never tested. `--no-tests=fail` makes a filter
+          # that stops matching fail. Builds RocksDB, whose bindings need
+          # libclang, which hosted runners lack.
+          - name: node-rest-distribution
             runs: |
-              nextest run -p snarkos-node-consensus -p snarkos-cli
-              nextest run -p snarkos-node-rest
-          - name: node
-            runs: nextest run -p snarkos-node -p snarkos-node-bft-storage-service
+              nextest run -p snarkos-node -p snarkos-node-bft-storage-service -p snarkos-node-rest -p snarkos-ledger-distribution -E package(=snarkos-node)|package(=snarkos-node-bft-storage-service) --no-tests=fail
+              nextest run -p snarkos-node -p snarkos-node-bft-storage-service -p snarkos-node-rest -p snarkos-ledger-distribution -E package(=snarkos-node-rest)|package(=snarkos-ledger-distribution) --no-tests=fail
           # Both lines use `metrics`, which the `snarkos` binary enables by
           # default. `helpers::telemetry` compiles only under it, and a line
           # without it rebuilds the snarkvm and bft crates. nextest skips the
@@ -349,9 +355,6 @@ jobs:
             runs: |
               nextest run -p snarkos-node-router
               nextest run -p snarkos-node-sync
-          # Builds RocksDB, whose bindings need libclang, which hosted runners lack.
-          - name: ledger-distribution
-            runs: nextest run -p snarkos-ledger-distribution
     name: test (${{ matrix.name }})
     steps: *test-steps
 
@@ -368,7 +371,7 @@ jobs:
       - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
       # The same profile as `ci_cargo_install_snarkos` in .ci/utils.sh, which
       # the upgrade tests build the latest release with.
-      - run: cargo build --release --locked --features test_network
+      - run: cargo build --release --locked --features dev-network
         env:
           CARGO_PROFILE_RELEASE_LTO: "off"
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
@@ -458,9 +461,16 @@ jobs:
       matrix:
         name: [dev-on-prod-restart, chaotic-minority-reset, chaotic-majority-restart, upgrade]
         include:
+          # `--dev-on-prod` needs production network parameters, so it runs
+          # a binary of its own, built without `dev-network`.
           - name: dev-on-prod-restart
-            timeout: 45
-            runs: ./.ci/test_dev_on_prod_restart.sh
+            timeout: 90
+            runs: |
+              CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
+              CARGO_PROFILE_RELEASE_OPT_LEVEL=2 CARGO_PROFILE_RELEASE_DEBUG=0 \
+                cargo build --release --locked --features dev-committee-override
+              export PATH="${CARGO_TARGET_DIR:-target}/release:$PATH"
+              ./.ci/test_dev_on_prod_restart.sh
           - name: chaotic-minority-reset
             timeout: 45
             delay: true
@@ -476,8 +486,9 @@ jobs:
             timeout: 90
             runs: |
               export CARGO_TARGET_DIR="$SNARKOS_RELEASE_DIR/target"
-              ./.ci/test_full_upgrade.sh
-              ./.ci/test_partial_upgrade.sh
+              # Testnet (network 1), where the latest release and this build share a dev genesis.
+              ./.ci/test_full_upgrade.sh 4 2 1
+              ./.ci/test_partial_upgrade.sh 4 1
     # No expression: GitHub shows a skipped job's `name` unevaluated.
     name: devnet-merge
     steps: *devnet-steps
@@ -536,7 +547,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with: { tool: cargo-machete@0.7.0 }
       - run: cargo machete
 
@@ -579,7 +590,7 @@ jobs:
         with: { persist-credentials: false }
       # gh-actions is ours; check-shared-refs requires a @vN tag here, not a SHA.
       - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with: { tool: cargo-hack@0.6.46 }
       - run: cargo hack clippy --workspace --each-feature --exclude-features cuda --locked -- -D warnings
 

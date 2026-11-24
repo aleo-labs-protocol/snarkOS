@@ -69,7 +69,8 @@ impl Claims {
 
     /// Returns the json web token string.
     pub fn to_jwt_string(&self) -> Result<String> {
-        encode(&Header::default(), &self, &EncodingKey::from_secret(JWT_SECRET.get().unwrap())).map_err(|e| anyhow!(e))
+        let key = EncodingKey::from_secret(JWT_SECRET.get().unwrap()).map_err(|e| anyhow!(e))?;
+        encode(&Header::default(), &self, &key).map_err(|e| anyhow!(e))
     }
 }
 
@@ -84,11 +85,9 @@ pub async fn auth_middleware(request: Request<Body>, next: Next) -> Result<Respo
     let auth: TypedHeader<Authorization<Bearer>> =
         parts.extract().await.map_err(|_| StatusCode::UNAUTHORIZED.into_response())?;
 
-    if let Err(err) = decode::<Claims>(
-        auth.token(),
-        &DecodingKey::from_secret(JWT_SECRET.get().unwrap()),
-        &Validation::new(Algorithm::HS256),
-    ) {
+    if let Err(err) = DecodingKey::from_secret(JWT_SECRET.get().unwrap())
+        .and_then(|key| decode::<Claims>(auth.token(), &key, &Validation::new(Algorithm::HS256)))
+    {
         warn!("Request authorization error: {err}");
         return Err(StatusCode::UNAUTHORIZED.into_response());
     }

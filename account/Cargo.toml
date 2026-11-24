@@ -18,7 +18,6 @@ edition = "2024"
 
 [features]
 cuda = [ "snarkvm/cuda" ]
-test_targets = [ "snarkvm/test_targets" ]
 
 [dependencies.colored]
 workspace = true

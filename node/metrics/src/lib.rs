@@ -18,27 +18,26 @@ pub mod names;
 // Expose the names at the crate level for easy access.
 pub use names::*;
 
-// Re-export the snarkVM metrics.
+// Re-export the snarkVM metrics. This includes snarkVM's re-export of the `metrics` crate, which
+// this crate uses as `metrics::`.
 pub use snarkvm::metrics::*;
 
 use rayon::prelude::*;
 
 use snarkos_utilities::locks::parking_lot::Mutex;
 use snarkvm::{
-    ledger::narwhal::TransmissionID,
+    ledger::puzzle::SolutionID,
     prelude::{Block, Network, Transaction, cfg_iter},
 };
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     net::SocketAddr,
     sync::{
-        Arc,
         OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
     time::Instant,
 };
-use time::OffsetDateTime;
 use tokio::task::JoinHandle;
 
 /// The handle to the task running the metrics exporter.
@@ -91,7 +90,7 @@ pub fn initialize_metrics(ip: Option<SocketAddr>) {
     // Spawn the exporter, retaining its handle so that it can be stopped on shutdown.
     let task = tokio::spawn(async move {
         if let Err(error) = exporter.await {
-            tracing::error!("The metrics exporter has failed: {error}");
+            tracing::error!("The metrics exporter has failed: {error:?}");
         }
     });
     if let Err(task) = EXPORTER_TASK.set(task) {
@@ -163,113 +162,174 @@ pub fn update_block_metrics<N: Network>(block: &Block<N>) {
     gauge(consensus::VERSION, N::CONSENSUS_VERSION(block.height()).map_or(0.0, |version| version as u16 as f64));
 }
 
-pub fn add_transmission_latency_metric<N: Network>(
-    transmissions_tracker: &Arc<Mutex<HashMap<TransmissionID<N>, i64>>>,
-    block: &Block<N>,
-) {
-    // The age at which we consider a transmission "stale".
-    const AGE_THRESHOLD_SECONDS: i32 = 30 * 60; // 30 minutes
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TrackedId<N: Network> {
+    Solution(SolutionID<N>),
+    Transaction(N::TransactionID),
+}
 
-    // Retrieve all solution IDs (including aborted).
-    let solution_ids: std::collections::HashSet<_> =
-        block.solutions().solution_ids().chain(block.aborted_solution_ids()).collect();
+pub struct TransmissionTracker<N: Network> {
+    capacity: usize,
+    sequence: u64,
+    entries: HashMap<TrackedId<N>, (Instant, u64)>,
+    expiry: BTreeMap<(Instant, u64), TrackedId<N>>,
+}
 
-    // Retrieve all transaction IDs (including aborted).
-    let transaction_ids: std::collections::HashSet<_> =
-        block.transaction_ids().chain(block.aborted_transaction_ids()).collect();
+const EXPIRY_BUDGET: usize = 32;
+const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
-    let mut transmissions_tracker = transmissions_tracker.lock();
-    let ts_now = OffsetDateTime::now_utc().unix_timestamp();
+impl<N: Network> TransmissionTracker<N> {
+    pub fn new(capacity: usize) -> Self {
+        Self { capacity, sequence: 0, entries: HashMap::new(), expiry: BTreeMap::new() }
+    }
 
-    // Determine which keys to remove.
-    // Note: this is intentionally serial, as it is done while holding the lock above. A parallel
-    // iterator that blocks on a lock can occupy every worker of the rayon thread pool, which in
-    // turn prevents the lock holder's own parallel iterator from ever being scheduled.
-    let keys_to_remove = transmissions_tracker
-        .iter()
-        .flat_map(|(transmission_id, timestamp)| {
-            let elapsed_time = std::time::Duration::from_secs((ts_now - *timestamp) as u64);
-            let transmission_type = match transmission_id {
-                TransmissionID::Solution(solution_id, _) if solution_ids.contains(solution_id) => Some("solution"),
-                TransmissionID::Transaction(transaction_id, _) if transaction_ids.contains(transaction_id) => {
-                    Some("transaction")
-                }
-                // Either a ratification, or the transmission was not included in the block
-                _ => None,
-            };
+    fn remove(&mut self, id: TrackedId<N>) -> Option<Instant> {
+        let key = self.entries.remove(&id)?;
+        self.expiry.remove(&key);
+        Some(key.0)
+    }
 
-            if let Some(transmission_type_string) = transmission_type {
-                histogram_label(
-                    consensus::TRANSMISSION_LATENCY,
-                    "transmission_type",
-                    transmission_type_string.to_owned(),
-                    elapsed_time.as_secs_f64(),
-                );
-                Some(*transmission_id)
-            } else if elapsed_time.as_secs() > AGE_THRESHOLD_SECONDS as u64 {
-                // A transmission included in this block is confirmed, so record its latency even if it
-                // predates the staleness threshold — confirmation takes precedence over staleness.
-                match transmission_id {
-                    TransmissionID::Solution(..) => increment_counter(consensus::STALE_UNCONFIRMED_SOLUTIONS),
-                    TransmissionID::Transaction(..) => increment_counter(consensus::STALE_UNCONFIRMED_TRANSACTIONS),
-                    TransmissionID::Ratification => {}
-                }
-                Some(*transmission_id)
-            } else {
-                None
+    fn retire(&mut self, now: Instant) -> [u64; 2] {
+        let mut counts = [0; 2];
+        for _ in 0..EXPIRY_BUDGET {
+            let Some((&(start, _), &id)) = self.expiry.first_key_value() else { break };
+            let expired = now.duration_since(start) > MAX_AGE;
+            if self.entries.len() <= self.capacity && !expired {
+                break;
             }
-        })
-        .collect::<Vec<_>>();
+            self.remove(id);
+            // Only age evictions count as stale; capacity evictions drop the entry silently.
+            if expired {
+                counts[usize::from(matches!(id, TrackedId::Transaction(_)))] += 1;
+            }
+        }
+        counts
+    }
 
-    // Remove keys of stale or seen transmissions.
-    for key in keys_to_remove {
-        transmissions_tracker.remove(&key);
+    fn finish(
+        &mut self,
+        ids: impl IntoIterator<Item = TrackedId<N>>,
+        now: Instant,
+    ) -> (Vec<(&'static str, f64)>, [u64; 2]) {
+        let samples = ids
+            .into_iter()
+            .filter_map(|id| {
+                let start = self.remove(id)?;
+                let kind = match id {
+                    TrackedId::Solution(_) => "solution",
+                    TrackedId::Transaction(_) => "transaction",
+                };
+                Some((kind, now.duration_since(start).as_secs_f64()))
+            })
+            .collect::<Vec<_>>();
+        (samples, self.retire(now))
+    }
+
+    fn untrack_solutions(&mut self) {
+        self.entries.retain(|id, _| !matches!(id, TrackedId::Solution(_)));
+        self.expiry.retain(|_, id| !matches!(id, TrackedId::Solution(_)));
+    }
+
+    fn insert(&mut self, id: TrackedId<N>, now: Instant) -> [u64; 2] {
+        self.remove(id);
+        let key = (now, self.sequence);
+        self.sequence += 1;
+        self.entries.insert(id, key);
+        self.expiry.insert(key, id);
+        self.retire(now)
     }
 }
 
+fn record_stale(counts: [u64; 2]) {
+    for (name, count) in
+        [consensus::STALE_UNCONFIRMED_SOLUTIONS, consensus::STALE_UNCONFIRMED_TRANSACTIONS].into_iter().zip(counts)
+    {
+        if count > 0 {
+            metrics::counter!(name).increment(count);
+        }
+    }
+}
+
+pub fn track_transmission<N: Network>(tracker: &Mutex<TransmissionTracker<N>>, id: TrackedId<N>) {
+    let counts = tracker.lock().insert(id, Instant::now());
+    record_stale(counts);
+}
+
+/// Stops tracking transmissions that left the memory pool without reaching a block (e.g. evicted).
+pub fn untrack_transmissions<N: Network>(
+    tracker: &Mutex<TransmissionTracker<N>>,
+    ids: impl IntoIterator<Item = TrackedId<N>>,
+) {
+    let mut tracker = tracker.lock();
+    for id in ids {
+        tracker.remove(id);
+    }
+}
+
+/// Stops tracking every solution, e.g. when an epoch boundary clears all unconfirmed solutions.
+pub fn untrack_solutions<N: Network>(tracker: &Mutex<TransmissionTracker<N>>) {
+    tracker.lock().untrack_solutions();
+}
+
+pub fn add_transmission_latency_metric<N: Network>(tracker: &Mutex<TransmissionTracker<N>>, block: &Block<N>) {
+    let solutions =
+        block.solutions().solution_ids().chain(block.aborted_solution_ids()).copied().map(TrackedId::Solution);
+    let transactions =
+        block.transaction_ids().chain(block.aborted_transaction_ids()).copied().map(TrackedId::Transaction);
+    let (samples, counts) = {
+        let mut tracker = tracker.lock();
+        let now = Instant::now();
+        tracker.finish(solutions.chain(transactions), now)
+    };
+    for (kind, seconds) in samples {
+        histogram_label(consensus::TRANSMISSION_LATENCY, "transmission_type", kind.to_owned(), seconds);
+    }
+    record_stale(counts);
+}
+
 pub fn gauge_label<V: Into<f64>>(name: &'static str, label_key: &'static str, label_value: String, value: V) {
-    ::metrics::gauge!(name, label_key => label_value).set(value.into());
+    metrics::gauge!(name, label_key => label_value).set(value.into());
 }
 
-pub fn increment_counter_1(name: &'static str, key: &'static str, value: impl Into<::metrics::SharedString>) {
-    ::metrics::counter!(name, key => value).increment(1);
+pub fn increment_counter_1(name: &'static str, key: &'static str, value: impl Into<metrics::SharedString>) {
+    metrics::counter!(name, key => value).increment(1);
 }
 
-pub fn counter_1(name: &'static str, key: &'static str, value: impl Into<::metrics::SharedString>, amount: u64) {
-    ::metrics::counter!(name, key => value).increment(amount);
+pub fn counter_1(name: &'static str, key: &'static str, value: impl Into<metrics::SharedString>, amount: u64) {
+    metrics::counter!(name, key => value).increment(amount);
 }
 
 pub fn increment_counter_2(
     name: &'static str,
     key_a: &'static str,
-    value_a: impl Into<::metrics::SharedString>,
+    value_a: impl Into<metrics::SharedString>,
     key_b: &'static str,
-    value_b: impl Into<::metrics::SharedString>,
+    value_b: impl Into<metrics::SharedString>,
 ) {
-    ::metrics::counter!(name, key_a => value_a, key_b => value_b).increment(1);
+    metrics::counter!(name, key_a => value_a, key_b => value_b).increment(1);
 }
 
 pub fn increment_counter_3(
     name: &'static str,
     key_a: &'static str,
-    value_a: impl Into<::metrics::SharedString>,
+    value_a: impl Into<metrics::SharedString>,
     key_b: &'static str,
-    value_b: impl Into<::metrics::SharedString>,
+    value_b: impl Into<metrics::SharedString>,
     key_c: &'static str,
-    value_c: impl Into<::metrics::SharedString>,
+    value_c: impl Into<metrics::SharedString>,
 ) {
-    ::metrics::counter!(name, key_a => value_a, key_b => value_b, key_c => value_c).increment(1);
+    metrics::counter!(name, key_a => value_a, key_b => value_b, key_c => value_c).increment(1);
 }
 
 pub fn histogram_2<V: Into<f64>>(
     name: &'static str,
     key_a: &'static str,
-    value_a: impl Into<::metrics::SharedString>,
+    value_a: impl Into<metrics::SharedString>,
     key_b: &'static str,
-    value_b: impl Into<::metrics::SharedString>,
+    value_b: impl Into<metrics::SharedString>,
     value: V,
 ) {
-    ::metrics::histogram!(name, key_a => value_a, key_b => value_b).record(value.into());
+    metrics::histogram!(name, key_a => value_a, key_b => value_b).record(value.into());
 }
 
 /// Returns the `kind` label value for the given transaction.
@@ -328,8 +388,74 @@ pub fn set_build_info() {
     let git_branch = built_info::GIT_HEAD_REF.unwrap_or("unknown");
     let features = built_info::FEATURES_LOWERCASE_STR.replace(' ', "");
 
-    ::metrics::gauge!(build::BUILD_INFO, "version" => version.to_string()).set(1.0);
-    ::metrics::gauge!(build::BUILD_INFO, "git_commit" => git_commit.to_string()).set(1.0);
-    ::metrics::gauge!(build::BUILD_INFO, "git_branch" => git_branch.to_string()).set(1.0);
-    ::metrics::gauge!(build::BUILD_INFO, "features" => features).set(1.0);
+    metrics::gauge!(build::BUILD_INFO, "version" => version.to_string()).set(1.0);
+    metrics::gauge!(build::BUILD_INFO, "git_commit" => git_commit.to_string()).set(1.0);
+    metrics::gauge!(build::BUILD_INFO, "git_branch" => git_branch.to_string()).set(1.0);
+    metrics::gauge!(build::BUILD_INFO, "features" => features).set(1.0);
+}
+
+#[cfg(test)]
+mod transmission_tracker {
+    use super::*;
+    use snarkvm::prelude::{Field, MainnetV0};
+    use std::time::Duration;
+
+    #[test]
+    fn bounds_and_retires_each_admission_once() {
+        let capacity = EXPIRY_BUDGET + 5;
+        let mut tracker = TransmissionTracker::<MainnetV0>::new(capacity);
+        let solution = |n| TrackedId::Solution(SolutionID::from(n));
+        let transaction = |n| TrackedId::Transaction(Field::<MainnetV0>::from_u64(n).into());
+        let start = Instant::now();
+        for n in 0..capacity as u64 {
+            tracker.insert(solution(n), start);
+        }
+        for n in 0..3 {
+            assert_eq!(tracker.insert(transaction(n), start), [0, 0]);
+        }
+        let refreshed = start + Duration::from_millis(250);
+        for _ in 0..3 {
+            tracker.insert(transaction(0), refreshed);
+        }
+        assert_eq!(tracker.entries.len(), capacity);
+        assert_eq!(tracker.expiry.len(), capacity);
+        let now = refreshed + MAX_AGE + Duration::from_millis(500);
+        let (samples, stale) =
+            tracker.finish([solution(0), solution(3), solution(4), transaction(0), transaction(1)], now);
+        assert_eq!(samples, [
+            ("solution", 1800.75),
+            ("solution", 1800.75),
+            ("transaction", 1800.5),
+            ("transaction", 1800.75)
+        ]);
+        assert_eq!(stale, [EXPIRY_BUDGET as u64, 0]);
+        assert_eq!(tracker.retire(now), [0, 1]);
+        assert_eq!(tracker.finish([transaction(2)], now), (vec![], [0, 0]));
+    }
+
+    #[test]
+    fn untracked_transmissions_are_neither_sampled_nor_stale() {
+        let tracker = Mutex::new(TransmissionTracker::<MainnetV0>::new(16));
+        let solution = |n| TrackedId::Solution(SolutionID::from(n));
+        let transaction = |n| TrackedId::Transaction(Field::<MainnetV0>::from_u64(n).into());
+        for n in 0..3 {
+            track_transmission(&tracker, solution(n));
+            track_transmission(&tracker, transaction(n));
+        }
+
+        // An evicted transaction is dropped; untracking an unknown ID is a no-op.
+        untrack_transmissions(&tracker, [transaction(1), transaction(7)]);
+        // An epoch boundary drops every solution.
+        untrack_solutions(&tracker);
+
+        let mut tracker = tracker.lock();
+        assert_eq!(tracker.entries.len(), 2);
+        assert_eq!(tracker.expiry.len(), 2);
+        let now = Instant::now() + MAX_AGE + Duration::from_secs(1);
+        let (samples, stale) = tracker.finish([solution(0), transaction(1)], now);
+        assert!(samples.is_empty());
+        // Only the two transactions that were still tracked age out as stale.
+        assert_eq!(stale, [0, 2]);
+        assert!(tracker.entries.is_empty() && tracker.expiry.is_empty());
+    }
 }

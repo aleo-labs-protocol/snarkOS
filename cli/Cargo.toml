@@ -26,14 +26,19 @@ cuda = [
   "snarkos-node-cdn/cuda",
   "snarkos-node-rest/cuda"
 ]
-test_targets = [ "snarkvm/test_targets" ]
-test_consensus_heights = [ "snarkvm/test_consensus_heights" ]
-test_network = [
-  "test_targets", 
-  "test_consensus_heights",
-  "snarkvm/dev-committee",
-  "snarkvm/dev_genesis_state_root",
-]
+# Lowers network parameters (consensus heights, genesis targets) and enables the dev genesis state root,
+# for local test and development networks. Never enable it to join a public
+# network, including testnet. Such a build rejects the shipped genesis block at startup, as its genesis
+# targets differ. The router handshake rejects a peer with another genesis header, and the gateway one
+# that sends another genesis hash; peers below `HandshakeTrailer::GENESIS_VERSION` may send none.
+# `snarkos developer` commands sent to a public endpoint pass no genesis check and use the lowered
+# consensus heights.
+dev-network = [ "snarkvm/dev-network" ]
+# Lets `--dev-on-prod` extend a copy of a real ledger with blocks signed by a deterministic dev
+# committee. It keeps the production network parameters, so it is separate from `dev-network`, and a
+# build with both rejects `--dev-on-prod`. It relaxes some block and BFT checks for dev-committee rounds.
+# Never enable it to join a public network.
+dev-committee-override = [ "snarkos-node/dev-committee-override" ]
 tokio_console = [ "dep:console-subscriber", "tokio/tracing" ]
 
 [dependencies.anstyle]
@@ -153,7 +158,7 @@ workspace = true
 features = [ "test-helpers" ]
 
 [target."cfg(target_family = \"unix\")".dependencies.nix]
-version = "0.31"
+version = "0.32"
 default-features = false
 features = [ "resource" ]
 

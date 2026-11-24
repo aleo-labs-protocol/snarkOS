@@ -20,7 +20,9 @@ edition = "2024"
 default = [ ]
 metrics = [ "dep:snarkos-node-metrics", "snarkos-node-bft/metrics" ]
 cuda = [ "snarkvm/cuda", "snarkos-account/cuda", "snarkos-node-bft-ledger-service/cuda" ]
-test_network = [ "snarkos-node-bft-ledger-service/test_network" ]
+dev-network = [ "snarkos-node-bft-ledger-service/dev-network" ]
+# See `cli/Cargo.toml`.
+dev-committee-override = [ "snarkos-node-bft-ledger-service/dev-committee-override" ]
 
 [dependencies.anyhow]
 workspace = true

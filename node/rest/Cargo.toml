@@ -21,7 +21,7 @@ default = [ ]
 metrics = [ "dep:snarkos-node-metrics", "snarkos-node-consensus/metrics" ]
 cuda = [ "snarkvm/cuda", "snarkos-node-consensus/cuda", "snarkos-node-router/cuda" ]
 # Lets benches advance a test ledger to the latest consensus version.
-test_consensus_heights = [ "snarkvm/test_consensus_heights" ]
+dev-network = [ "snarkvm/dev-network" ]
 
 [dependencies.anyhow]
 workspace = true
@@ -41,7 +41,7 @@ workspace = true
 features = [ "serde", "rayon" ]
 
 [dependencies.jsonwebtoken]
-version = "11.1"
+version = "12.0"
 default-features = false
 features = [ "aws_lc_rs" ]
 

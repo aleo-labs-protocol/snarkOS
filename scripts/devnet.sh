@@ -18,13 +18,12 @@ read -r -p "Enter the total number of clients (default: 2): " total_clients
 total_clients=${total_clients:-2}
 
 # Read the network ID from user or use a default value of 1
-read -r -p "Enter the network ID (mainnet = 0, testnet = 1, canary = 2) (default: 1): " network_id
+read -r -p "Enter the network ID (mainnet = 0, testnet = 1) (default: 1): " network_id
 network_id=${network_id:-1}
 
 case "$network_id" in
   0) network_name="mainnet" ;;
   1) network_name="testnet" ;;
-  2) network_name="canary" ;;
   *) network_name="network-$network_id" ;;
 esac
 
@@ -99,8 +98,8 @@ binary_path=""
 
 if [[ $build_binary == "y" ]]; then
   # Ask the user for additional crate features (comma-separated)
-  read -r -p "Enter crate features to enable (comma separated, default: test_network): " crate_features
-  crate_features=${crate_features:-test_network}
+  read -r -p "Enter crate features to enable (comma separated, default: dev-network): " crate_features
+  crate_features=${crate_features:-dev-network}
 
   # Build command
   build_cmd=(cargo install --locked --path "$repo_root")

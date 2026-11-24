@@ -91,7 +91,6 @@ async fn main() -> Result<()> {
     let network = match args[1].parse::<u16>()? {
         MainnetV0::ID => "mainnet",
         TestnetV0::ID => "testnet",
-        CanaryV0::ID => "canary",
         unknown_id => bail!("Unknown network ID ({unknown_id})"),
     };
 
@@ -110,7 +109,6 @@ async fn main() -> Result<()> {
     match network {
         "mainnet" => run_fast_sync::<MainnetV0>(bucket, dry_run).await,
         "testnet" => run_fast_sync::<TestnetV0>(bucket, dry_run).await,
-        "canary" => run_fast_sync::<CanaryV0>(bucket, dry_run).await,
         unknown_network => bail!("Unknown network ({unknown_network})"),
     }
 }

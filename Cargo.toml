@@ -45,7 +45,7 @@ members = [
 [workspace.dependencies.snarkvm]
 #path = "../snarkVM"
 git = "https://github.com/aleo-labs-protocol/snarkVM.git"
-rev = "1757a9b84ac0da2e55da11fbb10f0f5cd63f0240" #staging
+rev = "1a1c603dc2db7245ccdc9554c2720dbee2dace2b" #staging
 #version = "=4.12.0"
 default-features = false
 
@@ -98,9 +98,6 @@ version = "0.3"
 
 [workspace.dependencies.futures-util]
 version = "0.3"
-
-[workspace.dependencies.locktick]
-version = "0.6"
 
 [workspace.dependencies.lru]
 version = "0.19.0"
@@ -290,9 +287,10 @@ cuda = [
   "snarkos-node-router/cuda",
   "snarkos-node-sync/cuda"
 ]
-test_targets = [ "snarkos-cli/test_targets" ]
-test_consensus_heights = [ "snarkos-cli/test_consensus_heights" ]
-test_network = [ "snarkos-cli/test_network", "snarkos-node/test_network" ]
+# See `cli/Cargo.toml`.
+dev-network = [ "snarkos-cli/dev-network", "snarkos-node/dev-network" ]
+# See `cli/Cargo.toml`.
+dev-committee-override = [ "snarkos-cli/dev-committee-override", "snarkos-node/dev-committee-override" ]
 tokio_console = [ "snarkos-cli/tokio_console" ]
 
 [dependencies.clap]

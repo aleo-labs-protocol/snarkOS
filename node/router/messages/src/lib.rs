@@ -367,7 +367,7 @@ impl<N: Network> FromBytes for Message<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use snarkvm::prelude::{CanaryV0, MainnetV0, TestnetV0};
+    use snarkvm::prelude::{MainnetV0, TestnetV0};
 
     /// Ensure that the message versions used at genesis is correct.
     fn consensus_constants_at_genesis<N: Network>() {
@@ -411,7 +411,6 @@ mod tests {
     fn test_latest_message_version_has_scheduled_height() {
         latest_message_version_has_scheduled_height::<MainnetV0>();
         latest_message_version_has_scheduled_height::<TestnetV0>();
-        latest_message_version_has_scheduled_height::<CanaryV0>();
     }
 
     /// Tests that the status message version takes effect with `ConsensusVersion::V23`, under
@@ -440,14 +439,11 @@ mod tests {
     fn test_consensus_constants() {
         consensus_constants_at_genesis::<MainnetV0>();
         consensus_constants_at_genesis::<TestnetV0>();
-        consensus_constants_at_genesis::<CanaryV0>();
 
         consensus_versions::<MainnetV0>();
         consensus_versions::<TestnetV0>();
-        consensus_versions::<CanaryV0>();
 
         consensus_constants_increasing_heights::<MainnetV0>();
         consensus_constants_increasing_heights::<TestnetV0>();
-        consensus_constants_increasing_heights::<CanaryV0>();
     }
 }
