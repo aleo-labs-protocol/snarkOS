@@ -841,7 +841,7 @@ mod route_tests {
             test_helpers::sample_genesis_committee,
         },
         prelude::{MainnetV0, PrivateKey, Program, Transaction},
-        synthesizer::process::deployment_freeze::FreezeWindow,
+        synthesizer::process::deployment_freeze::{DEPLOYMENT_FREEZE_PROGRAM_ID, FreezeWindow},
         utilities::TestRng,
     };
 
@@ -968,6 +968,32 @@ mod route_tests {
         rest.deployment_freeze.set_policy_at(rest.ledger.latest_hash(), None);
         let (status, body) = post_json(&rest, "/transaction/broadcast", &deployment).await;
         assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    #[tokio::test]
+    async fn program_routes_serve_the_built_in_freeze_program() {
+        let rest = sample_rest().await;
+        let id = DEPLOYMENT_FREEZE_PROGRAM_ID;
+
+        // The program is built in and never deployed, so the routes serve the VM's copy at edition 0.
+        let (status, body) = get(&rest, &format!("/program/{id}")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("submit_votes"), "{body}");
+        let (status, body) = get(&rest, &format!("/program/{id}?metadata=true")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains(r#""edition":0"#) && body.contains(r#""transaction_id":null"#), "{body}");
+        let (status, body) = get(&rest, &format!("/program/{id}/latest_edition")).await;
+        assert_eq!((status, body.as_str()), (StatusCode::OK, "0"));
+        let (status, body) = get(&rest, &format!("/program/{id}/0")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = get(&rest, &format!("/program/{id}/amendment_count")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // It has no other edition, and other programs that are not deployed are still not found.
+        let (status, body) = get(&rest, &format!("/program/{id}/1")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        let (status, body) = get(&rest, "/program/not_deployed.aleo").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     }
 
     #[tokio::test]
