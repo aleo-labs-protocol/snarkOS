@@ -312,6 +312,7 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
 
     /// Client-side version of [`snarkvm_node_bft::Sync::try_advancing_block_synchronization`].
     async fn try_advancing_block_synchronization(&self) {
+        let height = self.ledger.latest_height();
         let has_new_blocks = match self.sync.try_advancing_block_synchronization().await {
             Ok(val) => val,
             Err(err) => {
@@ -320,7 +321,7 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
                     self.router().ip_ban_peer(peer_ip, Some(&err.to_string()));
                 }
                 // The pass can advance the ledger before it fails.
-                true
+                self.ledger.latest_height() > height
             }
         };
 

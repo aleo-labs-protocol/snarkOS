@@ -298,7 +298,8 @@ impl<N: Network> LedgerService<N> for MockLedgerService<N> {
 }
 
 /// A ledger update on a [`MockLedgerService`]. `check_next_block` accepts only the blocks marked
-/// valid, and checks the round before it rejects a block, as `Ledger::check_next_block` does.
+/// valid. It fails the others with `InvalidRound` if the round is not above the latest round, and
+/// with `VerificationFailed` otherwise.
 struct MockLedgerUpdate<'a, N: Network> {
     ledger: &'a MockLedgerService<N>,
 }

@@ -161,10 +161,11 @@ pub enum AdvanceBlockSyncError {
     /// block, or its height, round or hash is not new.
     #[error("Peer '{peer_ip}' sent an invalid block at height {height} - {error}")]
     InvalidBlock { height: u32, peer_ip: SocketAddr, error: anyhow::Error },
-    /// The ledger did not accept the block that `peer_ip` sent. The cause can be the block or this
-    /// node, e.g. a failed ledger read or a slow clock.
+    /// The check of the block that `peer_ip` sent failed or stopped. The cause can be the block or
+    /// this node, e.g. a failed ledger read or a slow clock.
     #[error("The block at height {height} from peer '{peer_ip}' failed the ledger check - {error}")]
     FailedCheck { height: u32, peer_ip: SocketAddr, error: anyhow::Error },
+    /// The ledger update did not start, or the ledger did not store a block that passed the check.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -988,7 +989,7 @@ impl<N: Network> BlockSync<N> {
                     return Ok((false, false));
                 }
 
-                // Only the genesis block is a Beacon block.
+                // `check_next_block` rejects every Beacon block after genesis.
                 if block.authority().is_beacon() {
                     let error = anyhow!("The block is a Beacon block");
                     return Err(AdvanceBlockSyncError::InvalidBlock { height: next_height, peer_ip, error });
@@ -1021,7 +1022,10 @@ impl<N: Network> BlockSync<N> {
                 Ok((true, false))
             })
             .await
-            .unwrap_or_else(|err| Err(anyhow!("Failed to check the block at height {next_height}: {err}").into()));
+            .unwrap_or_else(|err| {
+                let error = anyhow!("The check of the block stopped: {err}");
+                Err(AdvanceBlockSyncError::FailedCheck { height: next_height, peer_ip, error })
+            });
 
             let (advanced, stop) = match result {
                 Ok(outcome) => outcome,
@@ -4218,6 +4222,7 @@ mod tests {
         assert!(matches!(error, AdvanceBlockSyncError::InvalidBlock { height: 1_001, .. }), "{error}");
         assert_eq!(sync.ledger.latest_block_height(), 1_000);
         assert!(sync.requests.read().is_empty());
+        assert!(!sync.locators.read().contains_key(&sample_peer_ip(1)));
     }
 
     /// Tests that a block the ledger fails to write is removed and requested again, that its
