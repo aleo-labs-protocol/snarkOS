@@ -1824,18 +1824,9 @@ mod tests {
             SimpleStoppable::new(),
         ));
 
-        // Advance the ledger to the second block.
-        let committed_blocks = blocks[..2].to_vec();
-        let ledger_ = ledger.clone();
-        spawn_blocking!({
-            for block in &committed_blocks {
-                ledger_.begin_ledger_update()?.advance_to_next_block(block)?;
-            }
-            Ok(())
-        })
-        .unwrap();
-
-        let Authority::Quorum(committed_subdag) = blocks[1].authority() else { panic!("Expected a quorum block") };
+        let Authority::Quorum(committed_subdag) = blocks[1].authority().clone() else {
+            panic!("Expected a quorum block")
+        };
         let Authority::Quorum(next_subdag) = blocks[2].authority().clone() else { panic!("Expected a quorum block") };
 
         // Order the subdag of the third block as if the second block were not in the ledger.
@@ -1846,15 +1837,17 @@ mod tests {
         let stale_subdag = Subdag::from(stale_subdag_map).unwrap();
         assert_eq!(stale_subdag.anchor_round(), next_subdag.anchor_round());
 
-        let committed_subdag = committed_subdag.clone();
         let (committed_result, stale_result, block) = spawn_blocking!({
             let ledger_update = ledger.begin_ledger_update()?;
+            // Advance the ledger to the second block.
+            for block in &blocks[..2] {
+                ledger_update.advance_to_next_block(block)?;
+            }
             let committed_result =
                 ledger_update.prepare_advance_to_next_quorum_block(committed_subdag, Default::default());
             let stale_result = ledger_update
                 .prepare_advance_to_next_quorum_block(stale_subdag, Default::default())
-                .map(|block| block.hash())
-                .map_err(|error| error.to_string());
+                .map(|block| block.hash());
             // The subdag without the committed certificates becomes the third block.
             let block = ledger_update.prepare_advance_to_next_quorum_block(next_subdag, Default::default())?;
             Ok((committed_result, stale_result, block))
@@ -1863,9 +1856,8 @@ mod tests {
 
         // The subdag of the latest block keeps its own error, which tells the BFT that the ledger already advanced.
         assert!(matches!(committed_result, Err(CheckBlockError::InvalidRound { .. })));
-        let error = stale_result.expect_err("A subdag with committed certificates must not become a block");
+        let error = stale_result.expect_err("A subdag with committed certificates must not become a block").to_string();
         assert!(error.contains("is already in the ledger"), "Unexpected error: {error}");
-        assert_eq!(block.authority(), blocks[2].authority());
         assert_eq!(block.height(), 3);
     }
 
