@@ -45,7 +45,7 @@ members = [
 [workspace.dependencies.snarkvm]
 #path = "../snarkVM"
 git = "https://github.com/aleo-labs-protocol/snarkVM.git"
-rev = "7cb105e9461f716e90e3362e37f7b98b34a75101" # agent/compaction-v23-integration-r3
+rev = "84598a328aff8211c7048a79bbd65d5fdae0275e" # agent/compaction-v23-integration-r4
 #version = "=4.12.0"
 default-features = false
 
