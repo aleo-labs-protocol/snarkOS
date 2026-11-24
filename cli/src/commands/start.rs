@@ -974,6 +974,7 @@ impl Start {
             bail!("`--history-json` writes JSON history and is only supported on a client or validator");
         }
         if self.history_json {
+            warn!("The `--history-json` option is deprecated and will be removed in a future release.");
             println!("Indexing credits.aleo history as JSON");
         }
 
