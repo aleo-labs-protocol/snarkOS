@@ -39,7 +39,7 @@ use std::collections::HashSet;
 /// Invariant: `batch_header.transmission_ids()` contains the same elements as `transmissions.keys()`.
 /// [`Proposal::new`] and [`Proposal::read_le`] establish the invariant, by checking the condition;
 /// none of the other functions modifies the batch header or the transmissions.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proposal<N: Network> {
     /// The proposed batch header.
     batch_header: BatchHeader<N>,
