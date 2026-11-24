@@ -1257,6 +1257,10 @@ impl<N: Network> BlockSync<N> {
         {
             failed_requests.pop_first();
         }
+        // Drop the failed requests above every height a peer advertises. New locators bring those
+        // heights back as new requests.
+        let advertised_tip = tips.map_or(0, |(_, advertised_tip)| advertised_tip);
+        failed_requests.split_off(&advertised_tip.saturating_add(1));
 
         // Re-issue the remaining failed requests.
         if !failed_requests.is_empty() {
@@ -3050,6 +3054,40 @@ mod tests {
         assert!(sync.try_issuing_block_requests(&service).await.is_none());
         assert_eq!(num_log_lines!(), before + 1);
         assert!(logs_contain("Every block up to 1000, the latest any peer serves, is in the ledger or requested"));
+        assert!(service.sent.lock().unwrap().is_empty());
+    }
+
+    /// Tests that failed requests above every height a peer advertises are dropped, and that the
+    /// request pass then finds nothing to sync.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn test_failed_requests_above_advertised_tip_are_dropped() {
+        let sync = sample_sync_at_height(1_000);
+        let peer_ahead = sample_peer_ip(1);
+        add_peers(&sync, 1, 1, 1_100, 0);
+        add_peers(&sync, 2, 1, 1_020, 0);
+        insert_requests_to(&sync, peer_ahead, 1_001..1_051);
+        sync.remove_peer(&peer_ahead);
+        assert_eq!(sync.failed_requests.lock().len(), 50);
+
+        // The remaining peer serves the failed requests up to its tip.
+        let (requests, _) = sync.prepare_block_requests().pop().unwrap();
+        assert_eq!(heights_of(&requests), (1_001..=1_020).collect::<Vec<_>>());
+        assert!(sync.failed_requests.lock().is_empty());
+
+        // Without a peer ahead, none of the failed requests remain.
+        let sync = sample_sync_at_height(1_000);
+        add_peers(&sync, 1, 1, 1_100, 0);
+        add_peers(&sync, 2, 1, 1_000, 0);
+        insert_requests_to(&sync, peer_ahead, 1_001..1_051);
+        sync.remove_peer(&peer_ahead);
+        assert_eq!(sync.failed_requests.lock().len(), 50);
+        let service = RecordingService::default();
+        assert!(sync.try_issuing_block_requests(&service).await.is_none());
+        assert!(sync.failed_requests.lock().is_empty());
+        assert!(!logs_contain("Nothing to sync"));
+        assert!(sync.try_issuing_block_requests(&service).await.is_none());
+        assert!(logs_contain("Nothing to sync"));
         assert!(service.sent.lock().unwrap().is_empty());
     }
 
