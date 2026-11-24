@@ -67,7 +67,7 @@ use tokio::{
     runtime::{self, Handle, Runtime},
     sync::mpsc,
     task,
-    time::{MissedTickBehavior, interval},
+    time::sleep,
 };
 use tracing::{debug, info, warn};
 use ureq::http;
@@ -1014,8 +1014,17 @@ impl Start {
             NodeType::BootstrapClient => Node::new_bootstrap_client(node_ip, account, *genesis.header(), genesis.hash(), self.dev).await,
         }?;
 
-        spawn_trusted_hostname_resolver(&node, unresolved_peers, false, self.dev.is_some());
-        spawn_trusted_hostname_resolver(&node, unresolved_validators, true, self.dev.is_some());
+        spawn_trusted_hostname_resolver(&node, unresolved_peers, "peer", Node::add_trusted_peer, self.dev.is_some());
+        // Only a validator connects to the trusted validators.
+        if node_type.is_validator() {
+            spawn_trusted_hostname_resolver(
+                &node,
+                unresolved_validators,
+                "validator",
+                Node::add_trusted_validator,
+                self.dev.is_some(),
+            );
+        }
 
         if !self.nodisplay {
             Display::start(node.clone(), log_receiver, signal_handler.clone()).with_context(|| "Failed to start the display")?;
@@ -1288,8 +1297,7 @@ fn check_trusted_addr_format(ip_or_hostname: &str) -> Result<&str> {
             "The supplied trusted hostname or IP ('{trimmed}') is malformed: missing colon separating the host from the port"
         );
     };
-    // `to_socket_addrs` also fails on an invalid port, and `resolve_trusted_addr` treats any of its
-    // failures as a lookup failure to retry, so an invalid port must be rejected here.
+    // An invalid port must fail here, as `resolve_trusted_addr` retries every `to_socket_addrs` failure.
     if port.parse::<u16>().is_err() {
         bail!("The supplied trusted hostname or IP ('{trimmed}') is malformed: '{port}' is not a valid port");
     }
@@ -1328,29 +1336,23 @@ fn remove_bootstrap_peers<N: Network>(trusted: &mut Vec<SocketAddr>, is_dev: boo
 }
 
 /// Retries the given trusted hostnames, which did not resolve at startup, until each one resolves.
-/// Adds each resolved address to the node as a trusted validator if `is_validator` is set,
-/// and as a trusted peer otherwise.
+/// Passes each resolved address to `add_trusted`. `kind` names the hostnames in the logs.
 fn spawn_trusted_hostname_resolver<N: Network>(
     node: &Node<N>,
     mut unresolved: Vec<String>,
-    is_validator: bool,
+    kind: &'static str,
+    add_trusted: fn(&Node<N>, SocketAddr),
     is_dev: bool,
 ) {
     if unresolved.is_empty() {
         return;
     }
-    let kind = if is_validator { "validator" } else { "peer" };
     let task_node = node.clone();
     node.spawn(async move {
-        let mut tick = interval(TRUSTED_HOSTNAME_RETRY_INTERVAL);
-        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        // The first tick completes immediately, and every hostname failed to resolve just now.
-        tick.tick().await;
-
         while !unresolved.is_empty() {
-            tick.tick().await;
+            sleep(TRUSTED_HOSTNAME_RETRY_INTERVAL).await;
             let mut resolved = Vec::new();
-            let mut still_unresolved = Vec::with_capacity(unresolved.len());
+            let mut still_unresolved = Vec::new();
             for hostname in unresolved {
                 let lookup = hostname.clone();
                 // The panic hook reports a panicking lookup, and the hostname is retried.
@@ -1364,11 +1366,7 @@ fn spawn_trusted_hostname_resolver<N: Network>(
             }
             remove_bootstrap_peers::<N>(&mut resolved, is_dev);
             for addr in resolved {
-                if is_validator {
-                    task_node.add_trusted_validator(addr);
-                } else {
-                    task_node.add_trusted_peer(addr);
-                }
+                add_trusted(&task_node, addr);
             }
             unresolved = still_unresolved;
         }
