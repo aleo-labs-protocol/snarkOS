@@ -51,7 +51,7 @@ const MAXIMUM_PENDING_BLOCKS: u32 = BLOCKS_PER_FILE * CONCURRENT_REQUESTS * 2;
 const MAXIMUM_REQUEST_ATTEMPTS: u8 = 10;
 
 /// The CDN base url.
-pub const CDN_BASE_URL: &str = "https://cdn.provable.com/v0/blocks";
+pub const CDN_BASE_URL: &str = "https://cdn.aleolabs.io/v0/blocks";
 
 /// Returns the user-agent string for CDN requests.
 const fn cdn_user_agent() -> &'static str {
