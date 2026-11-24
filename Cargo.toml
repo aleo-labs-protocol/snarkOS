@@ -45,7 +45,7 @@ members = [
 [workspace.dependencies.snarkvm]
 #path = "../snarkVM"
 git = "https://github.com/aleo-labs-protocol/snarkVM.git"
-rev = "3358a45220e51c792ff47b77799a4309241aea36" # agent/prune-v23-integration-r5
+rev = "23d393716bb7e84b19ce915e9558d714b4877b2d" # agent/prune-v23-integration-r6
 #version = "=4.12.0"
 default-features = false
 
