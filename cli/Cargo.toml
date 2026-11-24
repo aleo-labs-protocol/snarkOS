@@ -1,6 +1,6 @@
 [package]
 name = "snarkos-cli"
-version = "4.13.1"
+version = "5.0.0"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "Command-line interface for snarkOS"
 homepage = "https://aleo.org"

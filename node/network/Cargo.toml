@@ -1,6 +1,6 @@
 [package]
 name = "snarkos-node-network"
-version = "4.13.1"
+version = "5.0.0"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "Network-related objects and traits for nodes"
 homepage = "https://aleo.org"
