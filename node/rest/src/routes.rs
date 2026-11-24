@@ -118,6 +118,47 @@ where
     Ok(if s.trim().is_empty() { Vec::new() } else { s.split(',').map(|x| x.trim().to_string()).collect() })
 }
 
+/// Splits historical key lists at commas outside composite plaintext values.
+fn de_historical_keys<'de, D>(de: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let input = String::deserialize(de)?;
+    if input.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut keys = Vec::new();
+    let mut depth = 0isize;
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut start = 0;
+    for (index, character) in input.char_indices() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                quoted = false;
+            }
+            continue;
+        }
+        match character {
+            '"' => quoted = true,
+            '[' | '{' | '(' => depth += 1,
+            ']' | '}' | ')' => depth -= 1,
+            ',' if depth == 0 => {
+                keys.push(input[start..index].trim().to_string());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    keys.push(input[start..].trim().to_string());
+    Ok(keys)
+}
+
 /// The query object for the routes serving a range of block heights.
 #[derive(Copy, Clone, Deserialize, Serialize)]
 pub(crate) struct BlockRange {
@@ -264,7 +305,7 @@ fn history_compat_mapping<N: Network>(
 /// The query object for `get_history_batch_compat`.
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct HistoricalKeys {
-    #[serde(deserialize_with = "de_csv")]
+    #[serde(deserialize_with = "de_historical_keys")]
     keys: Vec<String>,
 }
 
@@ -1215,6 +1256,96 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             .header(CONTENT_TYPE, "application/json")
             .body(Body::from(json))
             .map_err(|err| RestError::internal_server_error(anyhow!("Failed to build the history response: {err}")))
+    }
+
+    /// Loads one key from a selected program's indexed history.
+    async fn program_history_value(
+        &self,
+        program_id: ProgramID<N>,
+        mapping_name: Identifier<N>,
+        mapping_key: Plaintext<N>,
+        height: u32,
+    ) -> Result<Option<Value<N>>, RestError> {
+        let store = self.ledger.vm().finalize_store().clone();
+        tokio::task::spawn_blocking(move || {
+            let coverage =
+                store.get_program_history_range(&program_id, height).map_err(RestError::internal_server_error)?;
+            if !coverage.is_some_and(|(start, end)| (start..=end).contains(&height)) {
+                return Err(RestError::not_found(anyhow!("No program history for '{program_id}' at block {height}")));
+            }
+            if !store
+                .contains_mapping_at_height(program_id, mapping_name, height)
+                .map_err(RestError::internal_server_error)?
+            {
+                return Err(RestError::not_found(anyhow!(
+                    "No mapping '{program_id}/{mapping_name}' at block {height}"
+                )));
+            }
+            store
+                .get_value_at_height(program_id, mapping_name, &mapping_key, height)
+                .map_err(RestError::internal_server_error)
+        })
+        .await
+        .map_err(|err| RestError::internal_server_error(anyhow!("Tokio error: {err}")))?
+    }
+
+    /// GET /<network>/program/{id}/history/ranges
+    pub(crate) async fn get_program_history_ranges(
+        State(rest): State<Self>,
+        Path(program_id): Path<ProgramID<N>>,
+    ) -> Result<ErasedJson, RestError> {
+        let store = rest.ledger.vm().finalize_store().clone();
+        let ranges = tokio::task::spawn_blocking(move || store.get_program_history_ranges(&program_id))
+            .await
+            .map_err(|err| RestError::internal_server_error(anyhow!("Tokio error: {err}")))?
+            .map_err(RestError::internal_server_error)?;
+        Ok(ErasedJson::new(ranges))
+    }
+
+    /// GET /<network>/program/{id}/mapping/{name}/{key}/history/{height}
+    pub(crate) async fn get_program_history(
+        State(rest): State<Self>,
+        Path((program_id, mapping_name, mapping_key, height)): Path<HistoricalMappingKey<N>>,
+    ) -> Result<ErasedJson, RestError> {
+        let value = rest.program_history_value(program_id, mapping_name, mapping_key, height).await?;
+        Ok(ErasedJson::new(value))
+    }
+
+    /// GET /<network>/program/{id}/mapping/{name}/history/{height}?keys=key1,key2,...
+    pub(crate) async fn get_program_history_batch(
+        State(rest): State<Self>,
+        Path((program_id, mapping_name, height)): Path<HistoricalMappingRoute<N>>,
+        Query(historical_keys): Query<HistoricalKeys>,
+    ) -> Result<ErasedJson, RestError> {
+        let keys = parse_historical_mapping_keys::<N>(&historical_keys.keys)?;
+        let raw_keys = historical_keys.keys;
+        let store = rest.ledger.vm().finalize_store().clone();
+        let values = tokio::task::spawn_blocking(move || {
+            let coverage =
+                store.get_program_history_range(&program_id, height).map_err(RestError::internal_server_error)?;
+            if !coverage.is_some_and(|(start, end)| (start..=end).contains(&height)) {
+                return Err(RestError::not_found(anyhow!("No program history for '{program_id}' at block {height}")));
+            }
+            if !store
+                .contains_mapping_at_height(program_id, mapping_name, height)
+                .map_err(RestError::internal_server_error)?
+            {
+                return Err(RestError::not_found(anyhow!(
+                    "No mapping '{program_id}/{mapping_name}' at block {height}"
+                )));
+            }
+            let mut values = Vec::with_capacity(keys.len());
+            for (raw, key) in raw_keys.into_iter().zip(keys) {
+                let value = store
+                    .get_value_at_height(program_id, mapping_name, &key, height)
+                    .map_err(RestError::internal_server_error)?;
+                values.push(json!({ "key": raw, "value": value }));
+            }
+            Ok(values)
+        })
+        .await
+        .map_err(|err| RestError::internal_server_error(anyhow!("Tokio error: {err}")))??;
+        Ok(ErasedJson::new(values))
     }
 
     /// GET /<network>/find/blockHeight/{stateRoot}

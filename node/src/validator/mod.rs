@@ -48,7 +48,7 @@ use snarkvm::prelude::{
     store::{ConsensusStorage, StorageMode},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use cfg_if::cfg_if;
 use core::future::Future;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
@@ -83,6 +83,7 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         rest_verification_limits: RestVerificationLimits,
         history_api_url: Option<String>,
         history_json: bool,
+        allow_history_change: bool,
         account: Account<N>,
         trusted_peers: &[SocketAddr],
         trusted_validators: &[SocketAddr],
@@ -118,6 +119,20 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
             }
         }
         .with_context(|| "Failed to initialize the ledger")?;
+
+        let (warning, coverage_dropped) = ledger
+            .vm()
+            .finalize_store()
+            .configure_history(Vec::new(), false)
+            .with_context(|| "Failed to configure program history")?;
+        ensure!(
+            !coverage_dropped || allow_history_change,
+            "{}. Restart with `--allow-history-change` to accept reduced coverage.",
+            warning.as_deref().unwrap_or("Program history coverage would shrink")
+        );
+        if let Some(warning) = warning {
+            tracing::warn!("{warning}");
+        }
 
         // Later blocks finalized by this node are written as JSON beside the ledger.
         if history_json {
@@ -577,9 +592,13 @@ impl<N: Network, C: ConsensusStorage<N>> NodeInterface<N> for Validator<N, C> {
 mod tests {
     use super::*;
     use snarkvm::prelude::{
+        FromBytes,
         MainnetV0,
         VM,
-        store::{ConsensusStore, helpers::memory::ConsensusMemory},
+        store::{
+            ConsensusStore,
+            helpers::{memory::ConsensusMemory, rocksdb::ConsensusDB},
+        },
     };
 
     use anyhow::bail;
@@ -588,6 +607,53 @@ mod tests {
     use std::str::FromStr;
 
     type CurrentNetwork = MainnetV0;
+
+    #[tokio::test]
+    async fn test_validator_rejects_existing_history_without_override() -> Result<()> {
+        let genesis = Block::<CurrentNetwork>::from_bytes_le(CurrentNetwork::genesis_bytes())?;
+        let storage_mode = StorageMode::new_test(Some(Arc::new(tempfile::tempdir()?)));
+        tokio::task::spawn_blocking({
+            let genesis = genesis.clone();
+            let storage_mode = storage_mode.clone();
+            move || -> Result<()> {
+                let ledger = Ledger::<CurrentNetwork, ConsensusDB<CurrentNetwork>>::load(genesis, storage_mode)?;
+                ledger.vm().finalize_store().configure_history(Vec::new(), true)?;
+                ledger.vm().finalize_store().prepare_history_baseline(ledger.latest_height())?;
+                Ok(())
+            }
+        })
+        .await??;
+
+        let account =
+            Account::<CurrentNetwork>::from_str("APrivateKey1zkp2oVPTci9kKcUprnbzMwq95Di1MQERpYBhEeqvkrDirK1")?;
+        let result = Validator::<CurrentNetwork, ConsensusDB<CurrentNetwork>>::new(
+            SocketAddr::from_str("127.0.0.1:0")?,
+            None,
+            None,
+            10,
+            RestVerificationLimits::max::<CurrentNetwork, ConsensusDB<CurrentNetwork>>(),
+            None,
+            false,
+            false,
+            account,
+            &[],
+            &[],
+            genesis,
+            None,
+            storage_mode,
+            NodeDataDir::new_test(None),
+            false,
+            false,
+            None,
+            None,
+            1,
+            SignalHandler::new(None),
+        )
+        .await;
+        let Err(err) = result else { bail!("Validator accepted existing mapping history without an override") };
+        assert!(err.to_string().contains("--allow-history-change"), "{err}");
+        Ok(())
+    }
 
     /// Use `RUST_MIN_STACK=67108864 cargo test --release profiler` to run this test.
     #[ignore]
@@ -620,6 +686,7 @@ mod tests {
             10,
             RestVerificationLimits::max::<CurrentNetwork, ConsensusMemory<CurrentNetwork>>(),
             None,
+            false,
             false,
             account,
             &[],
