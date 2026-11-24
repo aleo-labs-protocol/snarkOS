@@ -21,12 +21,13 @@ use snarkvm::{
         PendingBlock,
         Transaction,
         committee::Committee,
-        narwhal::{BatchCertificate, Data, Transmission, TransmissionID},
+        narwhal::{BatchCertificate, Data, Subdag, Transmission, TransmissionID},
         puzzle::{Solution, SolutionID},
     },
     prelude::{Address, ConsensusVersion, Field, Network, Result, Zero, bail, consensus_config_value},
 };
 
+use indexmap::IndexMap;
 use snarkos_utilities::locks::parking_lot::Mutex;
 use std::{
     collections::{BTreeMap, HashSet},
@@ -44,6 +45,10 @@ pub struct MockLedgerService<N: Network> {
     known_transmission_ids: HashSet<TransmissionID<N>>,
     /// The transmission IDs for which the containment check returns an error, as a failed ledger read would.
     unreadable_transmission_ids: HashSet<TransmissionID<N>>,
+    /// The hashes of the blocks that `check_next_block` accepts.
+    valid_block_hashes: Mutex<HashSet<N::BlockHash>>,
+    /// The hashes of the blocks for which `check_next_block` returns an error, as a failed ledger read would.
+    unreadable_block_hashes: Mutex<HashSet<N::BlockHash>>,
 }
 
 impl<N: Network> MockLedgerService<N> {
@@ -54,7 +59,19 @@ impl<N: Network> MockLedgerService<N> {
             height_to_round_and_hash: Default::default(),
             known_transmission_ids: Default::default(),
             unreadable_transmission_ids: Default::default(),
+            valid_block_hashes: Default::default(),
+            unreadable_block_hashes: Default::default(),
         }
+    }
+
+    /// Makes `check_next_block` accept the block with the given hash at the next height.
+    pub fn mark_block_valid(&self, hash: N::BlockHash) {
+        self.valid_block_hashes.lock().insert(hash);
+    }
+
+    /// Makes `check_next_block` fail for the block with the given hash, as a failed ledger read would.
+    pub fn mark_block_unreadable(&self, hash: N::BlockHash) {
+        self.unreadable_block_hashes.lock().insert(hash);
     }
 
     /// Initializes a new mock ledger service at the specified height.
@@ -258,7 +275,7 @@ impl<N: Network> LedgerService<N> for MockLedgerService<N> {
 
     /// Begins a ledger update.
     fn begin_ledger_update<'a>(&'a self) -> Result<Box<dyn LedgerUpdateService<N> + 'a>, BeginLedgerUpdateError> {
-        unimplemented!();
+        Ok(Box::new(MockLedgerUpdate { ledger: self }))
     }
 
     /// Returns the spent cost for a transaction in microcredits.
@@ -274,5 +291,66 @@ impl<N: Network> LedgerService<N> for MockLedgerService<N> {
     fn is_stopped(&self) -> bool {
         // No ledger to check against.
         false
+    }
+}
+
+/// A ledger update on a [`MockLedgerService`].
+///
+/// `check_next_block` checks in the order of `Ledger::check_next_block` for a block whose subDAG
+/// checks pass, as a Beacon block's do: known hash, height, validity, then round. A block not
+/// marked valid fails with `VerificationFailed`, or with `InvalidRound` if its round does not
+/// exceed the latest block's round.
+struct MockLedgerUpdate<'a, N: Network> {
+    ledger: &'a MockLedgerService<N>,
+}
+
+impl<N: Network> LedgerUpdateService<N> for MockLedgerUpdate<'_, N> {
+    fn check_block_subdag(
+        &self,
+        _block: Block<N>,
+        _prefix: &[PendingBlock<N>],
+    ) -> Result<PendingBlock<N>, CheckBlockError<N>> {
+        unimplemented!();
+    }
+
+    fn check_block_content(&self, _block: PendingBlock<N>) -> Result<Block<N>, CheckBlockError<N>> {
+        unimplemented!();
+    }
+
+    fn check_next_block(&self, block: Block<N>) -> Result<Block<N>, CheckBlockError<N>> {
+        let (latest_height, latest_round, known) = {
+            let blocks = self.ledger.height_to_round_and_hash.lock();
+            let (height, (round, _)) = blocks.last_key_value().map(|(h, r)| (*h, *r)).unwrap_or_default();
+            (height, round, blocks.values().any(|(_, hash)| *hash == block.hash()))
+        };
+        if known {
+            return Err(CheckBlockError::BlockAlreadyExists { hash: block.hash() });
+        }
+        if block.height() != latest_height + 1 {
+            return Err(CheckBlockError::InvalidHeight { expected: latest_height + 1, actual: block.height() });
+        }
+        if self.ledger.unreadable_block_hashes.lock().contains(&block.hash()) {
+            return Err(CheckBlockError::Other(anyhow::anyhow!("failed ledger read")));
+        }
+        if self.ledger.valid_block_hashes.lock().contains(&block.hash()) {
+            return Ok(block);
+        }
+        if block.round() <= latest_round {
+            return Err(CheckBlockError::InvalidRound { new: block.round(), previous: latest_round });
+        }
+        Err(CheckBlockError::VerificationFailed { inner: anyhow::anyhow!("invalid block") })
+    }
+
+    fn prepare_advance_to_next_quorum_block(
+        &self,
+        _subdag: Subdag<N>,
+        _transmissions: IndexMap<TransmissionID<N>, Transmission<N>>,
+    ) -> Result<Block<N>, CheckBlockError<N>> {
+        unimplemented!();
+    }
+
+    fn advance_to_next_block(&self, block: &Block<N>) -> Result<()> {
+        self.ledger.height_to_round_and_hash.lock().insert(block.height(), (block.round(), block.hash()));
+        Ok(())
     }
 }

@@ -22,7 +22,7 @@ use crate::{
 };
 
 use snarkos_account::Account;
-use snarkos_node_network::{ConnectionMode, NodeType};
+use snarkos_node_network::{ConnectionMode, NodeType, PeerPoolHandling};
 use snarkos_node_rest::{Rest, RestVerificationLimits};
 use snarkos_node_router::{
     Heartbeat,
@@ -32,7 +32,7 @@ use snarkos_node_router::{
     Routing,
     messages::{Message, UnconfirmedSolution, UnconfirmedTransaction},
 };
-use snarkos_node_sync::{BlockSync, Ping};
+use snarkos_node_sync::{AdvanceBlockSyncError, BlockSync, Ping};
 use snarkos_node_tcp::{
     P2P,
     protocols::{Disconnect, Handshake, OnConnect, Reading},
@@ -316,6 +316,9 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
             Ok(val) => val,
             Err(err) => {
                 error!("Block synchronization failed - {err}");
+                if let AdvanceBlockSyncError::InvalidBlock { peer_ip, .. } = err {
+                    self.router().ip_ban_peer(peer_ip, Some("sent an invalid block"));
+                }
                 return;
             }
         };
