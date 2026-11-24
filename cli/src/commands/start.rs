@@ -461,15 +461,15 @@ impl Start {
             let entry = check_trusted_addr_format(entry)?;
             match resolve_trusted_addr(entry) {
                 Some(addr) => addrs.push(addr),
+                // An IP address needs no DNS, so its lookup would fail on every retry.
+                None if has_ip_host(entry) => {
+                    bail!("The supplied trusted IP ('{entry}') is malformed: it is not a valid IP address")
+                }
                 None => unresolved.push(entry.to_string()),
             }
         }
         if !unresolved.is_empty() {
-            warn!(
-                "Starting without {} trusted hostname(s) that did not resolve. Retrying every {} seconds.",
-                unresolved.len(),
-                TRUSTED_HOSTNAME_RETRY_INTERVAL.as_secs()
-            );
+            warn!("Starting without {} trusted hostname(s) that did not resolve.", unresolved.len());
         }
         Ok((addrs, unresolved))
     }
@@ -601,8 +601,8 @@ impl Start {
         // A dev client or prover is allowed to have an index lower than
         // `dev_num_validators` in order to have a balance at startup.
 
-        // Add the dev nodes to the trusted validators.
-        if trusted_validators.is_empty() && is_validator {
+        // Add the dev nodes to the trusted validators, unless `--validators` lists any.
+        if trusted_validators.is_empty() && self.validators.as_deref().is_none_or(str::is_empty) && is_validator {
             // Validators add all other validators as trusted.
             for idx in 0..num_validators {
                 if idx == dev {
@@ -614,8 +614,8 @@ impl Start {
             debug!("Trusted validators set to: {trusted_validators:?}");
         }
 
-        // Determine if we need to populate `trusted_peers`.
-        if trusted_peers.is_empty() {
+        // Determine if we need to populate `trusted_peers`, which `--peers` entries prevent.
+        if trusted_peers.is_empty() && self.peers.as_deref().is_none_or(str::is_empty) {
             if is_validator {
                 if let Some(num_clients) = self.dev_num_clients {
                     // Ensure the clients that added this validator as a trusted peer are able to connect to it.
@@ -1304,6 +1304,12 @@ fn check_trusted_addr_format(ip_or_hostname: &str) -> Result<&str> {
     Ok(trimmed)
 }
 
+/// Returns `true` if the host of the given trusted address is written as an IP address.
+fn has_ip_host(ip_or_hostname: &str) -> bool {
+    let host = ip_or_hostname.rsplit_once(':').map_or(ip_or_hostname, |(host, _)| host);
+    host.starts_with('[') || host.contains(':') || host.bytes().all(|byte| byte.is_ascii_digit() || byte == b'.')
+}
+
 /// Returns the first address that the given trusted address resolves to.
 /// Logs a warning and returns `None` if it does not resolve.
 fn resolve_trusted_addr(ip_or_hostname: &str) -> Option<SocketAddr> {
@@ -1347,6 +1353,11 @@ fn spawn_trusted_hostname_resolver<N: Network>(
     if unresolved.is_empty() {
         return;
     }
+    warn!(
+        "Retrying {} trusted {kind} hostname(s) every {} seconds until they resolve.",
+        unresolved.len(),
+        TRUSTED_HOSTNAME_RETRY_INTERVAL.as_secs()
+    );
     let task_node = node.clone();
     node.spawn(async move {
         while !unresolved.is_empty() {
@@ -1643,6 +1654,29 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_development_keeps_unresolved_trusted_addrs() {
+        let mut config = Start::try_parse_from(
+            [
+                "snarkos",
+                "--validator",
+                "--dev",
+                "1",
+                "--peers",
+                "unresolvable.invalid:4130",
+                "--validators",
+                "unresolvable.invalid:5000",
+            ]
+            .iter(),
+        )
+        .unwrap();
+        let (mut trusted_peers, _) = config.parse_trusted_addrs(&config.peers).unwrap();
+        let (mut trusted_validators, _) = config.parse_trusted_addrs(&config.validators).unwrap();
+        config.parse_development(&mut trusted_peers, &mut trusted_validators).unwrap();
+        assert!(trusted_peers.is_empty());
+        assert!(trusted_validators.is_empty());
+    }
+
+    #[test]
     fn history_compat_mode_flag() {
         type N = snarkvm::prelude::MainnetV0;
 
@@ -1833,7 +1867,14 @@ mod tests {
 
     #[test]
     fn parse_trusted_addrs_rejects_malformed_entries() {
-        for entry in ["127.0.0.1", "127.0.0.1:99999", "unresolvable.invalid:port", "http://127.0.0.1:3030"] {
+        for entry in [
+            "127.0.0.1",
+            "127.0.0.1:99999",
+            "unresolvable.invalid:port",
+            "http://127.0.0.1:3030",
+            "10.0.0.256:5000",
+            "[::1:4130",
+        ] {
             let config = Start::try_parse_from(["snarkos", "--peers", entry].iter()).unwrap();
             assert!(config.parse_trusted_addrs(&config.peers).is_err(), "Expected '{entry}' to be rejected");
         }
