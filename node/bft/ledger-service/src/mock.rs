@@ -47,8 +47,9 @@ pub struct MockLedgerService<N: Network> {
     unreadable_transmission_ids: HashSet<TransmissionID<N>>,
     /// The hashes of the blocks that `check_next_block` accepts.
     valid_block_hashes: HashSet<N::BlockHash>,
-    /// The hashes of the blocks for which `check_next_block` returns an error, as a failed ledger read would.
-    unreadable_block_hashes: HashSet<N::BlockHash>,
+    /// The hashes of the blocks for which `advance_to_next_block` returns an error, as a failed ledger write
+    /// would.
+    unwritable_block_hashes: HashSet<N::BlockHash>,
 }
 
 impl<N: Network> MockLedgerService<N> {
@@ -60,7 +61,7 @@ impl<N: Network> MockLedgerService<N> {
             known_transmission_ids: Default::default(),
             unreadable_transmission_ids: Default::default(),
             valid_block_hashes: Default::default(),
-            unreadable_block_hashes: Default::default(),
+            unwritable_block_hashes: Default::default(),
         }
     }
 
@@ -88,9 +89,9 @@ impl<N: Network> MockLedgerService<N> {
         self
     }
 
-    /// Makes `check_next_block` fail for the blocks with the given hashes, as a failed ledger read would.
-    pub fn with_unreadable_block_hashes(mut self, hashes: impl IntoIterator<Item = N::BlockHash>) -> Self {
-        self.unreadable_block_hashes.extend(hashes);
+    /// Makes `advance_to_next_block` fail for the blocks with the given hashes, as a failed ledger write would.
+    pub fn with_unwritable_block_hashes(mut self, hashes: impl IntoIterator<Item = N::BlockHash>) -> Self {
+        self.unwritable_block_hashes.extend(hashes);
         self
     }
 
@@ -316,9 +317,6 @@ impl<N: Network> LedgerUpdateService<N> for MockLedgerUpdate<'_, N> {
     }
 
     fn check_next_block(&self, block: Block<N>) -> Result<Block<N>, CheckBlockError<N>> {
-        if self.ledger.unreadable_block_hashes.contains(&block.hash()) {
-            return Err(CheckBlockError::Other(anyhow::anyhow!("failed ledger read")));
-        }
         if self.ledger.valid_block_hashes.contains(&block.hash()) {
             return Ok(block);
         }
@@ -338,6 +336,9 @@ impl<N: Network> LedgerUpdateService<N> for MockLedgerUpdate<'_, N> {
     }
 
     fn advance_to_next_block(&self, block: &Block<N>) -> Result<()> {
+        if self.ledger.unwritable_block_hashes.contains(&block.hash()) {
+            bail!("failed ledger write");
+        }
         self.ledger.height_to_round_and_hash.lock().insert(block.height(), (block.round(), block.hash()));
         Ok(())
     }

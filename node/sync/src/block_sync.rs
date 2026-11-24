@@ -157,9 +157,14 @@ pub struct BlockRequestsSummary {
 /// Why [`BlockSync::try_advancing_block_synchronization`] stopped at a block.
 #[derive(thiserror::Error, Debug)]
 pub enum AdvanceBlockSyncError {
-    /// The ledger rejected the block that `peer_ip` sent.
+    /// The block that `peer_ip` sent cannot follow the latest block of this node: it is a Beacon
+    /// block, or its height, round or hash is not new.
     #[error("Peer '{peer_ip}' sent an invalid block at height {height} - {error}")]
     InvalidBlock { height: u32, peer_ip: SocketAddr, error: anyhow::Error },
+    /// The ledger did not accept the block that `peer_ip` sent. The cause can be the block or this
+    /// node, e.g. a failed ledger read or a slow clock.
+    #[error("The block at height {height} from peer '{peer_ip}' failed the ledger check - {error}")]
+    FailedCheck { height: u32, peer_ip: SocketAddr, error: anyhow::Error },
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -922,8 +927,9 @@ impl<N: Network> BlockSync<N> {
     ///
     /// Returns true, if new blocks were added to the ledger.
     ///
-    /// A block that fails is removed, so that its height is requested again. If the ledger rejects
-    /// the block, the peer that sent it is removed with its other blocks, and the error names it.
+    /// A block that fails is removed, so that its height is requested again. If the block is invalid
+    /// or fails the ledger check, the peer that sent it is removed with its other blocks, and the
+    /// error names it.
     ///
     /// # Usage
     /// This is only called in [`Client::try_block_sync`] and should not be called concurrently by multiple tasks.
@@ -982,12 +988,25 @@ impl<N: Network> BlockSync<N> {
                     return Ok((false, false));
                 }
 
+                // Only the genesis block is a Beacon block.
+                if block.authority().is_beacon() {
+                    let error = anyhow!("The block is a Beacon block");
+                    return Err(AdvanceBlockSyncError::InvalidBlock { height: next_height, peer_ip, error });
+                }
+
                 // Try to check the next block and advance to it.
-                let block = ledger_update.check_next_block(block).map_err(|err| match err {
-                    // This error is not specific to the block, e.g. a failed ledger read.
-                    CheckBlockError::Other(error) => AdvanceBlockSyncError::Other(error),
-                    err => {
-                        AdvanceBlockSyncError::InvalidBlock { height: next_height, peer_ip, error: err.into_anyhow() }
+                let block = ledger_update.check_next_block(block).map_err(|err| {
+                    // The ledger is below `next_height`, so these errors come from the block alone.
+                    let is_invalid = matches!(
+                        err,
+                        CheckBlockError::InvalidHeight { .. }
+                            | CheckBlockError::BlockAlreadyExists { .. }
+                            | CheckBlockError::InvalidRound { .. }
+                    );
+                    let (height, error) = (next_height, err.into_anyhow());
+                    match is_invalid {
+                        true => AdvanceBlockSyncError::InvalidBlock { height, peer_ip, error },
+                        false => AdvanceBlockSyncError::FailedCheck { height, peer_ip, error },
                     }
                 })?;
 
@@ -1009,10 +1028,13 @@ impl<N: Network> BlockSync<N> {
                 Err(error) => {
                     warn!("{error}");
                     self.remove_block_response(next_height);
-                    if let AdvanceBlockSyncError::InvalidBlock { peer_ip, .. } = &error {
+                    if let AdvanceBlockSyncError::InvalidBlock { peer_ip, .. }
+                    | AdvanceBlockSyncError::FailedCheck { peer_ip, .. } = &error
+                    {
                         self.remove_peer(peer_ip);
                         self.remove_block_responses_from(*peer_ip);
                     }
+                    self.set_sync_height(current_height);
                     return Err(error);
                 }
             };
@@ -4043,10 +4065,16 @@ mod tests {
         assert_eq!(service.num_sent_to(sample_peer_ip(1)) + service.num_sent_to(sample_peer_ip(2)), 0);
     }
 
-    /// Returns a Beacon block at `height` with `round`, signed by a fresh key, that links to the mock
-    /// ledger's block at `height - 1`. The block goes through the block response encoding, so it
-    /// passes the checks a peer's block passes on arrival.
-    fn sample_beacon_block(height: u32, round: u64, rng: &mut TestRng) -> Block<CurrentNetwork> {
+    /// Returns a block at `height` with `round` that links to the mock ledger's block at
+    /// `height - 1`: a Beacon block signed by a fresh key, or a Quorum block on `subdag`. The block
+    /// goes through the block response encoding, so it passes the checks a peer's block passes on
+    /// arrival.
+    fn sample_block(
+        height: u32,
+        round: u64,
+        subdag: Option<snarkvm::ledger::narwhal::Subdag<CurrentNetwork>>,
+        rng: &mut TestRng,
+    ) -> Block<CurrentNetwork> {
         use snarkvm::{
             ledger::block::{Header, Metadata, Ratifications, Transactions},
             prelude::{FromBytes, PrivateKey, ToBytes, Zero},
@@ -4067,21 +4095,52 @@ mod tests {
         )
         .unwrap();
         let one = Field::<CurrentNetwork>::from_u32(1);
-        let header = Header::from(one.into(), one, one, one, g.solutions_root(), Field::zero(), metadata).unwrap();
-        let block = Block::new_beacon(
-            &PrivateKey::new(rng).unwrap(),
-            Field::<CurrentNetwork>::from_u32(height - 1).into(),
-            header,
-            Ratifications::try_from(vec![]).unwrap(),
-            genesis.solutions().clone(),
-            vec![],
-            Transactions::from(&[]),
-            vec![],
-            rng,
-        )
+        let subdag_root = subdag.as_ref().map_or(Field::zero(), |subdag| subdag.to_subdag_root().unwrap());
+        let header = Header::from(one.into(), one, one, one, g.solutions_root(), subdag_root, metadata).unwrap();
+        let previous_hash = Field::<CurrentNetwork>::from_u32(height - 1).into();
+        let (ratifications, solutions) = (Ratifications::try_from(vec![]).unwrap(), genesis.solutions().clone());
+        let transactions = Transactions::from(&[]);
+        let block = match subdag {
+            Some(subdag) => {
+                Block::new_quorum(previous_hash, header, subdag, ratifications, solutions, vec![], transactions, vec![])
+            }
+            None => {
+                let private_key = PrivateKey::new(rng).unwrap();
+                let (aborted_solutions, aborted_transactions) = (vec![], vec![]);
+                Block::new_beacon(
+                    &private_key,
+                    previous_hash,
+                    header,
+                    ratifications,
+                    solutions,
+                    aborted_solutions,
+                    transactions,
+                    aborted_transactions,
+                    rng,
+                )
+            }
+        }
         .unwrap();
         let bytes = DataBlocks(vec![block]).to_bytes_le().unwrap();
         DataBlocks::<CurrentNetwork>::read_le(&bytes[..]).unwrap().0.pop().unwrap()
+    }
+
+    /// Returns a Quorum block at `height` with `round` (see [`sample_block`]). Its subdag is one
+    /// certificate without transmissions, from fresh keys.
+    fn sample_quorum_block(height: u32, round: u64, rng: &mut TestRng) -> Block<CurrentNetwork> {
+        use snarkvm::{
+            ledger::narwhal::{BatchCertificate, BatchHeader, Subdag},
+            prelude::PrivateKey,
+        };
+        let private_key = PrivateKey::new(rng).unwrap();
+        let previous_certificate_ids = indexset![Field::<CurrentNetwork>::from_u32(1)];
+        let batch_header =
+            BatchHeader::new(&private_key, 2, 0, Field::from_u32(1), IndexSet::new(), previous_certificate_ids, rng)
+                .unwrap();
+        let signature = PrivateKey::new(rng).unwrap().sign(&[batch_header.batch_id()], rng).unwrap();
+        let certificate = BatchCertificate::from(batch_header, indexset![signature]).unwrap();
+        let subdag = Subdag::from([(2, indexset![certificate])].into()).unwrap();
+        sample_block(height, round, Some(subdag), rng)
     }
 
     /// Returns block sync on `ledger`, with two peers ahead and block responses from the first
@@ -4097,21 +4156,21 @@ mod tests {
         sync
     }
 
-    /// Tests that a block the ledger rejects is removed with the sender's other blocks, that the
-    /// error names the sender, and that the height is requested again from another peer.
+    /// Tests that a block that fails the ledger check is removed with the sender and its other
+    /// blocks, and that the height is requested again from another peer.
     #[tokio::test]
-    async fn test_invalid_block_is_removed_and_requested_again() {
+    async fn test_failed_check_removes_block_and_sender() {
         let rng = &mut TestRng::default();
         let (sender, other) = (sample_peer_ip(1), sample_peer_ip(2));
         // The round of the mock ledger's latest block is 2_000.
-        let blocks = vec![sample_beacon_block(1_001, 3_000, rng), sample_beacon_block(1_002, 3_002, rng)];
-        let good = sample_beacon_block(1_001, 2_002, rng);
+        let blocks = vec![sample_quorum_block(1_001, 3_000, rng), sample_quorum_block(1_002, 3_002, rng)];
+        let good = sample_quorum_block(1_001, 2_002, rng);
         let ledger = sample_ledger_service(1_000).with_valid_block_hashes([good.hash()]);
         let sync = sample_sync_with_responses(ledger, blocks);
 
         let error = sync.try_advancing_block_synchronization().await.unwrap_err();
         assert!(
-            matches!(error, AdvanceBlockSyncError::InvalidBlock { height: 1_001, peer_ip, .. } if peer_ip == sender),
+            matches!(error, AdvanceBlockSyncError::FailedCheck { height: 1_001, peer_ip, .. } if peer_ip == sender),
             "{error}"
         );
         assert_eq!(sync.ledger.latest_block_height(), 1_000);
@@ -4124,14 +4183,14 @@ mod tests {
         assert_eq!(sync.ledger.latest_block_height(), 1_001);
     }
 
-    /// Tests that a block with a round at or below the latest round is rejected, and that block
+    /// Tests that a block with a round at or below the latest round is invalid, and that block
     /// sync does not move past its height.
     #[tokio::test]
     async fn test_invalid_round_block_is_not_skipped() {
         let rng = &mut TestRng::default();
         let sender = sample_peer_ip(1);
-        let mut blocks = vec![sample_beacon_block(1_001, 1_500, rng)];
-        blocks.extend((1_002..1_006).map(|height| sample_beacon_block(height, 2 * height as u64, rng)));
+        let mut blocks = vec![sample_quorum_block(1_001, 1_500, rng)];
+        blocks.extend((1_002..1_004).map(|height| sample_quorum_block(height, 2 * height as u64, rng)));
         let ledger = sample_ledger_service(1_000).with_valid_block_hashes(blocks[1..].iter().map(|block| block.hash()));
         let sync = sample_sync_with_responses(ledger, blocks);
         let sync_height = sync.get_sync_height();
@@ -4143,24 +4202,42 @@ mod tests {
         );
         assert_eq!(sync.ledger.latest_block_height(), 1_000);
         assert_eq!(sync.get_sync_height(), sync_height);
+        assert!(!sync.locators.read().contains_key(&sender));
         assert_eq!(sent_by_request_passes(&sync).await.first(), Some(&(sample_peer_ip(2), 1_001, 1_006)));
     }
 
-    /// Tests that a block the ledger fails to check is removed and requested again, and that its
-    /// sender stays a sync peer.
+    /// Tests that a Beacon block is invalid, even if the ledger accepts it.
     #[tokio::test]
-    async fn test_unchecked_block_is_removed_without_penalty() {
+    async fn test_beacon_block_is_invalid() {
         let rng = &mut TestRng::default();
-        let sender = sample_peer_ip(1);
-        let block = sample_beacon_block(1_001, 2_002, rng);
-        let ledger = sample_ledger_service(1_000).with_unreadable_block_hashes([block.hash()]);
+        let block = sample_block(1_001, 2_002, None, rng);
+        let ledger = sample_ledger_service(1_000).with_valid_block_hashes([block.hash()]);
         let sync = sample_sync_with_responses(ledger, vec![block]);
 
         let error = sync.try_advancing_block_synchronization().await.unwrap_err();
-        assert!(matches!(error, AdvanceBlockSyncError::Other(_)), "{error}");
+        assert!(matches!(error, AdvanceBlockSyncError::InvalidBlock { height: 1_001, .. }), "{error}");
         assert_eq!(sync.ledger.latest_block_height(), 1_000);
         assert!(sync.requests.read().is_empty());
+    }
+
+    /// Tests that a block the ledger fails to write is removed and requested again, that its
+    /// sender stays a sync peer, and that the sync height covers the blocks before it.
+    #[tokio::test]
+    async fn test_failed_advance_removes_block_only() {
+        let rng = &mut TestRng::default();
+        let sender = sample_peer_ip(1);
+        let blocks = vec![sample_quorum_block(1_001, 2_002, rng), sample_quorum_block(1_002, 2_004, rng)];
+        let ledger = sample_ledger_service(1_000)
+            .with_valid_block_hashes(blocks.iter().map(|block| block.hash()))
+            .with_unwritable_block_hashes([blocks[1].hash()]);
+        let sync = sample_sync_with_responses(ledger, blocks);
+
+        let error = sync.try_advancing_block_synchronization().await.unwrap_err();
+        assert!(matches!(error, AdvanceBlockSyncError::Other(_)), "{error}");
+        assert_eq!(sync.ledger.latest_block_height(), 1_001);
+        assert_eq!(sync.get_sync_height(), 1_001);
+        assert!(sync.requests.read().is_empty());
         assert!(sync.locators.read().contains_key(&sender));
-        assert!(sent_by_request_passes(&sync).await.iter().any(|(_, start, _)| *start == 1_001));
+        assert!(sent_by_request_passes(&sync).await.iter().any(|(_, start, _)| *start == 1_002));
     }
 }

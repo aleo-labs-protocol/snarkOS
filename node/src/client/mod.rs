@@ -319,7 +319,8 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
                 if let AdvanceBlockSyncError::InvalidBlock { peer_ip, .. } = err {
                     self.router().ip_ban_peer(peer_ip, Some(&err.to_string()));
                 }
-                return;
+                // The pass can advance the ledger before it fails.
+                true
             }
         };
 
