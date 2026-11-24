@@ -1125,7 +1125,8 @@ mod tests {
 
     use crate::{
         BFT,
-        helpers::now,
+        PrimaryCallback,
+        helpers::{ConsensusReceiver, PrimarySender, init_consensus_channels, init_primary_channels, now},
         ledger_service::{CoreLedgerService, MockLedgerService},
         storage_service::BFTMemoryService,
     };
@@ -1141,16 +1142,16 @@ mod tests {
             network::MainnetV0,
         },
         ledger::{
-            narwhal::{BatchCertificate, BatchHeader, Subdag},
+            narwhal::{BatchCertificate, BatchHeader, Data, Subdag, Transmission, TransmissionID},
             store::{ConsensusStore, StorageMode, helpers::memory::ConsensusMemory},
         },
-        prelude::{FromBytes, Ledger, ToBytes, VM},
+        prelude::{FromBytes, Ledger, ToBytes, VM, Value},
         utilities::TestRng,
     };
 
-    use indexmap::IndexSet;
+    use indexmap::{IndexMap, IndexSet};
     use rand::RngExt;
-    use std::{collections::BTreeMap, sync::OnceLock};
+    use std::{collections::BTreeMap, net::Ipv4Addr, str::FromStr, sync::OnceLock};
 
     type CurrentNetwork = MainnetV0;
     type CurrentLedger = Ledger<CurrentNetwork, ConsensusMemory<CurrentNetwork>>;
@@ -1859,6 +1860,390 @@ mod tests {
         let error = stale_result.expect_err("A subdag with committed certificates must not become a block").to_string();
         assert!(error.contains("is already in the ledger"), "Unexpected error: {error}");
         assert_eq!(block.height(), 3);
+    }
+
+    /// A subdag and its transmissions, as the BFT sends them to consensus, with the callback for the answer.
+    type ConsensusSubdag = (
+        Subdag<CurrentNetwork>,
+        IndexMap<TransmissionID<CurrentNetwork>, Transmission<CurrentNetwork>>,
+        oneshot::Sender<Result<bool>>,
+    );
+
+    /// A validator that runs a BFT without peers, and without the consensus that processes its subdags.
+    struct TestValidator {
+        /// The ledger that `ledger_service` wraps.
+        ledger: CurrentLedger,
+        ledger_service: Arc<dyn LedgerService<CurrentNetwork>>,
+        storage: Storage<CurrentNetwork>,
+        sync: Sync<CurrentNetwork>,
+        bft: BFT<CurrentNetwork>,
+        /// The sender that consensus uses to return transmissions to the workers of `bft`.
+        primary_sender: PrimarySender<CurrentNetwork>,
+        /// The receiver of the subdags that `bft` sends to consensus.
+        consensus_receiver: ConsensusReceiver<CurrentNetwork>,
+        /// The directory of the proposal cache of `bft`.
+        _node_data_dir: tempfile::TempDir,
+    }
+
+    impl TestValidator {
+        /// Returns a validator whose ledger holds only the genesis block.
+        async fn new(genesis: Block<CurrentNetwork>, rng: &mut TestRng) -> Self {
+            let max_gc_rounds = BatchHeader::<CurrentNetwork>::MAX_GC_ROUNDS as u64;
+            let ledger = spawn_blocking!(CurrentLedger::load(genesis, StorageMode::new_test(None))).unwrap();
+            let ledger_service: Arc<dyn LedgerService<CurrentNetwork>> =
+                Arc::new(CoreLedgerService::new(ledger.clone(), SimpleStoppable::new()));
+
+            let account = Account::new(rng).unwrap();
+            let storage =
+                Storage::new(ledger_service.clone(), Arc::new(BFTMemoryService::new()), max_gc_rounds).unwrap();
+            let gateway = Gateway::new(
+                account.clone(),
+                storage.clone(),
+                ledger_service.clone(),
+                None,
+                &[],
+                false,
+                NodeDataDir::new_test(None),
+                None,
+            )
+            .unwrap();
+
+            let block_sync = Arc::new(BlockSync::new(ledger_service.clone(), ConnectionMode::Gateway));
+            let sync = Sync::new(gateway.clone(), storage.clone(), ledger_service.clone(), block_sync.clone());
+
+            // The gateway of the BFT listens on a port that the system assigns.
+            let node_data_dir = tempfile::tempdir().unwrap();
+            let mut bft = BFT::new(
+                account,
+                storage.clone(),
+                ledger_service.clone(),
+                block_sync,
+                Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
+                &[],
+                false,
+                NodeDataDir::new(node_data_dir.path().to_path_buf()),
+                None,
+                1,
+            )
+            .unwrap();
+            let (primary_sender, primary_receiver) = init_primary_channels();
+            let (consensus_sender, consensus_receiver) = init_consensus_channels();
+            bft.run(None, Some(consensus_sender), primary_sender.clone(), primary_receiver).await.unwrap();
+
+            sync.initialize(Some(Arc::new(bft.clone()))).unwrap();
+
+            Self {
+                ledger,
+                ledger_service,
+                storage,
+                sync,
+                bft,
+                primary_sender,
+                consensus_receiver,
+                _node_data_dir: node_data_dir,
+            }
+        }
+
+        /// Inserts the certificates into the storage, round by round.
+        fn insert_certificates(
+            &self,
+            rounds: &[Vec<BatchCertificate<CurrentNetwork>>],
+            transmissions: &HashMap<TransmissionID<CurrentNetwork>, Transmission<CurrentNetwork>>,
+        ) {
+            for certificate in rounds.iter().flatten() {
+                let transmissions =
+                    certificate.transmission_ids().iter().map(|id| (*id, transmissions[id].clone())).collect();
+                self.storage.insert_certificate(certificate.clone(), transmissions, Default::default()).unwrap();
+            }
+        }
+
+        /// Waits for the subdag that the BFT sends to consensus while it processes `add_certificate`.
+        ///
+        /// The BFT orders the subdag before it sends it. `add_certificate` does not complete before
+        /// [`Self::process_bft_subdag`] gets the subdag.
+        async fn next_consensus_subdag(
+            &mut self,
+            add_certificate: &mut (impl Future<Output = Result<()>> + Unpin),
+        ) -> ConsensusSubdag {
+            tokio::select! {
+                result = add_certificate => panic!("The BFT sent no subdag to consensus: {result:?}"),
+                message = self.consensus_receiver.rx_consensus_subdag.recv() => message.unwrap(),
+            }
+        }
+
+        /// Adds the certificate to the BFT, and passes every subdag that the BFT sends to consensus meanwhile to
+        /// [`Self::process_bft_subdag`].
+        async fn add_certificate_with_consensus(&mut self, certificate: BatchCertificate<CurrentNetwork>) {
+            let bft = self.bft.clone();
+            let add_certificate = bft.add_new_certificate(certificate);
+            tokio::pin!(add_certificate);
+            loop {
+                tokio::select! {
+                    result = &mut add_certificate => break result.unwrap(),
+                    message = self.consensus_receiver.rx_consensus_subdag.recv() => {
+                        assert_eq!(self.process_bft_subdag(message.unwrap()).await, Ok(true));
+                    }
+                }
+            }
+        }
+
+        /// Tries to advance the ledger with a subdag from the BFT, and answers the BFT, as
+        /// `Consensus::process_bft_subdag` does.
+        ///
+        /// Returns the answer, with the message of the error in place of the error.
+        async fn process_bft_subdag(&self, (subdag, transmissions, callback): ConsensusSubdag) -> Result<bool, String> {
+            let ledger_service = self.ledger_service.clone();
+            let transmissions_ = transmissions.clone();
+            let result: Result<bool> = spawn_blocking!({
+                let ledger_update = ledger_service.begin_ledger_update()?;
+                let mut block = ledger_update.prepare_advance_to_next_quorum_block(subdag, transmissions_);
+                if let Ok(prepared_block) = block {
+                    block = ledger_update.check_next_block(prepared_block);
+                }
+                let block = match block {
+                    Ok(block) => block,
+                    Err(
+                        CheckBlockError::BlockAlreadyExists { .. }
+                        | CheckBlockError::InvalidHeight { .. }
+                        | CheckBlockError::InvalidRound { .. },
+                    ) => return Ok(false),
+                    Err(error) => return Err(error.into_anyhow()),
+                };
+                ledger_update.advance_to_next_block(&block)?;
+                Ok(true)
+            });
+
+            // Consensus returns the transmissions of a subdag that did not become a block to the workers. It logs
+            // the outcome and does not act on it.
+            if !matches!(result, Ok(true)) {
+                for (transmission_id, transmission) in transmissions {
+                    let (TransmissionID::Transaction(transaction_id, _), Transmission::Transaction(transaction)) =
+                        (transmission_id, transmission)
+                    else {
+                        panic!("Expected a transaction")
+                    };
+                    let _ = self.primary_sender.send_unconfirmed_transaction(transaction_id, transaction).await;
+                }
+            }
+
+            let answer = result.as_ref().map(|is_advanced| *is_advanced).map_err(|error| format!("{error:#}"));
+            callback.send(result).unwrap();
+            answer
+        }
+    }
+
+    /// Returns a transfer of public credits from the given account, with its ID and as a transmission.
+    async fn sample_transfer(
+        ledger: &CurrentLedger,
+        private_key: PrivateKey<CurrentNetwork>,
+        rng: &mut TestRng,
+    ) -> (<CurrentNetwork as Network>::TransactionID, TransmissionID<CurrentNetwork>, Transmission<CurrentNetwork>)
+    {
+        let ledger = ledger.clone();
+        let mut rng = TestRng::from_seed(rng.random());
+        let transaction = spawn_blocking!({
+            let recipient = Address::try_from(private_key)?;
+            let inputs = [Value::from_str(&recipient.to_string())?, Value::from_str("1u64")?];
+            let transaction = ledger.vm().execute(
+                &private_key,
+                ("credits.aleo", "transfer_public"),
+                inputs.into_iter(),
+                None,
+                0,
+                None,
+                &mut rng,
+            )?;
+            Ok(transaction)
+        })
+        .unwrap();
+
+        let transaction_id = transaction.id();
+        let transaction = Data::Object(transaction);
+        let checksum = transaction.to_checksum::<CurrentNetwork>().unwrap();
+        (transaction_id, TransmissionID::Transaction(transaction_id, checksum), Transmission::Transaction(transaction))
+    }
+
+    /// Samples the certificates of rounds 1 to `num_rounds`, one of each validator in each round. A certificate
+    /// references every certificate of the previous round.
+    ///
+    /// `transmission_ids` gives the transmissions of a certificate, by its round and the index of its author.
+    fn sample_connected_certificates(
+        private_keys: &[PrivateKey<CurrentNetwork>],
+        committee_id: Field<CurrentNetwork>,
+        num_rounds: u64,
+        transmission_ids: &HashMap<(u64, usize), TransmissionID<CurrentNetwork>>,
+        rng: &mut TestRng,
+    ) -> Vec<Vec<BatchCertificate<CurrentNetwork>>> {
+        let mut rounds: Vec<Vec<BatchCertificate<CurrentNetwork>>> = Vec::with_capacity(num_rounds as usize);
+        for round in 1..=num_rounds {
+            let previous_certificate_ids: IndexSet<_> =
+                rounds.last().into_iter().flatten().map(|certificate| certificate.id()).collect();
+
+            let mut certificates = Vec::with_capacity(private_keys.len());
+            for (i, private_key) in private_keys.iter().enumerate() {
+                let batch_header = BatchHeader::new(
+                    private_key,
+                    round,
+                    now(),
+                    committee_id,
+                    transmission_ids.get(&(round, i)).into_iter().copied().collect(),
+                    previous_certificate_ids.clone(),
+                    rng,
+                )
+                .unwrap();
+
+                let mut signatures = IndexSet::with_capacity(private_keys.len() - 1);
+                for (j, signer) in private_keys.iter().enumerate() {
+                    if i != j {
+                        signatures.insert(signer.sign(&[batch_header.batch_id()], rng).unwrap());
+                    }
+                }
+                certificates.push(BatchCertificate::from(batch_header, signatures).unwrap());
+            }
+            rounds.push(certificates);
+        }
+        rounds
+    }
+
+    /// Returns the subdag of a quorum block.
+    fn block_subdag(block: &Block<CurrentNetwork>) -> &Subdag<CurrentNetwork> {
+        let Authority::Quorum(subdag) = block.authority() else { panic!("Expected a quorum block") };
+        subdag
+    }
+
+    /// Tests that the BFT builds the expected block after the ledger rejects a subdag that block sync made stale.
+    ///
+    /// The BFT orders the subdag of the round 4 leader while the ledger lacks the block of the round 2 leader.
+    /// Block sync adds that block before the subdag reaches the ledger update. The BFT orders the subdag again
+    /// when the next certificate of round 5 arrives.
+    #[tokio::test]
+    async fn test_bft_builds_block_after_sync_makes_subdag_stale() {
+        let rng = &mut TestRng::default();
+        let (genesis, private_keys) = sample_genesis(rng).await;
+
+        let mut reference = TestValidator::new(genesis.clone(), rng).await;
+        let mut validator = TestValidator::new(genesis, rng).await;
+
+        // Sample one transaction for the block of each leader.
+        let (first_transaction_id, first_id, first_transmission) =
+            sample_transfer(&reference.ledger, private_keys[0], rng).await;
+        let (second_transaction_id, second_id, second_transmission) =
+            sample_transfer(&reference.ledger, private_keys[1], rng).await;
+        let transmissions = HashMap::from([(first_id, first_transmission), (second_id, second_transmission)]);
+
+        let committee = reference.ledger.latest_committee().unwrap();
+        let rounds = sample_connected_certificates(
+            &private_keys,
+            committee.id(),
+            5,
+            &HashMap::from([((1, 0), first_id), ((3, 0), second_id)]),
+            rng,
+        );
+        let [round_5_first, round_5_second, round_5_third, round_5_fourth] = rounds[4].clone().try_into().unwrap();
+
+        // Build the reference blocks with a BFT that commits each leader in turn.
+        reference.insert_certificates(&rounds, &transmissions);
+        for certificate in rounds.iter().flatten() {
+            reference.add_certificate_with_consensus(certificate.clone()).await;
+        }
+        assert_eq!(reference.ledger_service.latest_block_height(), 2);
+        let first_block = reference.ledger_service.get_block(1).unwrap();
+        let second_block = reference.ledger_service.get_block(2).unwrap();
+        let first_subdag = block_subdag(&first_block);
+        let second_subdag = block_subdag(&second_block);
+        assert_eq!(first_subdag.anchor_round(), 2);
+        assert_eq!(second_subdag.anchor_round(), 4);
+        assert_eq!(first_block.transaction_ids().copied().collect::<Vec<_>>(), [first_transaction_id]);
+        assert_eq!(second_block.transaction_ids().copied().collect::<Vec<_>>(), [second_transaction_id]);
+
+        // Keep the round 2 leader certificate out of the DAG, so that the BFT does not commit round 2.
+        let round_2_leader = committee.get_leader(2).unwrap();
+        validator.insert_certificates(&rounds, &transmissions);
+        for certificate in rounds[..4].iter().flatten().chain([&round_5_first]) {
+            if certificate.round() != 2 || certificate.author() != round_2_leader {
+                validator.bft.add_new_certificate(certificate.clone()).await.unwrap();
+            }
+        }
+        assert!(validator.consensus_receiver.rx_consensus_subdag.try_recv().is_err());
+
+        // The second certificate of round 5 makes the BFT commit round 4. Hold the subdag that the BFT ordered.
+        let bft = validator.bft.clone();
+        let stale_commit = bft.add_new_certificate(round_5_second);
+        tokio::pin!(stale_commit);
+        let (stale_subdag, stale_transmissions, stale_callback) =
+            validator.next_consensus_subdag(&mut stale_commit).await;
+        assert_eq!(validator.ledger_service.latest_block_height(), 0);
+        assert_eq!(stale_subdag.anchor_round(), 4);
+        // The subdag holds the certificates and the transmissions of both reference blocks.
+        let stale_certificate_ids: HashSet<_> = stale_subdag.certificate_ids().collect();
+        let reference_certificate_ids: HashSet<_> =
+            first_subdag.certificate_ids().chain(second_subdag.certificate_ids()).collect();
+        assert_eq!(stale_certificate_ids, reference_certificate_ids);
+        assert_eq!(stale_transmissions.keys().copied().collect::<HashSet<_>>(), HashSet::from([first_id, second_id]));
+
+        // Block sync adds the first reference block. The second one is the successor that it needs to do so.
+        validator.sync.sync_storage_with_block(first_block.clone(), true).await.unwrap();
+        validator.sync.sync_storage_with_block(second_block.clone(), true).await.unwrap();
+        assert_eq!(validator.ledger_service.latest_block_height(), 1);
+        assert_eq!(validator.bft.testing_only_latest_committed_round(), 2);
+
+        // snarkVM alone accepts a block that commits the certificates of the first block again.
+        let ledger = validator.ledger.clone();
+        let (subdag, transmissions_) = (stale_subdag.clone(), stale_transmissions.clone());
+        let duplicate_block = spawn_blocking!({
+            let rng = &mut TestRng::default();
+            let block = ledger.prepare_advance_to_next_quorum_block(subdag, transmissions_, rng)?;
+            ledger.check_next_block(&block, rng)?;
+            Ok(block)
+        })
+        .unwrap();
+        assert_eq!(duplicate_block.height(), 2);
+        let duplicate_certificate_ids: HashSet<_> = block_subdag(&duplicate_block).certificate_ids().collect();
+        assert!(first_subdag.certificate_ids().all(|id| duplicate_certificate_ids.contains(&id)));
+
+        // The ledger update rejects the stale subdag, and the BFT commits none of its certificates.
+        let answer = validator.process_bft_subdag((stale_subdag, stale_transmissions, stale_callback)).await;
+        stale_commit.await.unwrap();
+        let error = answer.expect_err("A subdag with committed certificates must not become a block");
+        assert!(error.contains("is already in the ledger"), "Unexpected error: {error}");
+        assert_eq!(validator.ledger_service.latest_block_height(), 1);
+        assert_eq!(validator.bft.testing_only_latest_committed_round(), 2);
+        // The workers queue neither transaction: the ledger holds the first one, and the storage holds the second
+        // one for a certificate that is not committed.
+        assert_eq!(validator.bft.num_unconfirmed_transmissions(), 0);
+        assert!(validator.ledger_service.contains_transmission(&first_id).unwrap());
+        assert!(!validator.ledger_service.contains_transmission(&second_id).unwrap());
+        assert!(validator.storage.get_transmission(second_id).is_some());
+
+        // The third certificate of round 5 makes the BFT commit round 4 again.
+        let retried_commit = bft.add_new_certificate(round_5_third);
+        tokio::pin!(retried_commit);
+        let (retried_subdag, retried_transmissions, retried_callback) =
+            validator.next_consensus_subdag(&mut retried_commit).await;
+        assert_eq!(&retried_subdag, second_subdag);
+        assert_eq!(retried_transmissions.keys().copied().collect::<Vec<_>>(), [second_id]);
+
+        let answer = validator.process_bft_subdag((retried_subdag, retried_transmissions, retried_callback)).await;
+        retried_commit.await.unwrap();
+        assert_eq!(answer, Ok(true));
+        assert_eq!(validator.ledger_service.latest_block_height(), 2);
+        assert_eq!(validator.bft.testing_only_latest_committed_round(), 4);
+
+        // The last certificate of round 5 starts no further commit.
+        validator.bft.add_new_certificate(round_5_fourth).await.unwrap();
+        assert!(validator.consensus_receiver.rx_consensus_subdag.try_recv().is_err());
+
+        // Each transaction is in exactly one block, and the workers hold none.
+        for (height, reference_block) in [(1, &first_block), (2, &second_block)] {
+            let block = validator.ledger_service.get_block(height).unwrap();
+            assert_eq!(block.hash(), reference_block.hash());
+            assert_eq!(
+                block.transaction_ids().collect::<Vec<_>>(),
+                reference_block.transaction_ids().collect::<Vec<_>>()
+            );
+            assert!(block.aborted_transaction_ids().is_empty());
+        }
+        assert_eq!(validator.bft.num_unconfirmed_transmissions(), 0);
     }
 
     #[tokio::test]
