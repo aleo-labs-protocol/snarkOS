@@ -311,6 +311,12 @@ pub struct BlockSync<N: Network> {
 }
 
 impl<N: Network> BlockSync<N> {
+    /// The maximum number of block requests that await a response.
+    const MAX_OUTSTANDING_BLOCK_REQUESTS: u32 =
+        (MAX_BLOCK_REQUESTS as u32) * (DataBlocks::<N>::MAXIMUM_NUMBER_OF_BLOCKS as u32);
+    /// The maximum number of block requests, including the answered ones that are not processed yet.
+    const MAX_TOTAL_BLOCK_REQUESTS: u32 = 4 * Self::MAX_OUTSTANDING_BLOCK_REQUESTS;
+
     /// Initializes a new block sync module.
     pub fn new(ledger: Arc<dyn LedgerService<N>>, connection_mode: ConnectionMode) -> Self {
         // Make sync state aware of the blocks that already exist on disk at startup.
@@ -1257,8 +1263,8 @@ impl<N: Network> BlockSync<N> {
         {
             failed_requests.pop_first();
         }
-        // Drop the failed requests above every height a peer advertises. New locators bring those
-        // heights back as new requests.
+        // Drop the failed requests above every height a peer advertises. A peer that advertises
+        // those heights brings them back as new requests.
         let advertised_tip = tips.map_or(0, |(_, advertised_tip)| advertised_tip);
         failed_requests.split_off(&advertised_tip.saturating_add(1));
 
@@ -1350,11 +1356,10 @@ impl<N: Network> BlockSync<N> {
         }
 
         // Ensure to not exceed the maximum number of outstanding block requests.
-        let max_outstanding_block_requests =
-            (MAX_BLOCK_REQUESTS as u32) * (DataBlocks::<N>::MAXIMUM_NUMBER_OF_BLOCKS as u32);
+        let max_outstanding_block_requests = Self::MAX_OUTSTANDING_BLOCK_REQUESTS;
 
         // Ensure there is a finite bound on the number of block respnoses we receive, that have not been processed yet.
-        let max_total_requests = 4 * max_outstanding_block_requests;
+        let max_total_requests = Self::MAX_TOTAL_BLOCK_REQUESTS;
 
         let max_new_blocks_to_request =
             max_outstanding_block_requests.saturating_sub(self.num_outstanding_block_requests() as u32);
@@ -1362,8 +1367,8 @@ impl<N: Network> BlockSync<N> {
         // The first height to request: the next one this node needs, or the first above it not
         // already requested.
         let start_height = self.first_unrequested_height(current_height.saturating_add(1));
-        // The total request cap does not apply to a gap below a requested height: the responses
-        // above the gap leave the buffer only once the gap is filled.
+        // The total request cap does not apply to a gap below a requested height: the answered
+        // requests above the gap leave the map only once the gap is filled.
         let fills_gap = self.requests.read().last_key_value().is_some_and(|(height, _)| start_height < *height);
 
         // Prepare the block requests and sync peers, or returns an empty result if there is nothing to request.
@@ -3100,10 +3105,8 @@ mod tests {
             use snarkvm::prelude::FromBytes;
             Block::<CurrentNetwork>::from_bytes_le(CurrentNetwork::genesis_bytes()).unwrap()
         };
-        let max_total_requests =
-            4 * MAX_BLOCK_REQUESTS as u32 * DataBlocks::<CurrentNetwork>::MAXIMUM_NUMBER_OF_BLOCKS as u32;
         let mut requests = sync.requests.write();
-        for height in start..start + max_total_requests {
+        for height in start..start + BlockSync::<CurrentNetwork>::MAX_TOTAL_BLOCK_REQUESTS {
             requests.insert(height, OutstandingRequest {
                 request: (None, None, IndexSet::new()),
                 timestamp: Instant::now(),
@@ -3191,6 +3194,19 @@ mod tests {
         add_peers(&sync, 1, 1, 3_000, 0);
         fill_response_buffer(&sync, 1_002);
         assert_eq!(sent_by_request_passes(&sync).await, vec![(sample_peer_ip(1), 1_001, 1_002)]);
+    }
+
+    /// Tests that a gap below a full response buffer is requested when answered requests remain
+    /// below it, between the ledger height and the sync height.
+    #[tokio::test]
+    async fn test_untracked_gap_above_sync_height_is_requested() {
+        let sync = sample_sync_at_height(1_000);
+        add_peers(&sync, 1, 1, 3_000, 0);
+        fill_response_buffer(&sync, 1_001);
+        sync.requests.write().retain(|height, _| *height <= 1_010);
+        sync.set_sync_height(1_010);
+        fill_response_buffer(&sync, 1_012);
+        assert_eq!(sent_by_request_passes(&sync).await, vec![(sample_peer_ip(1), 1_011, 1_012)]);
     }
 
     /// Tests that a `Pruned` reply raises the floor, releases the whole chunk at once, and that the
