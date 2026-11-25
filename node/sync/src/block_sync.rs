@@ -315,6 +315,12 @@ pub struct BlockSync<N: Network> {
 }
 
 impl<N: Network> BlockSync<N> {
+    /// The maximum number of block requests that await a response.
+    const MAX_OUTSTANDING_BLOCK_REQUESTS: u32 =
+        (MAX_BLOCK_REQUESTS as u32) * (DataBlocks::<N>::MAXIMUM_NUMBER_OF_BLOCKS as u32);
+    /// The maximum number of block requests, including the answered ones that are not processed yet.
+    const MAX_TOTAL_BLOCK_REQUESTS: u32 = 4 * Self::MAX_OUTSTANDING_BLOCK_REQUESTS;
+
     /// Initializes a new block sync module.
     pub fn new(ledger: Arc<dyn LedgerService<N>>, connection_mode: ConnectionMode) -> Self {
         // Make sync state aware of the blocks that already exist on disk at startup.
@@ -754,16 +760,11 @@ impl<N: Network> BlockSync<N> {
         let mut next_request_slot = None;
 
         if batches.is_empty() {
-            let total_requests = self.num_total_block_requests();
-            let num_outstanding = self.num_outstanding_block_requests();
-            if total_requests == 0 {
+            // Failed requests that wait for a peer are reported by `prepare_block_requests`.
+            if self.num_total_block_requests() == 0 && self.failed_requests.lock().is_empty() {
                 debug!(
                     "Not block synced yet, and there are no outstanding block requests or \
                  new block requests to send"
-                );
-            } else if !self.requested_all_served() {
-                trace!(
-                    "Not block synced yet, but there are still {total_requests} in-flight requests. {num_outstanding} are still awaiting responses."
                 );
             }
         } else {
@@ -1253,6 +1254,7 @@ impl<N: Network> BlockSync<N> {
 
         // Do not hold lock here as, currently, `find_sync_peers_inner` can take a while.
         let current_height = self.retention_height();
+        let tips = self.peer_tips();
 
         // Determine if there are any failed requests that need to be re-issued.
         //
@@ -1265,11 +1267,13 @@ impl<N: Network> BlockSync<N> {
         {
             failed_requests.pop_first();
         }
+        // Drop the failed requests above every height a peer advertises. A peer that advertises
+        // those heights brings them back as new requests.
+        let advertised_tip = tips.map_or(0, |(_, advertised_tip)| advertised_tip);
+        failed_requests.split_off(&advertised_tip.saturating_add(1));
 
         // Re-issue the remaining failed requests.
         if !failed_requests.is_empty() {
-            trace!("There are {} failed requests that need to be re-issued.", failed_requests.len());
-
             // Convert the set of failed requests into one or multiple continuous ranges.
             let iter = failed_requests.iter();
             let mut batches: VecDeque<Vec<(u32, _, _)>> = VecDeque::new();
@@ -1307,6 +1311,11 @@ impl<N: Network> BlockSync<N> {
                 if max_new_blocks_to_request == 0 {
                     continue;
                 }
+                // No peer serves `start`, so `find_sync_peers_inner` would find no sync peers.
+                if tips.is_some_and(|(served_tip, _)| served_tip < start) {
+                    continue;
+                }
+                trace!("Trying to re-issue failed block requests {start}..{end_height}");
 
                 let Some((sync_peers, min_common_ancestor)) = self.find_sync_peers_inner(current_height, Some(start))
                 else {
@@ -1351,11 +1360,10 @@ impl<N: Network> BlockSync<N> {
         }
 
         // Ensure to not exceed the maximum number of outstanding block requests.
-        let max_outstanding_block_requests =
-            (MAX_BLOCK_REQUESTS as u32) * (DataBlocks::<N>::MAXIMUM_NUMBER_OF_BLOCKS as u32);
+        let max_outstanding_block_requests = Self::MAX_OUTSTANDING_BLOCK_REQUESTS;
 
         // Ensure there is a finite bound on the number of block respnoses we receive, that have not been processed yet.
-        let max_total_requests = 4 * max_outstanding_block_requests;
+        let max_total_requests = Self::MAX_TOTAL_BLOCK_REQUESTS;
 
         let max_new_blocks_to_request =
             max_outstanding_block_requests.saturating_sub(self.num_outstanding_block_requests() as u32);
@@ -1363,9 +1371,12 @@ impl<N: Network> BlockSync<N> {
         // The first height to request: the next one this node needs, or the first above it not
         // already requested.
         let start_height = self.first_unrequested_height(current_height.saturating_add(1));
+        // The total request cap does not apply to a gap below a requested height: the answered
+        // requests above the gap leave the map only once the gap is filled.
+        let fills_gap = self.requests.read().last_key_value().is_some_and(|(height, _)| start_height < *height);
 
         // Prepare the block requests and sync peers, or returns an empty result if there is nothing to request.
-        if self.num_total_block_requests() >= max_total_requests as usize {
+        if !fills_gap && self.num_total_block_requests() >= max_total_requests as usize {
             trace!(
                 "We are already requested at least {max_total_requests} blocks that have not been fully processed yet. Will not issue more."
             );
@@ -1379,9 +1390,18 @@ impl<N: Network> BlockSync<N> {
 
             print_requests();
             vec![]
-        } else if self.requested_all_served() {
-            // Nothing to request until a peer serves more blocks, e.g. at the tip while the tip
-            // block is in flight.
+        } else if let Some((served_tip, advertised_tip)) = tips.filter(|&(served_tip, advertised_tip)| {
+            served_tip < start_height && (current_height < served_tip || served_tip < advertised_tip)
+        }) {
+            // Every block a peer serves is in the ledger or requested, and a peer is ahead of this
+            // node, e.g. at the tip while the tip block is in flight. This check must precede
+            // `find_sync_peers_inner`: no peer serves `start_height`, so it finds no sync peers, and
+            // the final branch logs on every call.
+            if served_tip < advertised_tip {
+                trace!(
+                    "Every block up to {served_tip}, the latest any peer serves, is in the ledger or requested, but peers advertise blocks up to {advertised_tip}"
+                );
+            }
             vec![]
         } else if let Some((sync_peers, min_common_ancestor)) =
             self.find_sync_peers_inner(current_height, Some(start_height))
@@ -1415,7 +1435,8 @@ impl<N: Network> BlockSync<N> {
 
             vec![]
         } else {
-            // No sync peers serve the next height to request.
+            // No sync peers were found for the next height to request: no peer ahead serves it, or
+            // too few of them share a common ancestor above the ledger height.
             trace!("No new blocks can be requested, but there are still outstanding requests.");
 
             print_requests();
@@ -1947,13 +1968,15 @@ impl<N: Network> BlockSync<N> {
         height
     }
 
-    /// Returns `true` if a peer is ahead of this node, and every block any peer serves is in the
-    /// ledger or requested.
-    fn requested_all_served(&self) -> bool {
-        let current_height = self.retention_height();
-        let start_height = self.first_unrequested_height(current_height.saturating_add(1));
-        let max_tip = self.locators.read().values().map(|peer| peer.serving_tip()).max();
-        max_tip.is_some_and(|tip| current_height < tip && tip < start_height)
+    /// Returns the greatest height any peer serves and the greatest height any peer advertises, or
+    /// `None` without peers. A `NotYet` reply caps the height a peer serves below the one it
+    /// advertises (see [`PeerLocators::tip_cap`]).
+    fn peer_tips(&self) -> Option<(u32, u32)> {
+        self.locators
+            .read()
+            .values()
+            .map(|peer| (peer.serving_tip(), peer.locators.latest_locator_height()))
+            .reduce(|(served, advertised), (s, a)| (served.max(s), advertised.max(a)))
     }
 
     /// Given the sync peers and their minimum common ancestor, return a list of block requests
@@ -2948,23 +2971,246 @@ mod tests {
         assert!(sync_peers.contains_key(&sample_peer_ip(2)));
     }
 
-    /// Tests when block sync has requested every block its peers serve.
+    /// Returns the number of log lines the enclosing `traced_test` has captured.
+    macro_rules! num_log_lines {
+        () => {{
+            let count = std::cell::Cell::new(0);
+            logs_assert(|lines| {
+                count.set(lines.len());
+                Ok(())
+            });
+            count.get()
+        }};
+    }
+
+    /// Tests that block sync prepares no requests and logs nothing once it has requested every
+    /// block its peers serve.
     #[test]
+    #[tracing_test::traced_test]
     fn test_quiet_while_tip_block_in_flight() {
         let sync = sample_sync_at_height(1_000);
         add_peers(&sync, 1, 1, 1_001, 0);
         insert_requests_to(&sync, sample_peer_ip(1), 1_001..1_002);
-        assert!(sync.requested_all_served());
+        let before = num_log_lines!();
+        assert!(sync.prepare_block_requests().is_empty());
+        assert_eq!(num_log_lines!(), before);
 
         // A peer ahead whose floor is above the next height to request.
         add_peers(&sync, 2, 1, 1_100, 1_050);
-        assert!(!sync.requested_all_served());
+        assert!(sync.prepare_block_requests().is_empty());
+        assert!(logs_contain("No new blocks can be requested"));
+    }
 
-        // No peer ahead, but requests are outstanding.
+    /// Tests that block sync logs when requests are outstanding, but no peer is ahead.
+    #[test]
+    #[tracing_test::traced_test]
+    fn test_not_quiet_without_peer_ahead() {
         let sync = sample_sync_at_height(1_000);
         add_peers(&sync, 1, 1, 1_000, 0);
         insert_requests_to(&sync, sample_peer_ip(1), 1_001..1_002);
-        assert!(!sync.requested_all_served());
+        assert!(sync.prepare_block_requests().is_empty());
+        assert!(logs_contain("No new blocks can be requested"));
+    }
+
+    /// Tests that the request pass sends and logs nothing once block sync has requested every
+    /// block its peers serve.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn test_request_pass_quiet_while_tip_block_in_flight() {
+        let sync = sample_sync_at_height(1_000);
+        add_peers(&sync, 1, 1, 1_001, 0);
+        insert_requests_to(&sync, sample_peer_ip(1), 1_001..1_002);
+        let service = RecordingService::default();
+        let before = num_log_lines!();
+        assert!(sync.try_issuing_block_requests(&service).await.is_none());
+        assert_eq!(num_log_lines!(), before);
+        assert!(service.sent.lock().unwrap().is_empty());
+    }
+
+    /// Tests that block sync prepares no requests once it has requested every block its peers
+    /// serve, and logs only the higher height a peer advertises after a `NotYet` reply caps it.
+    #[test]
+    #[tracing_test::traced_test]
+    fn test_requested_all_served_below_advertised_tip() {
+        let sync = sample_sync_at_height(1_000);
+        let peer_ip = sample_peer_ip(1);
+        add_peers(&sync, 1, 1, 1_010, 0);
+        insert_requests_to(&sync, peer_ip, 1_001..1_006);
+        sync.insert_block_unavailable(peer_ip, BlockRequest::new(1_002, 1_006).unwrap(), not_yet(1_001));
+        assert_eq!(tip_cap_of(&sync, peer_ip), Some(1_001));
+        let before = num_log_lines!();
+        assert!(sync.prepare_block_requests().is_empty());
+        assert_eq!(num_log_lines!(), before + 1);
+        assert!(logs_contain("Every block up to 1001, the latest any peer serves, is in the ledger or requested"));
+        assert!(logs_contain("advertise blocks up to 1010"));
+
+        // New locators clear the cap, and the released requests are issued again.
+        add_peers(&sync, 1, 1, 1_011, 0);
+        let (requests, _) = sync.prepare_block_requests().pop().unwrap();
+        assert_eq!(requests.first().unwrap().0, 1_002);
+    }
+
+    /// Tests that the request pass logs only the higher height a peer advertises when a `NotYet`
+    /// reply caps the peer at this node's height.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn test_request_pass_explains_cap_at_node_height() {
+        let sync = sample_sync_at_height(1_000);
+        let peer_ip = sample_peer_ip(1);
+        add_peers(&sync, 1, 1, 1_010, 0);
+        insert_requests_to(&sync, peer_ip, 1_001..1_006);
+        sync.insert_block_unavailable(peer_ip, BlockRequest::new(1_001, 1_006).unwrap(), not_yet(1_000));
+        assert_eq!(tip_cap_of(&sync, peer_ip), Some(1_000));
+        let service = RecordingService::default();
+        let before = num_log_lines!();
+        assert!(sync.try_issuing_block_requests(&service).await.is_none());
+        assert_eq!(num_log_lines!(), before + 1);
+        assert!(logs_contain("Every block up to 1000, the latest any peer serves, is in the ledger or requested"));
+        assert!(service.sent.lock().unwrap().is_empty());
+    }
+
+    /// Tests that failed requests above every height a peer advertises are dropped, and that the
+    /// request pass then finds nothing to sync.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn test_failed_requests_above_advertised_tip_are_dropped() {
+        let sync = sample_sync_at_height(1_000);
+        let peer_ahead = sample_peer_ip(1);
+        add_peers(&sync, 1, 1, 1_100, 0);
+        add_peers(&sync, 2, 1, 1_020, 0);
+        insert_requests_to(&sync, peer_ahead, 1_001..1_051);
+        sync.remove_peer(&peer_ahead);
+        assert_eq!(sync.failed_requests.lock().len(), 50);
+
+        // The remaining peer serves the failed requests up to its tip.
+        let (requests, _) = sync.prepare_block_requests().pop().unwrap();
+        assert_eq!(heights_of(&requests), (1_001..=1_020).collect::<Vec<_>>());
+        assert!(sync.failed_requests.lock().is_empty());
+
+        // Without a peer ahead, none of the failed requests remain.
+        let sync = sample_sync_at_height(1_000);
+        add_peers(&sync, 1, 1, 1_100, 0);
+        add_peers(&sync, 2, 1, 1_000, 0);
+        insert_requests_to(&sync, peer_ahead, 1_001..1_051);
+        sync.remove_peer(&peer_ahead);
+        assert_eq!(sync.failed_requests.lock().len(), 50);
+        let service = RecordingService::default();
+        assert!(sync.try_issuing_block_requests(&service).await.is_none());
+        assert!(sync.failed_requests.lock().is_empty());
+        assert!(!logs_contain("Nothing to sync"));
+        assert!(sync.try_issuing_block_requests(&service).await.is_none());
+        assert!(logs_contain("Nothing to sync"));
+        assert!(service.sent.lock().unwrap().is_empty());
+    }
+
+    /// Fills the response buffer to the total request cap with answered requests from `start`.
+    fn fill_response_buffer(sync: &BlockSync<CurrentNetwork>, start: u32) {
+        let genesis = {
+            use snarkvm::prelude::FromBytes;
+            Block::<CurrentNetwork>::from_bytes_le(CurrentNetwork::genesis_bytes()).unwrap()
+        };
+        let mut requests = sync.requests.write();
+        for height in start..start + BlockSync::<CurrentNetwork>::MAX_TOTAL_BLOCK_REQUESTS {
+            requests.insert(height, OutstandingRequest {
+                request: (None, None, IndexSet::new()),
+                timestamp: Instant::now(),
+                response: Some(genesis.clone()),
+            });
+        }
+    }
+
+    /// Runs the request pass a few times, and returns the block requests it sent.
+    async fn sent_by_request_passes(sync: &BlockSync<CurrentNetwork>) -> Vec<(SocketAddr, u32, u32)> {
+        let service = RecordingService::default();
+        for _ in 0..3 {
+            sync.try_issuing_block_requests(&service).await;
+        }
+        service.sent.into_inner().unwrap()
+    }
+
+    /// Tests that a gap below a full response buffer is requested from a peer that connects after
+    /// the only peer ahead disconnected.
+    #[tokio::test]
+    async fn test_gap_below_full_buffer_is_requested_after_disconnect() {
+        let sync = sample_sync_at_height(1_000);
+        let (peer_ahead, new_peer) = (sample_peer_ip(1), sample_peer_ip(2));
+        add_peers(&sync, 1, 1, 3_000, 0);
+        insert_requests_to(&sync, peer_ahead, 1_001..1_006);
+        fill_response_buffer(&sync, 1_006);
+        sync.remove_peer(&peer_ahead);
+        assert_eq!(sync.failed_requests.lock().len(), 5);
+
+        // Without a peer, nothing is sent.
+        assert!(sent_by_request_passes(&sync).await.is_empty());
+
+        add_peers(&sync, 2, 1, 3_000, 0);
+        assert_eq!(sent_by_request_passes(&sync).await, vec![(new_peer, 1_001, 1_006)]);
+    }
+
+    /// Tests that a gap below a full response buffer is requested again after the node removes the
+    /// only peer ahead for not answering it, and the peer's locators arrive again.
+    #[tokio::test]
+    async fn test_gap_below_full_buffer_is_requested_after_timeout() {
+        let sync = sample_sync_at_height(1_000);
+        let peer_ip = sample_peer_ip(1);
+        add_peers(&sync, 1, 1, 3_000, 0);
+        let timestamp = Instant::now() - BLOCK_REQUEST_TIMEOUT - Duration::from_secs(1);
+        for height in 1_001..1_006 {
+            sync.requests.write().insert(height, OutstandingRequest {
+                request: (None, None, indexset![peer_ip]),
+                timestamp,
+                response: None,
+            });
+        }
+        fill_response_buffer(&sync, 1_006);
+
+        assert!(sent_by_request_passes(&sync).await.is_empty());
+        assert!(!sync.locators.read().contains_key(&peer_ip));
+
+        add_peers(&sync, 1, 1, 3_000, 0);
+        assert_eq!(sent_by_request_passes(&sync).await, vec![(peer_ip, 1_001, 1_006)]);
+    }
+
+    /// Tests that a gap below a full response buffer is requested again after the only peer ahead
+    /// advertises a lower height for a while.
+    #[tokio::test]
+    async fn test_gap_below_full_buffer_is_requested_after_lower_locators() {
+        let sync = sample_sync_at_height(1_000);
+        let peer_ip = sample_peer_ip(1);
+        add_peers(&sync, 1, 1, 3_000, 0);
+        insert_requests_to(&sync, peer_ip, 1_001..1_006);
+        fill_response_buffer(&sync, 1_006);
+        sync.insert_block_unavailable(peer_ip, BlockRequest::new(1_001, 1_006).unwrap(), not_yet(1_000));
+        assert_eq!(sync.failed_requests.lock().len(), 5);
+
+        add_peers(&sync, 1, 1, 1_000, 0);
+        assert!(sent_by_request_passes(&sync).await.is_empty());
+
+        add_peers(&sync, 1, 1, 3_000, 0);
+        assert_eq!(sent_by_request_passes(&sync).await, vec![(peer_ip, 1_001, 1_006)]);
+    }
+
+    /// Tests that a gap below a full response buffer is requested when it is in neither the
+    /// requests nor the failed requests, e.g. after [`BlockSync::remove_block_response`].
+    #[tokio::test]
+    async fn test_untracked_gap_below_full_buffer_is_requested() {
+        let sync = sample_sync_at_height(1_000);
+        add_peers(&sync, 1, 1, 3_000, 0);
+        fill_response_buffer(&sync, 1_002);
+        assert_eq!(sent_by_request_passes(&sync).await, vec![(sample_peer_ip(1), 1_001, 1_002)]);
+    }
+
+    /// Tests that a gap below a full response buffer is requested when answered requests remain
+    /// below it, between the ledger height and the sync height.
+    #[tokio::test]
+    async fn test_untracked_gap_above_sync_height_is_requested() {
+        let sync = sample_sync_at_height(1_000);
+        add_peers(&sync, 1, 1, 3_000, 0);
+        fill_response_buffer(&sync, 1_001);
+        sync.requests.write().retain(|height, _| *height <= 1_010);
+        sync.set_sync_height(1_010);
+        fill_response_buffer(&sync, 1_012);
+        assert_eq!(sent_by_request_passes(&sync).await, vec![(sample_peer_ip(1), 1_011, 1_012)]);
     }
 
     /// Tests that a `Pruned` reply raises the floor, releases the whole chunk at once, and that the

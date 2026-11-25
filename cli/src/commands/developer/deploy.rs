@@ -142,8 +142,8 @@ impl Deploy {
         let process = package.get_process()?;
 
         // Generate the deployment
-        let mut deployment =
-            package.deploy::<A>(&process, None).with_context(|| "Failed to generate the deployment")?;
+        let mut deployment = Developer::catch_halt(|| package.deploy::<A>(&process, None))
+            .with_context(|| "Failed to generate the deployment")?;
 
         // Get the consensus version.
         let consensus_version =
@@ -179,7 +179,7 @@ impl Deploy {
             let vm = VM::from(store).with_context(|| "Failed to initialize the virtual machine")?;
 
             // Prepare the fees.
-            let fee = match &self.record {
+            let fee = Developer::catch_halt(|| match &self.record {
                 Some(record) => {
                     let fee_record =
                         Developer::parse_record(&private_key, record).with_context(|| "Failed to parse record")?;
@@ -192,7 +192,7 @@ impl Deploy {
                         rng,
                     )?;
                     vm.execute_fee_authorization(fee_authorization, Some(&query), rng)
-                        .with_context(|| "Failed to execute fee authorization")?
+                        .with_context(|| "Failed to execute fee authorization")
                 }
                 None => {
                     let fee_authorization = vm.authorize_fee_public(
@@ -203,9 +203,9 @@ impl Deploy {
                         rng,
                     )?;
                     vm.execute_fee_authorization(fee_authorization, Some(&query), rng)
-                        .with_context(|| "Failed to execute fee authorization")?
+                        .with_context(|| "Failed to execute fee authorization")
                 }
-            };
+            })?;
             // Construct the owner.
             let owner = ProgramOwner::new(&private_key, deployment_id, rng)
                 .with_context(|| "Failed to construct program owner")?;

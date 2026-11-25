@@ -28,7 +28,7 @@ on:
       validators:
         description: "Network size, in validators"
         type: choice
-        options: ["5", "10", "16"]
+        options: ["5", "10", "16", "21"]
         default: "5"
       network:
         description: "snarkOS network"

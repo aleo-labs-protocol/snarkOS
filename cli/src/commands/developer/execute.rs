@@ -171,15 +171,17 @@ impl Execute {
             };
 
             // Create a new transaction.
-            vm.execute(
-                &private_key,
-                (program_id, function),
-                inputs.iter(),
-                fee_record,
-                self.priority_fee,
-                Some(&query),
-                rng,
-            )
+            Developer::catch_halt(|| {
+                vm.execute(
+                    &private_key,
+                    (program_id, function),
+                    inputs.iter(),
+                    fee_record,
+                    self.priority_fee,
+                    Some(&query),
+                    rng,
+                )
+            })
             .with_context(|| "VM failed to execute transaction locally")?
         };
 

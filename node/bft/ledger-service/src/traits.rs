@@ -60,6 +60,8 @@ pub trait LedgerUpdateService<N: Network> {
     /// Checks the given block is a valid next block for the ledger.
     fn check_next_block(&self, block: Block<N>) -> Result<Block<N>, CheckBlockError<N>>;
     /// Prepares the next block in the ledger, using a committed subdag and its transmissions.
+    ///
+    /// Returns an error if a certificate of the subdag is already in the ledger.
     fn prepare_advance_to_next_quorum_block(
         &self,
         subdag: Subdag<N>,
