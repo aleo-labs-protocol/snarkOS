@@ -37,6 +37,7 @@ use snarkvm::{
     ledger::store::helpers::memory::BlockMemory,
     package::Package,
     prelude::{query::Query, *},
+    utilities::{VmHalt, try_vm_runtime},
 };
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -197,6 +198,17 @@ impl Developer {
                 ciphertext.decrypt(&view_key)
             }
             false => Record::<N, Plaintext<N>>::from_str(record),
+        }
+    }
+
+    /// Runs `operation`, which can halt the VM, and returns a halt as an error. Any other panic keeps unwinding.
+    fn catch_halt<T, E: Into<anyhow::Error>>(operation: impl FnOnce() -> std::result::Result<T, E>) -> Result<T> {
+        match try_vm_runtime(operation) {
+            Ok(result) => result.map_err(Into::into),
+            Err(payload) => match payload.downcast::<VmHalt>() {
+                Ok(halt) => bail!("The program halted: {halt}"),
+                Err(payload) => std::panic::resume_unwind(payload),
+            },
         }
     }
 
@@ -648,5 +660,25 @@ mod tests {
 
         assert_eq!(endpoint, format!("{base_uri_str}/{}/transaction/broadcast", CurrentNetwork::SHORT_NAME));
         assert_eq!(api_version, ApiVersion::V2);
+    }
+
+    #[test]
+    fn test_catch_halt_returns_the_result() {
+        assert_eq!(Developer::catch_halt(|| Ok::<_, anyhow::Error>(7)).expect("The operation succeeds"), 7);
+        assert_eq!(Developer::catch_halt(|| -> Result<()> { bail!("an error") }).unwrap_err().to_string(), "an error");
+    }
+
+    #[test]
+    fn test_catch_halt_returns_a_halt_as_an_error() {
+        let error = Developer::catch_halt(|| Ok::<_, anyhow::Error>(Field::<CurrentNetwork>::one() / Field::zero()))
+            .expect_err("A division by zero halts");
+        assert!(error.to_string().starts_with("The program halted: Field division by zero"), "{error}");
+    }
+
+    #[test]
+    fn test_catch_halt_resumes_other_panics() {
+        let payload = std::panic::catch_unwind(|| Developer::catch_halt(|| -> Result<()> { panic!("a bug") }))
+            .expect_err("A panic that is not a halt keeps unwinding");
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"a bug"));
     }
 }
