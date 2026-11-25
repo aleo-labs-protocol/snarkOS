@@ -24,12 +24,12 @@ workspace = true
 
 [target.'cfg(not(shuttle))'.dependencies.tokio]
 workspace = true
-features = [ "macros", "rt", "signal", "sync" ]
+features = [ "macros", "rt", "signal", "sync", "time" ]
 
 [target.'cfg(shuttle)'.dependencies.tokio]
 package = "shuttle-tokio-impl"
 version = "0.1.2"
-features = [ "macros", "rt", "signal", "sync" ]
+features = [ "macros", "rt", "signal", "sync", "time" ]
 
 [dependencies.tracing]
 workspace = true

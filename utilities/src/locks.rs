@@ -41,8 +41,9 @@
 //!   without one. A `#[tokio::test]` is a shuttle test there.
 //! - A `tokio` type of a crate that has the two entries is not the type of the same name in a
 //!   crate that does not. A new crate that exchanges such a type with them needs the entries too.
-//! - Time is not real. `tokio::time::sleep` ends as soon as shuttle runs the task again, and
-//!   `tokio::time::timeout` ends only when the test expires it with `tokio::time::trigger_timeouts`.
+//! - `tokio::time` has no clock: its `sleep` ends as soon as shuttle runs the task again, and its
+//!   `timeout` ends only when the test expires it. [`crate::time`] has one, for the code that
+//!   takes its timers from there.
 //! - snarkVM keeps its own locks and the real `tokio`. Shuttle does not see them: no switch
 //!   happens at them, and a test deadlocks if one thread waits for such a lock while its holder
 //!   is switched out.

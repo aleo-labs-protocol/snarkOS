@@ -4179,11 +4179,13 @@ mod tests {
     /// Tests of the primary under the `shuttle` scheduler, which also picks the order in which
     /// the tasks of a test run; see `snarkos_utilities::locks` for that build and its hazards.
     /// Run them with `cargo shuttle-test -p snarkos-node-bft --lib shuttle_tests`.
+    ///
+    /// Hazard: `tokio::time` has no clock there, so a test must take its timers from
+    /// `snarkos_utilities::time`.
     #[cfg(shuttle)]
     mod shuttle_tests {
         use super::*;
-        use crate::helpers::storage::shuttle_tests::check;
-        use snarkos_utilities::shuttle::future::block_on;
+        use snarkos_utilities::{shuttle::future::block_on, shuttle_test::check};
 
         /// The number of task orders that each test runs with each scheduler.
         const ITERATIONS: usize = 500;

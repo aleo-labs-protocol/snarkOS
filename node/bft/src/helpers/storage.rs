@@ -1198,7 +1198,7 @@ impl<N: Network> Storage<N> {
 }
 
 #[cfg(all(test, shuttle))]
-pub(crate) mod shuttle_tests;
+mod shuttle_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {

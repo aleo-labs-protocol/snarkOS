@@ -29,6 +29,11 @@ pub mod locks;
 #[cfg(shuttle)]
 pub use ::shuttle;
 
+#[cfg(shuttle)]
+pub mod shuttle_test;
+
+pub mod time;
+
 mod callback_handle;
 pub use callback_handle::CallbackHandle;
 
