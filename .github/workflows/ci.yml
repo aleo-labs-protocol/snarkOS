@@ -187,8 +187,8 @@ jobs:
     runs-on: [self-hosted, linux, x64, cpu]
     timeout-minutes: 90
     # `*hosted-if` plus the repository check, which keeps every event's fleet
-    # jobs out of snarkOS-internal. lint-locktick, test and build-snarkos reuse
-    # it as `*fleet-if`.
+    # jobs out of snarkOS-internal. lint-locktick, test-shuttle, test and
+    # build-snarkos reuse it as `*fleet-if`.
     if: &fleet-if >-
       !cancelled() && github.repository == 'aleo-labs-protocol/snarkOS' &&
       (github.event_name != 'schedule' || needs.schedule-due.outputs.due == 'true')
@@ -223,6 +223,24 @@ jobs:
       - name: Check that the build sets cfg(locktick)
         run: cargo locktick-clippy -q -p snarkos-utilities --message-format=json | grep '"name":"locktick"' > /dev/null
       - run: cargo locktick-clippy --workspace --all-targets --all-features -- -D warnings
+
+  # The tests that run under the shuttle scheduler. No other test can run in a
+  # `--cfg shuttle` build, so the name filter selects them.
+  test-shuttle:
+    needs: schedule-due
+    runs-on: [self-hosted, linux, x64, cpu]
+    timeout-minutes: 90
+    if: *fleet-if
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      # gh-actions is ours; check-shared-refs requires a @vN tag here, not a SHA.
+      - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
+      # An env RUSTFLAGS replaces `--cfg shuttle` without an error. The build
+      # then has no shuttle tests, and the filter passes with none.
+      - name: Check that the build has the shuttle tests
+        run: cargo shuttle-test -p snarkos-node-bft --lib shuttle_tests -- --list | grep -q 'shuttle_tests::.* test$'
+      - run: cargo shuttle-test -p snarkos-node-bft --lib shuttle_tests
 
   # Each line of `runs` is one cargo command. Lines with the same `-p` set and
   # cargo flags share one build; nextest's `-E` and `--no-tests` are not cargo
@@ -608,7 +626,7 @@ jobs:
     if: >-
       always() &&
       (github.event_name != 'schedule' || needs.schedule-due.outputs.due == 'true')
-    needs: [schedule-due, check-shared-refs, fmt, deny, shellcheck, source-checks, merge-fixup, machete, release-graph, lint, lint-locktick, test-hosted, test, build-snarkos, devnet, devnet-merge, devnet-release, windows, each-feature]
+    needs: [schedule-due, check-shared-refs, fmt, deny, shellcheck, source-checks, merge-fixup, machete, release-graph, lint, lint-locktick, test-hosted, test, test-shuttle, build-snarkos, devnet, devnet-merge, devnet-release, windows, each-feature]
     runs-on: ubuntu-latest
     steps:
       - env:
@@ -632,7 +650,7 @@ jobs:
   # green again. `checked` is false for a run that was not due.
   notify:
     if: always() && github.event_name == 'schedule' && github.repository == 'aleo-labs-protocol/snarkOS'
-    needs: [schedule-due, check-shared-refs, fmt, deny, shellcheck, source-checks, merge-fixup, machete, release-graph, lint, lint-locktick, test-hosted, test, build-snarkos, devnet, devnet-merge, devnet-release, windows, each-feature, ci-ok]
+    needs: [schedule-due, check-shared-refs, fmt, deny, shellcheck, source-checks, merge-fixup, machete, release-graph, lint, lint-locktick, test-hosted, test, test-shuttle, build-snarkos, devnet, devnet-merge, devnet-release, windows, each-feature, ci-ok]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions: { actions: read }
