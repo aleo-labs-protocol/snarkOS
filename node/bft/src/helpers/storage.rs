@@ -128,7 +128,18 @@ pub struct StorageInner<N: Network> {
     /// The maximum number of rounds to keep in storage.
     max_gc_rounds: u64,
     /* Once per batch */
+    /// Serializes the insertion and the removal of certificates, including garbage collection.
+    ///
+    /// It is held across the updates to `rounds`, `certificates`, `batch_ids` and `transmissions`,
+    /// which makes the checks done under it hold until the update is complete.
+    /// The readers of those maps do not take it.
+    ///
+    /// Lock order: `certificate_updates`, then `rounds`, then `certificates`, then `batch_ids`.
+    certificate_updates: Mutex<()>,
     /// The map of `round` to a list of `(certificate ID, author)` entries.
+    ///
+    /// An update holds the write lock of this map until `certificates` and `batch_ids` are
+    /// updated as well. A reader that finds a certificate ID here thus finds it in those maps too.
     rounds: RwLock<IndexMap<u64, IndexSet<(Field<N>, Address<N>)>>>,
     /// A cache of `certificate ID` to unprocessed `certificate`.
     unprocessed_certificates: RwLock<LruCache<Field<N>, BatchCertificate<N>>>,
@@ -163,6 +174,7 @@ impl<N: Network> Storage<N> {
             round_token: Mutex::new((current_round, CancellationToken::new())),
             gc_round: Default::default(),
             max_gc_rounds,
+            certificate_updates: Default::default(),
             rounds: Default::default(),
             unprocessed_certificates: RwLock::new(LruCache::new(unprocessed_cache_size)),
             certificates: Default::default(),
@@ -338,12 +350,14 @@ impl<N: Network> Storage<N> {
         if next_gc_round > previous_gc_round {
             // Remove the GC round(s) from storage.
             for gc_round in previous_gc_round..=next_gc_round {
+                // Sweep the round as one update, so that no insertion into it is in progress.
+                let _guard = self.certificate_updates.lock();
                 // Iterate over the certificates for the GC round.
                 for id in self.get_certificate_ids_for_round(gc_round).into_iter() {
                     trace!(
                         "Garbage collecting certificate {id} at round {gc_round} (cut-off is round {next_gc_round})"
                     );
-                    self.remove_certificate(id);
+                    self.remove_certificate_in_update(id);
                 }
             }
         }
@@ -811,6 +825,7 @@ impl<N: Network> Storage<N> {
     /// This method assumes **all missing** transmissions are provided in the `missing_transmissions` map.
     ///
     /// This method triggers updates to the `rounds`, `certificates`, `batch_ids`, and `transmissions` maps.
+    /// The certificate becomes visible in the first three at once, and after its transmissions.
     fn insert_certificate_atomic(
         &self,
         certificate: BatchCertificate<N>,
@@ -824,23 +839,26 @@ impl<N: Network> Storage<N> {
         // Retrieve the author of the batch.
         let author = certificate.author();
 
-        // Insert the round to certificate ID entry.
-        self.rounds.write().entry(round).or_default().insert((certificate_id, author));
-        // Obtain the certificate's transmission ids.
-        let transmission_ids = certificate.transmission_ids().clone();
-        // Insert the certificate.
-        self.certificates.write().insert(certificate_id, certificate);
-        // Remove the unprocessed certificate.
-        self.unprocessed_certificates.write().pop(&certificate_id);
-        // Insert the batch ID.
-        self.batch_ids.write().insert(certificate_id, round);
+        let _guard = self.certificate_updates.lock();
+
         // Insert the certificate ID for each of the transmissions into storage.
         self.transmissions.insert_transmissions(
             certificate_id,
-            transmission_ids,
+            certificate.transmission_ids().clone(),
             aborted_transmission_ids,
             missing_transmissions,
         );
+        {
+            // Insert the round to certificate ID entry.
+            let mut rounds = self.rounds.write();
+            rounds.entry(round).or_default().insert((certificate_id, author));
+            // Insert the certificate.
+            self.certificates.write().insert(certificate_id, certificate);
+            // Insert the batch ID.
+            self.batch_ids.write().insert(certificate_id, round);
+        }
+        // Remove the unprocessed certificate.
+        self.unprocessed_certificates.write().pop(&certificate_id);
     }
 
     /// Inserts the given unprocessed `certificate` into storage.
@@ -855,45 +873,54 @@ impl<N: Network> Storage<N> {
         Ok(())
     }
 
-    /// Removes the given `certificate ID` from storage. This method is used to garbage collect individual certificates once blocks are committed.
+    /// Removes the given `certificate ID` from storage.
     ///
     /// This method triggers updates to the `rounds`, `certificates`, `batch_ids`, and `transmissions` maps.
     ///
     /// If the certificate was successfully removed, `true` is returned.
     /// If the certificate did not exist in storage, `false` is returned.
+    #[cfg(test)]
     fn remove_certificate(&self, certificate_id: Field<N>) -> bool {
-        // Retrieve the certificate.
-        let Some(certificate) = self.get_certificate(certificate_id) else {
-            warn!("Certificate {certificate_id} does not exist in storage");
-            return false;
-        };
-        // Retrieve the round.
-        let round = certificate.round();
-        // Compute the author of the batch.
-        let author = certificate.author();
+        let _guard = self.certificate_updates.lock();
+        self.remove_certificate_in_update(certificate_id)
+    }
 
+    /// Removes the given `certificate ID` from storage. This method is used to garbage collect individual certificates once blocks are committed.
+    ///
+    /// The caller must hold `certificate_updates`.
+    ///
+    /// This method triggers updates to the `rounds`, `certificates`, `batch_ids`, and `transmissions` maps.
+    /// The certificate disappears from the first three at once, and before its transmissions.
+    ///
+    /// If the certificate was successfully removed, `true` is returned.
+    /// If the certificate did not exist in storage, `false` is returned.
+    fn remove_certificate_in_update(&self, certificate_id: Field<N>) -> bool {
         // TODO (howardwu): We may want to use `shift_remove` below, in order to align compatibility
         //  with tests written to for `remove_certificate`. However, this will come with performance hits.
         //  It will be better to write tests that compare the union of the sets.
 
-        // Update the round.
-        match self.rounds.write().entry(round) {
-            Entry::Occupied(mut entry) => {
+        let certificate = {
+            let mut rounds = self.rounds.write();
+            // Remove the certificate.
+            let Some(certificate) = self.certificates.write().swap_remove(&certificate_id) else {
+                warn!("Certificate {certificate_id} does not exist in storage");
+                return false;
+            };
+            // Update the round.
+            if let Entry::Occupied(mut entry) = rounds.entry(certificate.round()) {
                 // Remove the round to certificate ID entry.
-                entry.get_mut().swap_remove(&(certificate_id, author));
+                entry.get_mut().swap_remove(&(certificate_id, certificate.author()));
                 // If the round is empty, remove it.
                 if entry.get().is_empty() {
                     entry.swap_remove();
                 }
             }
-            Entry::Vacant(_) => {}
-        }
-        // Remove the certificate.
-        self.certificates.write().swap_remove(&certificate_id);
+            // Remove the batch ID.
+            self.batch_ids.write().swap_remove(&certificate_id);
+            certificate
+        };
         // Remove the unprocessed certificate.
         self.unprocessed_certificates.write().pop(&certificate_id);
-        // Remove the batch ID.
-        self.batch_ids.write().swap_remove(&certificate_id);
         // Remove the transmission entries in the certificate from storage.
         self.transmissions.remove_transmissions(&certificate_id, certificate.transmission_ids());
         // Return successfully.
