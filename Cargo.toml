@@ -353,7 +353,8 @@ lto = "thin"
 debug = "line-tables-only"
 
 [profile.test]
-opt-level = 2
+# At 0 the snarkVM code in the tests runs 4-8x slower.
+opt-level = 1
 
 [package.metadata.cargo-machete]
 ignored = [
