@@ -213,3 +213,6 @@ workspace = true
 
 [dev-dependencies.mockall]
 version = "0.15"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [ 'cfg(shuttle)' ] }

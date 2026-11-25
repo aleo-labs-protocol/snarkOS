@@ -16,7 +16,10 @@
 use crate::helpers::{check_timestamp_for_liveness, fmt_id};
 use snarkos_node_bft_ledger_service::LedgerService;
 use snarkos_node_bft_storage_service::StorageService;
-use snarkos_utilities::locks::parking_lot::{Mutex, MutexGuard, RwLock};
+use snarkos_utilities::{
+    atomic::{AtomicU32, AtomicU64, Ordering},
+    locks::parking_lot::{Mutex, MutexGuard, RwLock},
+};
 use snarkvm::{
     ledger::{
         block::{Block, Transaction},
@@ -34,10 +37,7 @@ use std::{
     cmp,
     collections::{HashMap, HashSet},
     num::NonZeroUsize,
-    sync::{
-        Arc,
-        atomic::{AtomicU32, AtomicU64, Ordering},
-    },
+    sync::Arc,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -1174,6 +1174,9 @@ impl<N: Network> Storage<N> {
         self.remove_certificate_locked(&update, certificate_id)
     }
 }
+
+#[cfg(all(test, shuttle))]
+mod shuttle_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {
