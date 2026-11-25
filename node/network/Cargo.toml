@@ -55,8 +55,13 @@ workspace = true
 [dependencies.socket2]
 version = "0.6.2"
 
-[dependencies.tokio]
+[target.'cfg(not(shuttle))'.dependencies.tokio]
 workspace = true
+features = [ "io-util", "net" ]
+
+[target.'cfg(shuttle)'.dependencies.tokio]
+package = "shuttle-tokio-impl"
+version = "0.1.2"
 features = [ "io-util", "net" ]
 
 [dependencies.tokio-util]
@@ -67,9 +72,17 @@ features = [ "codec" ]
 workspace = true
 features = [ "test-helpers" ]
 
-[dev-dependencies.tokio]
+[target.'cfg(not(shuttle))'.dev-dependencies.tokio]
 workspace = true
 features = [ "io-util", "macros", "rt-multi-thread" ]
 
+[target.'cfg(shuttle)'.dev-dependencies.tokio]
+package = "shuttle-tokio-impl"
+version = "0.1.2"
+features = [ "io-util", "macros", "rt-multi-thread" ]
+
 [build-dependencies.built]
+workspace = true
+
+[lints]
 workspace = true

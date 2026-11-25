@@ -261,7 +261,7 @@ impl<N: Network> UpgradeMonitor<N> {
             }
         };
         let state = State { schedules: Default::default(), recorded, warned_at: None, metrics: (0, 0, 0) };
-        Self { address, own, record_path, state: Mutex::new(state), status: watch::Sender::new(UpgradeStatus::Clear) }
+        Self { address, own, record_path, state: Mutex::new(state), status: watch::channel(UpgradeStatus::Clear).0 }
     }
 
     /// Records the schedule that the validator at `address` disclosed in a completed handshake, or

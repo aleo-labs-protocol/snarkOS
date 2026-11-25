@@ -100,8 +100,12 @@ workspace = true
 [dependencies.time]
 workspace = true
 
-[dependencies.tokio]
+[target.'cfg(not(shuttle))'.dependencies.tokio]
 workspace = true
+
+[target.'cfg(shuttle)'.dependencies.tokio]
+package = "shuttle-tokio-impl"
+version = "0.1.2"
 
 [dependencies.tower_governor]
 version = "0.8"
@@ -145,4 +149,7 @@ workspace = true
 workspace = true
 
 [build-dependencies.built]
+workspace = true
+
+[lints]
 workspace = true

@@ -38,8 +38,13 @@ workspace = true
 [dependencies.serde]
 workspace = true
 
-[dependencies.tokio]
+[target.'cfg(not(shuttle))'.dependencies.tokio]
 workspace = true
+features = [ "sync" ]
+
+[target.'cfg(shuttle)'.dependencies.tokio]
+package = "shuttle-tokio-impl"
+version = "0.1.2"
 features = [ "sync" ]
 
 [dependencies.thiserror]
@@ -94,8 +99,13 @@ workspace = true
 workspace = true
 features = [ "test-helpers" ]
 
-[dev-dependencies.tokio]
+[target.'cfg(not(shuttle))'.dev-dependencies.tokio]
 workspace = true
+features = [ "macros", "rt", "time" ]
+
+[target.'cfg(shuttle)'.dev-dependencies.tokio]
+package = "shuttle-tokio-impl"
+version = "0.1.2"
 features = [ "macros", "rt", "time" ]
 
 [dev-dependencies.tracing-subscriber]
@@ -103,4 +113,7 @@ workspace = true
 features = [ "env-filter", "fmt" ]
 
 [dev-dependencies.tracing-test]
+workspace = true
+
+[lints]
 workspace = true

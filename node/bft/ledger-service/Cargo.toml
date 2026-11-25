@@ -53,8 +53,13 @@ workspace = true
 workspace = true
 features = [ "console", "ledger", "synthesizer" ]
 
-[dependencies.tokio]
+[target.'cfg(not(shuttle))'.dependencies.tokio]
 workspace = true
+features = [ "macros", "rt-multi-thread" ]
+
+[target.'cfg(shuttle)'.dependencies.tokio]
+package = "shuttle-tokio-impl"
+version = "0.1.2"
 features = [ "macros", "rt-multi-thread" ]
 
 [dependencies.thiserror]
@@ -71,3 +76,6 @@ features = [ "test-helpers" ]
 [dev-dependencies.snarkvm]
 workspace = true
 features = [ "test-helpers" ]
+
+[lints]
+workspace = true

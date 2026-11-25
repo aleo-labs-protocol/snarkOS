@@ -19,9 +19,17 @@ edition = "2024"
 [dependencies.async-trait]
 version = "0.1"
 
-[dependencies.tokio]
+[target.'cfg(not(shuttle))'.dependencies.tokio]
 workspace = true
+features = [ "sync" ]
+
+[target.'cfg(shuttle)'.dependencies.tokio]
+package = "shuttle-tokio-impl"
+version = "0.1.2"
 features = [ "sync" ]
 
 [features]
 default = [ ]
+
+[lints]
+workspace = true

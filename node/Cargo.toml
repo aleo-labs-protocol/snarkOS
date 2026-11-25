@@ -126,8 +126,13 @@ workspace = true
 [dependencies.time]
 workspace = true
 
-[dependencies.tokio]
+[target.'cfg(not(shuttle))'.dependencies.tokio]
 workspace = true
+features = [ "rt", "signal" ]
+
+[target.'cfg(shuttle)'.dependencies.tokio]
+package = "shuttle-tokio-impl"
+version = "0.1.2"
 features = [ "rt", "signal" ]
 
 [dependencies.tokio-stream]
@@ -173,3 +178,6 @@ workspace = true
 ignored = [
   "serde_json", # Need to set preserve_order feature
 ]
+
+[lints]
+workspace = true

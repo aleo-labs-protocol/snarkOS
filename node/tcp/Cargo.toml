@@ -41,8 +41,13 @@ features = [ "parking_lot" ]
 [dependencies.snarkos-utilities]
 workspace = true
 
-[dependencies.tokio]
+[target.'cfg(not(shuttle))'.dependencies.tokio]
 workspace = true
+features = [ "io-util", "net", "parking_lot", "rt", "sync", "time" ]
+
+[target.'cfg(shuttle)'.dependencies.tokio]
+package = "shuttle-tokio-impl"
+version = "0.1.2"
 features = [ "io-util", "net", "parking_lot", "rt", "sync", "time" ]
 
 [dependencies.tokio-util]
@@ -58,6 +63,14 @@ workspace = true
 [dependencies.anyhow]
 workspace = true
 
-[dev-dependencies.tokio]
+[target.'cfg(not(shuttle))'.dev-dependencies.tokio]
 workspace = true
 features = [ "macros" ]
+
+[target.'cfg(shuttle)'.dev-dependencies.tokio]
+package = "shuttle-tokio-impl"
+version = "0.1.2"
+features = [ "macros" ]
+
+[lints]
+workspace = true

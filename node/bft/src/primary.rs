@@ -1882,8 +1882,7 @@ impl<N: Network> Primary<N> {
         // Retrieve the committee lookback for the round.
         let committee_lookback = self.ledger.get_committee_lookback_for_round(proposal.round())?;
         // Create the batch certificate and transmissions.
-        let (certificate, transmissions) =
-            tokio::task::block_in_place(|| proposal.to_certificate(&committee_lookback))?;
+        let (certificate, transmissions) = crate::block_in_place(|| proposal.to_certificate(&committee_lookback))?;
 
         // Convert the transmissions into a HashMap.
         // Note: Do not change the `Proposal` to use a HashMap. The ordering there is necessary for safety.
