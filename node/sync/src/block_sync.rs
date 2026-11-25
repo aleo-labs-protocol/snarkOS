@@ -32,7 +32,7 @@ use snarkos_utilities::locks::{
 
 use snarkvm::{
     console::network::{ConsensusVersion, Network},
-    ledger::{Block, CheckBlockError},
+    ledger::Block,
     utilities::flatten_error,
 };
 
@@ -157,8 +157,8 @@ pub struct BlockRequestsSummary {
 /// Why [`BlockSync::try_advancing_block_synchronization`] stopped at a block.
 #[derive(thiserror::Error, Debug)]
 pub enum AdvanceBlockSyncError {
-    /// The block that `peer_ip` sent cannot follow the latest block of this node: it is a Beacon
-    /// block, or its height, round or hash is not new.
+    /// The block that `peer_ip` sent is invalid whatever the state of this node: it is a Beacon
+    /// block after genesis.
     #[error("Peer '{peer_ip}' sent an invalid block at height {height} - {error}")]
     InvalidBlock { height: u32, peer_ip: SocketAddr, error: anyhow::Error },
     /// The check of the block that `peer_ip` sent failed or stopped. The cause can be the block or
@@ -997,18 +997,7 @@ impl<N: Network> BlockSync<N> {
 
                 // Try to check the next block and advance to it.
                 let block = ledger_update.check_next_block(block).map_err(|err| {
-                    // The ledger is below `next_height`, so these errors come from the block alone.
-                    let is_invalid = matches!(
-                        err,
-                        CheckBlockError::InvalidHeight { .. }
-                            | CheckBlockError::BlockAlreadyExists { .. }
-                            | CheckBlockError::InvalidRound { .. }
-                    );
-                    let (height, error) = (next_height, err.into_anyhow());
-                    match is_invalid {
-                        true => AdvanceBlockSyncError::InvalidBlock { height, peer_ip, error },
-                        false => AdvanceBlockSyncError::FailedCheck { height, peer_ip, error },
-                    }
+                    AdvanceBlockSyncError::FailedCheck { height: next_height, peer_ip, error: err.into_anyhow() }
                 })?;
 
                 ledger_update.advance_to_next_block(&block).with_context(|| {
@@ -4187,8 +4176,8 @@ mod tests {
         assert_eq!(sync.ledger.latest_block_height(), 1_001);
     }
 
-    /// Tests that a block with a round at or below the latest round is invalid, and that block
-    /// sync does not move past its height.
+    /// Tests that a block with a round at or below the latest round fails the check, and that
+    /// block sync does not move past its height.
     #[tokio::test]
     async fn test_invalid_round_block_is_not_skipped() {
         let rng = &mut TestRng::default();
@@ -4201,7 +4190,7 @@ mod tests {
 
         let error = sync.try_advancing_block_synchronization().await.unwrap_err();
         assert!(
-            matches!(error, AdvanceBlockSyncError::InvalidBlock { height: 1_001, peer_ip, .. } if peer_ip == sender),
+            matches!(error, AdvanceBlockSyncError::FailedCheck { height: 1_001, peer_ip, .. } if peer_ip == sender),
             "{error}"
         );
         assert_eq!(sync.ledger.latest_block_height(), 1_000);
