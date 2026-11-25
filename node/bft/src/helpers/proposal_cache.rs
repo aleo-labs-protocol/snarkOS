@@ -100,6 +100,10 @@ impl<N: Network> ProposalCache<N> {
         // so that a crash mid-write never leaves a torn cache file.
         let tmp_path = path.with_extension("tmp");
         let write_tmp = || -> std::io::Result<()> {
+            // Create the node data directory, if it does not exist yet.
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
             let mut file = fs::File::create(&tmp_path)?;
             file.write_all(&bytes)?;
             file.sync_all()?;

@@ -166,6 +166,8 @@ while (( total_wait < 600 )); do  # 10 minutes max
           snarkos clean "--network=$network_id" "--dev=$validator_index" --keep-node-data \
               "--ledger-storage=$(checkpoint_dir "$suffix")"
         fi
+        # Rolling the whole network back discards the proposal cache along with the chain state it guards.
+        rm -f "$tmp_dir/node_data_$validator_index/current-proposal-cache"
        # Wait until the cleanup concludes
         sleep 1
 

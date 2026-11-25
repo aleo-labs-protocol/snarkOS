@@ -893,7 +893,9 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
         // Persist the proposal cache before the proposal is published.
         if let Err(err) = self.store_proposal_cache(None).await {
             // Withdraw the unpublished proposal, and reinsert its transmissions.
-            if let ProposedBatchState::Certifying(proposal) = std::mem::take(&mut *self.proposed_batch.write()) {
+            // Note: The write guard is released here, as reinserting reads the proposed batch.
+            let withdrawn = std::mem::take(&mut *self.proposed_batch.write());
+            if let ProposedBatchState::Certifying(proposal) = withdrawn {
                 self.proposal_cache_generation.fetch_add(1, Ordering::SeqCst);
                 if let Err(err) = self.reinsert_transmissions_into_workers(proposal.into_transmissions()) {
                     error!("{}", flatten_error(err.context("Failed to reinsert transmissions")));
@@ -3166,9 +3168,9 @@ mod tests {
     async fn test_batch_propose_from_peer_store_failure_does_not_sign() {
         let mut rng = TestRng::default();
         let (mut primary, accounts) = primary_without_handlers(&mut rng);
-        // A data directory that does not exist makes every store fail.
+        // A data directory path that is a regular file makes every store fail.
         let dir = std::env::temp_dir().join(format!("snarkos-primary-cache-missing-{}", std::process::id()));
-        assert!(!dir.exists());
+        std::fs::write(&dir, b"").unwrap();
         primary.node_data_dir = NodeDataDir::new(dir.clone());
 
         // Create a valid proposal with an author that isn't the primary.
