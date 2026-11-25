@@ -4175,4 +4175,81 @@ mod tests {
         assert_eq!(proposal.batch_id(), batch_id);
         assert_eq!(state, ProposedBatchState::Certified(batch_id));
     }
+
+    /// Tests of the primary under the `shuttle` scheduler; see `snarkos_utilities::locks`.
+    /// Run them with `cargo shuttle-test -p snarkos-node-bft --lib shuttle_tests`.
+    ///
+    /// In that build `tokio` is shuttle's implementation of it, so shuttle also picks the order
+    /// in which the tasks of a test run. Hazard: time is not real there, so a test must not
+    /// depend on a `sleep` or a `timeout`; see `snarkos_utilities::locks`.
+    #[cfg(shuttle)]
+    mod shuttle_tests {
+        use super::*;
+        use crate::helpers::storage::shuttle_tests::check;
+        use snarkos_utilities::shuttle::future::block_on;
+
+        /// The number of task orders that each test runs with each scheduler.
+        const ITERATIONS: usize = 500;
+
+        /// The signatures of all peers for the batch of the primary arrive at the same time.
+        /// The primary certifies the batch once, and every handler succeeds.
+        #[test]
+        fn signatures_of_all_peers_arrive_together() {
+            let round = 1;
+            let mut rng = TestRng::default();
+            let (accounts, committee) = sample_committee(&mut rng);
+            let author = accounts[0].1.address();
+            let height = CurrentNetwork::CONSENSUS_HEIGHT(ConsensusVersion::V1).unwrap();
+
+            // Sign once: the batch of the primary, and the signature of each peer for it.
+            let timestamp = now() + MIN_BATCH_DELAY.as_secs() as i64;
+            let proposal = create_test_proposal(
+                &accounts[0].1,
+                committee.clone(),
+                round,
+                Default::default(),
+                timestamp,
+                1,
+                &mut rng,
+            );
+            let batch_id = proposal.batch_id();
+            let batch_header = proposal.batch_header().clone();
+            let transmissions = proposal.transmissions().clone();
+            let signatures: Vec<_> = accounts
+                .iter()
+                .skip(1)
+                .map(|(peer_ip, account)| {
+                    (*peer_ip, BatchSignature::new(batch_id, account.sign(&[batch_id], &mut rng).unwrap()))
+                })
+                .collect();
+
+            check(ITERATIONS, move || {
+                block_on(async {
+                    let primary = primary_with_committee(0, &accounts, committee.clone(), height);
+                    map_account_addresses(&primary, &accounts);
+                    let proposal = Proposal::new(committee.clone(), batch_header.clone(), transmissions.clone());
+                    *primary.proposed_batch.write() = ProposedBatchState::Certifying(Box::new(proposal.unwrap()));
+
+                    let handlers: Vec<_> = signatures
+                        .iter()
+                        .cloned()
+                        .map(|(peer_ip, signature)| {
+                            let primary = primary.clone();
+                            tokio::spawn(
+                                async move { primary.process_batch_signature_from_peer(peer_ip, signature).await },
+                            )
+                        })
+                        .collect();
+                    for handler in handlers {
+                        handler.await.unwrap().unwrap();
+                    }
+
+                    let certificates = primary.storage.get_certificates_for_round(round);
+                    assert_eq!(certificates.len(), 1);
+                    assert_eq!((certificates[0].author(), certificates[0].batch_id()), (author, batch_id));
+                    assert_eq!(*primary.proposed_batch.read(), ProposedBatchState::None);
+                });
+            });
+        }
+    }
 }
