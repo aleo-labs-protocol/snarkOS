@@ -22,11 +22,12 @@ on:
         description: "Stockpile to replay. Its network is the devnet's."
         type: choice
         options:
+          - testnet-V23-h26-p1000x40-d240-f32ac0cf
           - testnet-V22-h25-p1000x20-stockpile-1
           - testnet-V22-h25-p10000x20-stockpile-2
           - testnet-V22-h25-p10000x10-stockpile-3
           - testnet-V22-h25-p1000x40-d240-f5adbe87
-        default: testnet-V22-h25-p1000x40-d240-f5adbe87
+        default: testnet-V23-h26-p1000x40-d240-f32ac0cf
       rate:
         description: "Transactions per second. Empty: Gauntlet's default."
         required: false

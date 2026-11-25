@@ -14,8 +14,8 @@ on:
         description: "What to test: a release branch, a tag or a commit"
         required: true
       stockpile:
-        description: "Stockpile the load legs replay: one made for this release's snarkVM, with deployments"
-        default: testnet-V22-h25-p1000x40-d240-f5adbe87
+        description: "Stockpile the load legs replay: one made for this release's snarkVM, with deployments. A 4.x release needs testnet-V22-h25-p1000x40-d240-f5adbe87"
+        default: testnet-V23-h26-p1000x40-d240-f32ac0cf
       save:
         description: "Keep each sync leg's ledger as this release's when it passes. Off for a commit that isn't a release candidate"
         type: boolean
