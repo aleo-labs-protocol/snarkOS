@@ -42,6 +42,7 @@ Read history through `/v2/mainnet`:
 ```text
 GET /program/{program}/mapping/{mapping}/{key}/history/{height}
 GET /program/{program}/mapping/{mapping}/history/{height}?keys=key1,key2
+GET /program/{program}/mapping/{mapping}/history/{height}/all?after=key&limit=n
 GET /program/{program}/history/ranges
 ```
 
@@ -49,4 +50,8 @@ A missing key in covered history returns `null`. Missing coverage or mapping ret
 The ranges route returns inclusive `[start, end]` pairs in height order, or `[]` when no history exists.
 For history recorded at blocks 1 through 10 and 500 through 1000, it returns `[[1,10],[500,1000]]`.
 A key-history query for blocks 11 through 499 returns `404`.
+The `all` route returns one page of a mapping at a height, as `{"entries":[{"key":"...","value":"..."}],"next":"..."}`.
+A page visits up to `limit` keys in stored key order. The default and the maximum are 1024.
+A key with no value at that height adds no entry, so a page can hold fewer than `limit` entries.
+Pass `next` as `after` to read the next page. `next` is `null` after the last page.
 This mode does not evaluate historical views or expose state between transactions in the same block.

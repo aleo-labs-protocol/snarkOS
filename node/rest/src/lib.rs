@@ -473,6 +473,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
                 .route("/program/{id}/history/ranges", get(Self::get_program_history_ranges))
                 .route("/program/{id}/mapping/{name}/{key}/history/{height}", get(Self::get_program_history))
                 .route("/program/{id}/mapping/{name}/history/{height}", get(Self::get_program_history_batch))
+                .route("/program/{id}/mapping/{name}/history/{height}/all", get(Self::get_program_history_page))
         };
 
         let trace_layer = TraceLayer::new_for_http()
@@ -828,7 +829,7 @@ mod route_tests {
             store::{StorageMode, helpers::memory::ConsensusMemory},
             test_helpers::sample_genesis_committee,
         },
-        prelude::{MainnetV0, PrivateKey, Program, Transaction},
+        prelude::{Identifier, MainnetV0, PrivateKey, Program, Transaction},
         utilities::TestRng,
     };
 
@@ -1558,6 +1559,68 @@ mod route_tests {
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
         assert!(body.contains("No program history"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn program_history_page_requires_history() {
+        let rest = sample_rest().await;
+        let (status, body) = get(&rest, "/program/credits.aleo/mapping/bonded/history/0/all").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(body.contains("No program history"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn program_history_page_rejects_invalid_queries() {
+        let rest = sample_rest().await;
+        for query in ["limit=0", "after=not_a_plaintext"] {
+            let (status, body) =
+                get(&rest, &format!("/program/credits.aleo/mapping/bonded/history/0/all?{query}")).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{query}: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn program_history_page_serves_every_entry() {
+        let rest = sample_rest().await;
+        let program_id = ProgramID::<CurrentNetwork>::from_str("credits.aleo").unwrap();
+        let mapping = Identifier::<CurrentNetwork>::from_str("committee").unwrap();
+        let store = rest.ledger.vm().finalize_store();
+        store.configure_history(vec![program_id], false).unwrap();
+        store.prepare_history_baseline(0).unwrap();
+
+        let mut expected: Vec<_> = store
+            .get_mapping_confirmed(program_id, mapping)
+            .unwrap()
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        expected.sort();
+        assert!(expected.len() > 1);
+
+        // Read the mapping one key at a time, so that every page but the last names a key to resume after.
+        let mut found = Vec::with_capacity(expected.len());
+        let mut query = String::from("limit=1");
+        loop {
+            let (status, body) =
+                get(&rest, &format!("/program/credits.aleo/mapping/committee/history/0/all?{query}")).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let entries = page["entries"].as_array().unwrap();
+            assert!(entries.len() <= 1, "{body}");
+            for entry in entries {
+                found.push((entry["key"].as_str().unwrap().to_string(), entry["value"].as_str().unwrap().to_string()));
+            }
+            match page["next"].as_str() {
+                Some(next) => query = format!("limit=1&after={next}"),
+                None => break,
+            }
+        }
+        found.sort();
+        assert_eq!(found, expected);
+
+        let (status, body) = get(&rest, "/program/credits.aleo/mapping/missing/history/0/all").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(body.contains("No mapping"), "{body}");
     }
 
     /// The routes of the removed `history` feature, in history compatibility mode.
