@@ -50,6 +50,8 @@ use rayon::prelude::*;
 use version::VersionInfo;
 
 const MAX_KEYS_PER_REQUEST: usize = 1 << 7;
+/// The most keys that one page of a mapping's history visits.
+const MAX_HISTORY_PAGE_KEYS: usize = 1 << 10;
 type HistoricalMappingKey<N> = (ProgramID<N>, Identifier<N>, Plaintext<N>, u32);
 type HistoricalMappingRoute<N> = (ProgramID<N>, Identifier<N>, u32);
 type ViewFunctionRoute<N> = (ProgramID<N>, Identifier<N>, u32);
@@ -77,6 +79,17 @@ fn parse_historical_mapping_keys<N: Network>(keys: &[String]) -> Result<Vec<Plai
             })
         })
         .collect::<Result<Vec<_>, _>>()
+}
+
+/// Returns the number of keys that a mapping history page visits.
+fn history_page_limit(limit: Option<usize>) -> Result<usize, RestError> {
+    match limit {
+        None => Ok(MAX_HISTORY_PAGE_KEYS),
+        Some(limit) if (1..=MAX_HISTORY_PAGE_KEYS).contains(&limit) => Ok(limit),
+        Some(limit) => Err(RestError::unprocessable_entity(anyhow!(
+            "Invalid page limit (min: 1, max: {MAX_HISTORY_PAGE_KEYS}, got: {limit})"
+        ))),
+    }
 }
 
 /// Parses a list of strings into a `Vec<Value<N>>` for use as view function inputs.
@@ -307,6 +320,15 @@ fn history_compat_mapping<N: Network>(
 pub(crate) struct HistoricalKeys {
     #[serde(deserialize_with = "de_historical_keys")]
     keys: Vec<String>,
+}
+
+/// The query object for `get_program_history_page`.
+#[derive(Clone, Deserialize, Serialize)]
+pub(crate) struct HistoricalPage {
+    /// The key to resume after, as the previous page returned it in `next`.
+    after: Option<String>,
+    /// The number of keys to visit.
+    limit: Option<usize>,
 }
 
 /// The return value for a transaction metadata query.
@@ -1348,6 +1370,53 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         Ok(ErasedJson::new(values))
     }
 
+    /// GET /<network>/program/{id}/mapping/{name}/history/{height}/all?after={key}&limit={n}
+    ///
+    /// Returns one page of the mapping's entries at the height, as `{ "entries": [{ "key", "value" }], "next" }`.
+    /// A page visits `limit` keys in stored key order and omits the ones with no value at the height,
+    /// so it can hold fewer than `limit` entries. `next` is the key to pass as `after` for the next
+    /// page, or `null` after the last page.
+    pub(crate) async fn get_program_history_page(
+        State(rest): State<Self>,
+        Path((program_id, mapping_name, height)): Path<HistoricalMappingRoute<N>>,
+        Query(page): Query<HistoricalPage>,
+    ) -> Result<ErasedJson, RestError> {
+        let limit = history_page_limit(page.limit)?;
+        let after = page
+            .after
+            .map(|key| {
+                key.parse::<Plaintext<N>>().map_err(|err| {
+                    RestError::unprocessable_entity(err.context(format!("Invalid key to resume after: {key}")))
+                })
+            })
+            .transpose()?;
+        let store = rest.ledger.vm().finalize_store().clone();
+        let page = tokio::task::spawn_blocking(move || {
+            let coverage =
+                store.get_program_history_range(&program_id, height).map_err(RestError::internal_server_error)?;
+            if !coverage.is_some_and(|(start, end)| (start..=end).contains(&height)) {
+                return Err(RestError::not_found(anyhow!("No program history for '{program_id}' at block {height}")));
+            }
+            if !store
+                .contains_mapping_at_height(program_id, mapping_name, height)
+                .map_err(RestError::internal_server_error)?
+            {
+                return Err(RestError::not_found(anyhow!(
+                    "No mapping '{program_id}/{mapping_name}' at block {height}"
+                )));
+            }
+            let (entries, next) = store
+                .get_mapping_at_height(program_id, mapping_name, height, after.as_ref(), limit)
+                .map_err(RestError::internal_server_error)?;
+            let entries: Vec<_> =
+                entries.into_iter().map(|(key, value)| json!({ "key": key, "value": value })).collect();
+            Ok(json!({ "entries": entries, "next": next }))
+        })
+        .await
+        .map_err(|err| RestError::internal_server_error(anyhow!("Tokio error: {err}")))??;
+        Ok(ErasedJson::new(page))
+    }
+
     /// GET /<network>/find/blockHeight/{stateRoot}
     pub(crate) async fn find_block_height_from_state_root(
         State(rest): State<Self>,
@@ -1970,6 +2039,16 @@ mod tests {
     fn parse_historical_mapping_keys_rejects_empty() {
         let err = parse_historical_mapping_keys::<MainnetV0>(&[]).unwrap_err();
         assert_eq!(err, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn history_page_limit_accepts_only_the_allowed_range() {
+        assert_eq!(history_page_limit(None).unwrap(), MAX_HISTORY_PAGE_KEYS);
+        assert_eq!(history_page_limit(Some(1)).unwrap(), 1);
+        assert_eq!(history_page_limit(Some(MAX_HISTORY_PAGE_KEYS)).unwrap(), MAX_HISTORY_PAGE_KEYS);
+        for limit in [0, MAX_HISTORY_PAGE_KEYS + 1] {
+            assert_eq!(history_page_limit(Some(limit)).unwrap_err(), StatusCode::UNPROCESSABLE_ENTITY);
+        }
     }
 
     #[test]
