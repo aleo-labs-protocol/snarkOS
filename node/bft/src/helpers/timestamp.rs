@@ -20,11 +20,15 @@ use time::OffsetDateTime;
 
 /// Returns the current UTC epoch timestamp.
 pub fn now() -> i64 {
-    OffsetDateTime::now_utc().unix_timestamp()
+    now_utc().unix_timestamp()
 }
 
 /// Returns the current UTC epoch time.
 pub fn now_utc() -> OffsetDateTime {
+    // In a shuttle test, the timers of `snarkos_utilities::time` end with no real time in between.
+    #[cfg(shuttle)]
+    return OffsetDateTime::now_utc() + snarkos_utilities::time::virtual_clock::elapsed();
+    #[cfg(not(shuttle))]
     OffsetDateTime::now_utc()
 }
 

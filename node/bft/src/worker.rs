@@ -26,7 +26,10 @@ use crate::{
     spawn_blocking,
 };
 use snarkos_node_bft_ledger_service::{LedgerService, deserialize_transaction_strict};
-use snarkos_utilities::locks::parking_lot::{Mutex, RwLock};
+use snarkos_utilities::{
+    locks::parking_lot::{Mutex, RwLock},
+    time::timeout,
+};
 use snarkvm::{
     console::prelude::*,
     ledger::{
@@ -41,7 +44,7 @@ use indexmap::{IndexMap, IndexSet};
 use rand::seq::IteratorRandom;
 
 use std::{future::Future, net::SocketAddr, sync::Arc};
-use tokio::{sync::oneshot, task::JoinHandle, time::timeout};
+use tokio::{sync::oneshot, task::JoinHandle};
 
 /// A worker's main role is maintaining a queue of verified ("ready") transmissions,
 /// which will eventually be fetched by the primary when the primary generates a new batch.
@@ -520,7 +523,7 @@ impl<N: Network> Worker<N> {
         self.spawn(async move {
             loop {
                 // Sleep briefly.
-                tokio::time::sleep(MAX_FETCH_TIMEOUT).await;
+                snarkos_utilities::time::sleep(MAX_FETCH_TIMEOUT).await;
 
                 // Remove the expired pending certificate requests.
                 let self__ = self_.clone();
@@ -759,7 +762,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[cfg_attr(not(shuttle), tokio::test)]
     async fn test_max_redundant_requests() {
         let num_nodes: u16 = CurrentNetwork::MAX_CERTIFICATES.first().unwrap().1;
 
@@ -780,7 +783,7 @@ mod tests {
         assert_eq!(max_redundant_requests(ledger, 0).unwrap(), 6, "Update me if the formula changes");
     }
 
-    #[tokio::test]
+    #[cfg_attr(not(shuttle), tokio::test)]
     async fn test_process_transmission() {
         let rng = &mut TestRng::default();
         // Sample a committee.
@@ -818,7 +821,7 @@ mod tests {
         assert!(!worker.ready.read().contains(transmission_id));
     }
 
-    #[tokio::test]
+    #[cfg_attr(not(shuttle), tokio::test)]
     async fn test_process_transmission_from_ping_respects_capacity() {
         let rng = &mut TestRng::default();
         // Sample a committee.
@@ -865,7 +868,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[cfg_attr(not(shuttle), tokio::test)]
     async fn test_process_transmission_from_peer_ignores_capacity() {
         let rng = &mut TestRng::default();
         // Sample a committee.
@@ -904,7 +907,7 @@ mod tests {
         assert_eq!(worker.num_transmissions(), num_to_insert);
     }
 
-    #[tokio::test]
+    #[cfg_attr(not(shuttle), tokio::test)]
     async fn test_send_transmission() {
         let rng = &mut TestRng::default();
         // Sample a committee.
@@ -944,7 +947,7 @@ mod tests {
         assert!(!worker.pending.contains(transmission_id));
     }
 
-    #[tokio::test]
+    #[cfg_attr(not(shuttle), tokio::test)]
     async fn test_process_solution_ok() {
         let rng = &mut TestRng::default();
         // Sample a committee.
@@ -981,7 +984,7 @@ mod tests {
         assert!(worker.ready.read().contains(transmission_id));
     }
 
-    #[tokio::test]
+    #[cfg_attr(not(shuttle), tokio::test)]
     async fn test_process_solution_nok() {
         let rng = &mut TestRng::default();
         // Sample a committee.
@@ -1018,7 +1021,7 @@ mod tests {
         assert!(!worker.ready.read().contains(transmission_id));
     }
 
-    #[tokio::test]
+    #[cfg_attr(not(shuttle), tokio::test)]
     async fn test_process_transaction_ok() {
         let rng = &mut TestRng::default();
         // Sample a committee.
@@ -1056,7 +1059,7 @@ mod tests {
         assert!(worker.ready.read().contains(transmission_id));
     }
 
-    #[tokio::test]
+    #[cfg_attr(not(shuttle), tokio::test)]
     async fn test_process_transaction_nok() {
         let mut rng = &mut TestRng::default();
         // Sample a committee.
@@ -1093,7 +1096,7 @@ mod tests {
         assert!(!worker.ready.read().contains(transmission_id));
     }
 
-    #[tokio::test]
+    #[cfg_attr(not(shuttle), tokio::test)]
     async fn test_flood_transmission_requests() {
         let rng = &mut TestRng::default();
         // Sample a committee.
@@ -1137,7 +1140,7 @@ mod tests {
             tokio::spawn(async move {
                 let _ = worker_.send_transmission_request(peer_ip, transmission_id).await;
             });
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            snarkos_utilities::time::sleep(Duration::from_millis(10)).await;
             // Check that the number of sent requests does not exceed the maximum number of redundant requests.
             assert!(worker.pending.num_sent_requests(transmission_id) <= num_redundant_requests);
             assert_eq!(worker.pending.num_callbacks(transmission_id), i);
@@ -1147,7 +1150,7 @@ mod tests {
         assert_eq!(worker.pending.num_callbacks(transmission_id), num_flood_requests);
 
         // Let all the requests expire.
-        tokio::time::sleep(Duration::from_secs(CALLBACK_EXPIRATION_IN_SECS as u64 + 1)).await;
+        snarkos_utilities::time::sleep(Duration::from_secs(CALLBACK_EXPIRATION_IN_SECS as u64 + 1)).await;
         assert_eq!(worker.pending.num_sent_requests(transmission_id), 0);
         assert_eq!(worker.pending.num_callbacks(transmission_id), 0);
 
@@ -1157,7 +1160,7 @@ mod tests {
             tokio::spawn(async move {
                 let _ = worker_.send_transmission_request(first_peer_ip, transmission_id).await;
             });
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            snarkos_utilities::time::sleep(Duration::from_millis(10)).await;
             assert!(worker.pending.num_sent_requests(transmission_id) <= num_redundant_requests);
             assert_eq!(worker.pending.num_callbacks(transmission_id), i);
         }
@@ -1174,7 +1177,7 @@ mod tests {
         assert!(worker.ready.read().contains(transmission_id));
     }
 
-    #[tokio::test]
+    #[cfg_attr(not(shuttle), tokio::test)]
     async fn test_storage_gc_on_initialization() {
         let rng = &mut TestRng::default();
 
@@ -1200,6 +1203,140 @@ mod tests {
 
             // Ensure that the storage GC round is correct.
             assert_eq!(storage.gc_round(), expected_gc_round);
+        }
+    }
+
+    /// The async tests of this module under the `shuttle` scheduler; see `snarkos_utilities::locks`.
+    /// Run them with `cargo shuttle-test -p snarkos-node-bft --lib shuttle_tests`.
+    ///
+    /// Each one runs in many orders of the steps of its tasks, with the clock of
+    /// `snarkos_utilities::time`, which moves only when no task can run.
+    #[cfg(shuttle)]
+    mod shuttle_tests {
+        use super::*;
+        use snarkos_utilities::{shuttle_test::check_async, time::sleep};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// The number of task orders that each test runs with each scheduler.
+        const ITERATIONS: usize = 200;
+
+        /// The response to a transmission request arrives at the instant at which the request
+        /// times out. The request fails or succeeds, depending on which of the two tasks runs
+        /// first. The response clears the pending request in both cases.
+        #[test]
+        fn response_arrives_at_the_fetch_timeout() {
+            static NUM_FETCHED: AtomicUsize = AtomicUsize::new(0);
+            static NUM_TIMED_OUT: AtomicUsize = AtomicUsize::new(0);
+
+            check_async(ITERATIONS, || async {
+                let rng = &mut TestRng::default();
+                let committee = snarkvm::ledger::committee::test_helpers::sample_committee(rng);
+                let committee_clone = committee.clone();
+                let mut gateway = MockGateway::default();
+                gateway.expect_send().returning(|_, _| Some(oneshot::channel().1));
+                let mut mock_ledger = MockLedger::default();
+                mock_ledger.expect_current_committee().returning(move || Ok(committee.clone()));
+                mock_ledger.expect_get_committee_lookback_for_round().returning(move |_| Ok(committee_clone.clone()));
+                mock_ledger.expect_ensure_transmission_is_well_formed().returning(|_, _| Ok(()));
+                let ledger: Arc<dyn LedgerService<CurrentNetwork>> = Arc::new(mock_ledger);
+                let storage =
+                    Storage::<CurrentNetwork>::new(ledger.clone(), Arc::new(BFTMemoryService::new()), 1).unwrap();
+                let worker = Worker::new(0, Arc::new(gateway), storage, ledger, Default::default()).unwrap();
+
+                let transmission_id = TransmissionID::Solution(
+                    rng.random::<u64>().into(),
+                    rng.random::<<CurrentNetwork as Network>::TransmissionChecksum>(),
+                );
+                let peer_ip = SocketAddr::from(([127, 0, 0, 1], 1234));
+
+                let request = {
+                    let worker = worker.clone();
+                    tokio::spawn(async move { worker.send_transmission_request(peer_ip, transmission_id).await })
+                };
+                let response = {
+                    let worker = worker.clone();
+                    tokio::spawn(async move {
+                        sleep(MAX_FETCH_TIMEOUT).await;
+                        worker.finish_transmission_request(peer_ip, TransmissionResponse {
+                            transmission_id,
+                            transmission: Transmission::Solution(Data::Buffer(Bytes::from(vec![0; 512]))),
+                        });
+                    })
+                };
+
+                let fetched = request.await.unwrap();
+                response.await.unwrap();
+                match fetched {
+                    Ok((id, _)) => {
+                        assert_eq!(id, transmission_id);
+                        NUM_FETCHED.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(error) => {
+                        assert!(format!("{error:#}").contains("timeout"), "{error:#}");
+                        NUM_TIMED_OUT.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                assert!(!worker.pending.contains(transmission_id));
+            });
+
+            // Both orders must occur, or the test does not cover the race.
+            assert!(NUM_FETCHED.load(Ordering::Relaxed) > 0, "the response never came first");
+            assert!(NUM_TIMED_OUT.load(Ordering::Relaxed) > 0, "the timeout never came first");
+        }
+
+        #[test]
+        fn test_max_redundant_requests() {
+            check_async(ITERATIONS, super::test_max_redundant_requests);
+        }
+
+        #[test]
+        fn test_process_transmission() {
+            check_async(ITERATIONS, super::test_process_transmission);
+        }
+
+        #[test]
+        fn test_process_transmission_from_ping_respects_capacity() {
+            check_async(ITERATIONS, super::test_process_transmission_from_ping_respects_capacity);
+        }
+
+        #[test]
+        fn test_process_transmission_from_peer_ignores_capacity() {
+            check_async(ITERATIONS, super::test_process_transmission_from_peer_ignores_capacity);
+        }
+
+        #[test]
+        fn test_send_transmission() {
+            check_async(ITERATIONS, super::test_send_transmission);
+        }
+
+        #[test]
+        fn test_process_solution_ok() {
+            check_async(ITERATIONS, super::test_process_solution_ok);
+        }
+
+        #[test]
+        fn test_process_solution_nok() {
+            check_async(ITERATIONS, super::test_process_solution_nok);
+        }
+
+        #[test]
+        fn test_process_transaction_ok() {
+            check_async(ITERATIONS, super::test_process_transaction_ok);
+        }
+
+        #[test]
+        fn test_process_transaction_nok() {
+            check_async(ITERATIONS, super::test_process_transaction_nok);
+        }
+
+        #[test]
+        fn test_flood_transmission_requests() {
+            check_async(ITERATIONS, super::test_flood_transmission_requests);
+        }
+
+        #[test]
+        fn test_storage_gc_on_initialization() {
+            check_async(ITERATIONS, super::test_storage_gc_on_initialization);
         }
     }
 }

@@ -16,12 +16,10 @@
 use crate::{CREATE_BATCH_INTERVAL, MAX_BATCH_DELAY, MIN_BATCH_DELAY};
 
 use anyhow::Result;
+use snarkos_utilities::time::{Instant, sleep, sleep_until};
 use snarkvm::{prelude::Network, utilities::flatten_error};
 use std::{marker::PhantomData, sync::Arc};
-use tokio::{
-    sync::watch,
-    time::{Instant, sleep, sleep_until},
-};
+use tokio::sync::watch;
 use tracing::{debug, warn};
 
 /// Abstracts over batch-proposal operations, allowing the proposal loop to be tested without a
@@ -329,7 +327,7 @@ mod tests {
     }
 
     /// Signals the proposal task and verifies that `propose_batch` is called on the dummy.
-    #[tokio::test]
+    #[cfg_attr(not(shuttle), tokio::test)]
     async fn test_proposal_task_calls_propose_batch_on_signal() {
         // Start with the task not ready so the initial signal is the trigger.
         let (ready, _) = watch::channel(false);
@@ -350,7 +348,7 @@ mod tests {
         // Signal readiness — the proposal loop should wake up and call propose_batch.
         task.signal();
 
-        tokio::time::timeout(std::time::Duration::from_secs(5), proposed_notify.notified())
+        snarkos_utilities::time::timeout(std::time::Duration::from_secs(5), proposed_notify.notified())
             .await
             .expect("propose_batch was not called within 5 seconds after signal");
 
@@ -362,7 +360,7 @@ mod tests {
     /// `RoundAdvancingProposer` returns round 1 on the first `current_round()` call (outer-loop
     /// capture) and round 2 on every subsequent call. The inner-loop condition therefore fails
     /// immediately — no time mocking needed.
-    #[tokio::test]
+    #[cfg_attr(not(shuttle), tokio::test)]
     async fn test_proposal_task_exits_on_round_advancement() {
         let propose_count = Arc::new(AtomicU32::new(0));
         let proposer = RoundAdvancingProposer {
@@ -388,7 +386,7 @@ mod tests {
     ///   1. A batch was already certified for the current round, so readiness is `false`.
     ///   2. `signal()` is **never** called externally — the BFT cannot advance the round until
     ///      `propose_batch()` is called (which internally checks the leader-certificate timer).
-    #[test_log::test(tokio::test)]
+    #[cfg_attr(not(shuttle), test_log::test(tokio::test))]
     async fn test_proposal_task_advances_without_leader_cert() {
         // Start NOT ready: simulates a batch that was already certified for the round but the
         // round has not yet advanced (the even-round leader cert was missing — e.g. the elected
@@ -428,7 +426,7 @@ mod tests {
 
         // Allow enough time for MAX_BATCH_DELAY (2.5 s) to elapse plus the CREATE_BATCH_INTERVAL
         // (250 ms) retry window. Use 10 s to give generous headroom on slow CI machines.
-        tokio::time::timeout(std::time::Duration::from_secs(10), proposed_notify.notified())
+        snarkos_utilities::time::timeout(std::time::Duration::from_secs(10), proposed_notify.notified())
             .await
             .expect("propose_batch was not called");
 
@@ -442,7 +440,7 @@ mod tests {
     /// This models the real primary: when a round is already certified but the round has not yet
     /// advanced (e.g. the elected leader was a freshly-reset minority validator), `propose_batch`
     /// returns `Ok(false)` until `try_advance_to_next_round` can make progress.
-    #[test_log::test(tokio::test)]
+    #[cfg_attr(not(shuttle), test_log::test(tokio::test))]
     async fn test_proposal_task_retries_after_leader_timeout() {
         const RETRIES: u32 = 2;
 
@@ -464,7 +462,7 @@ mod tests {
 
         // Allow enough time for MAX_BATCH_DELAY (2.5 s) plus RETRIES × CREATE_BATCH_INTERVAL (250 ms each).
         // Use 10 s to give generous headroom on slow CI machines.
-        tokio::time::timeout(std::time::Duration::from_secs(10), proposed_notify.notified())
+        snarkos_utilities::time::timeout(std::time::Duration::from_secs(10), proposed_notify.notified())
             .await
             .expect("propose_batch did not succeed within 10 seconds after leader timeout");
 
@@ -474,7 +472,7 @@ mod tests {
 
     /// When `propose_batch` returns `Ok(false)`, the task retries within the same round until
     /// it succeeds.
-    #[tokio::test]
+    #[cfg_attr(not(shuttle), tokio::test)]
     async fn test_proposal_task_retries_on_false() {
         const RETRIES: u32 = 2;
 
@@ -492,11 +490,50 @@ mod tests {
         tokio::spawn(task.run(proposer));
 
         // The task internally waits MIN_BATCH_DELAY before the first attempt; allow up to 10s.
-        tokio::time::timeout(std::time::Duration::from_secs(10), proposed_notify.notified())
+        snarkos_utilities::time::timeout(std::time::Duration::from_secs(10), proposed_notify.notified())
             .await
             .expect("propose_batch did not succeed within 10 seconds");
 
         // Stage 3 may make additional rebroadcast calls after success, so use >.
         assert!(propose_count.load(Ordering::SeqCst) > RETRIES, "expected at least {} total attempts", RETRIES + 1);
+    }
+
+    /// The async tests of this module under the `shuttle` scheduler; see `snarkos_utilities::locks`.
+    /// Run them with `cargo shuttle-test -p snarkos-node-bft --lib shuttle_tests`.
+    ///
+    /// Each one runs in many orders of the steps of its tasks. The clock is the one of
+    /// `snarkos_utilities::time`: it moves only when no task can run, so the timers of the
+    /// proposal task and of the test end in the order of their deadlines.
+    #[cfg(shuttle)]
+    mod shuttle_tests {
+        use snarkos_utilities::shuttle_test::check_async;
+
+        /// The number of task orders that each test runs with each scheduler.
+        const ITERATIONS: usize = 1000;
+
+        #[test]
+        fn test_proposal_task_calls_propose_batch_on_signal() {
+            check_async(ITERATIONS, super::test_proposal_task_calls_propose_batch_on_signal);
+        }
+
+        #[test]
+        fn test_proposal_task_exits_on_round_advancement() {
+            check_async(ITERATIONS, super::test_proposal_task_exits_on_round_advancement);
+        }
+
+        #[test]
+        fn test_proposal_task_advances_without_leader_cert() {
+            check_async(ITERATIONS, super::test_proposal_task_advances_without_leader_cert);
+        }
+
+        #[test]
+        fn test_proposal_task_retries_after_leader_timeout() {
+            check_async(ITERATIONS, super::test_proposal_task_retries_after_leader_timeout);
+        }
+
+        #[test]
+        fn test_proposal_task_retries_on_false() {
+            check_async(ITERATIONS, super::test_proposal_task_retries_on_false);
+        }
     }
 }

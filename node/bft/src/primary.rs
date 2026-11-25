@@ -1472,7 +1472,7 @@ impl<N: Network> Primary<N> {
         self.spawn(async move {
             loop {
                 // Sleep briefly.
-                tokio::time::sleep(PRIMARY_PING_INTERVAL).await;
+                snarkos_utilities::time::sleep(PRIMARY_PING_INTERVAL).await;
 
                 // Retrieve the block locators.
                 let self__ = self_.clone();
@@ -1554,7 +1554,7 @@ impl<N: Network> Primary<N> {
         let self_ = self.clone();
         self.spawn(async move {
             loop {
-                tokio::time::sleep(WORKER_PING_INTERVAL).await;
+                snarkos_utilities::time::sleep(WORKER_PING_INTERVAL).await;
 
                 // Broadcast the worker ping(s).
                 for worker in self_.workers() {
@@ -1642,13 +1642,13 @@ impl<N: Network> Primary<N> {
                     if let Some(remaining_delay) = MAX_BATCH_DELAY.checked_sub(round_start.elapsed())
                         && !remaining_delay.is_zero()
                     {
-                        futures.push(Box::pin(tokio::time::sleep(remaining_delay)));
+                        futures.push(Box::pin(snarkos_utilities::time::sleep(remaining_delay)));
                     }
                     // Always ensure a wakeup no later than MAX_LEADER_CERTIFICATE_DELAY so that
                     // try_advance_to_next_round is called after the leader-certificate timer
                     // expires, even when no further certificates arrive (e.g. an even round where
                     // the elected leader was absent and quorum was reached without their cert).
-                    futures.push(Box::pin(tokio::time::sleep(MAX_LEADER_CERTIFICATE_DELAY)));
+                    futures.push(Box::pin(snarkos_utilities::time::sleep(MAX_LEADER_CERTIFICATE_DELAY)));
                     let _ = futures::future::select_all(futures).await;
 
                     let next_round = current_round.saturating_add(1);
@@ -2701,7 +2701,7 @@ mod tests {
         store_certificate_chain(&primary, &accounts, round, &mut rng);
 
         // Sleep for a while to ensure the primary is ready to propose the next round.
-        tokio::time::sleep(MIN_BATCH_DELAY).await;
+        snarkos_utilities::time::sleep(MIN_BATCH_DELAY).await;
 
         // Generate a solution and a transaction.
         let (solution_id, solution) = sample_unconfirmed_solution(&mut rng);
@@ -2793,7 +2793,7 @@ mod tests {
         }
 
         // Sleep for a while to ensure the primary is ready to propose the next round.
-        tokio::time::sleep(MIN_BATCH_DELAY).await;
+        snarkos_utilities::time::sleep(MIN_BATCH_DELAY).await;
 
         // Advance to the next round.
         assert!(primary.storage.increment_to_next_round(round).is_ok());

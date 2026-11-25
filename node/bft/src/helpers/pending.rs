@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{Gateway, MAX_FETCH_TIMEOUT};
+use crate::{Gateway, MAX_FETCH_TIMEOUT, helpers::now};
 use snarkos_node_bft_ledger_service::LedgerService;
 use snarkos_node_network::PeerPoolHandling;
 use snarkos_utilities::locks::parking_lot::RwLock;
@@ -29,7 +29,6 @@ use std::{
     net::SocketAddr,
     sync::Arc,
 };
-use time::OffsetDateTime;
 use tokio::sync::oneshot;
 
 /// The maximum number of seconds to wait before expiring a callback.
@@ -119,7 +118,7 @@ impl<T: Copy + Clone + PartialEq + Eq + Hash, V: Clone> Pending<T, V> {
     /// Returns the number of pending callbacks for the specified `item`.
     pub fn num_callbacks(&self, item: impl Into<T>) -> usize {
         let item = item.into();
-        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let now = now();
         // Clear the callbacks that have expired.
         self.clear_expired_callbacks_for_item(now, item);
         // Return the number of live callbacks.
@@ -129,7 +128,7 @@ impl<T: Copy + Clone + PartialEq + Eq + Hash, V: Clone> Pending<T, V> {
     /// Returns the number of pending sent requests for the specified `item`.
     pub fn num_sent_requests(&self, item: impl Into<T>) -> usize {
         let item = item.into();
-        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let now = now();
         // Clear the callbacks that have expired.
         self.clear_expired_callbacks_for_item(now, item);
         // Return the number of live callbacks.
@@ -151,7 +150,7 @@ impl<T: Copy + Clone + PartialEq + Eq + Hash, V: Clone> Pending<T, V> {
         callback: Option<(oneshot::Sender<V>, bool)>,
     ) -> bool {
         let item = item.into();
-        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let now = now();
         // Insert the peer IP and optional callback into the pending queue.
         let result = {
             // Acquire the pending lock.
@@ -231,7 +230,7 @@ impl<T: Copy + Clone + PartialEq + Eq + Hash, V: Clone> Pending<T, V> {
 
     /// Removes the callbacks for all items have that expired.
     pub fn clear_expired_callbacks(&self) {
-        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let now = now();
         // Acquire the pending lock once for write access.
         let mut pending = self.pending.write();
 
