@@ -16,7 +16,7 @@
 use crate::helpers::{check_timestamp_for_liveness, fmt_id};
 use snarkos_node_bft_ledger_service::LedgerService;
 use snarkos_node_bft_storage_service::StorageService;
-use snarkos_utilities::locks::parking_lot::{Mutex, RwLock};
+use snarkos_utilities::locks::parking_lot::{Mutex, MutexGuard, RwLock};
 use snarkvm::{
     ledger::{
         block::{Block, Transaction},
@@ -45,7 +45,7 @@ use tokio_util::sync::CancellationToken;
 ///
 /// The `SameCertificate` variant describes a benign race: concurrent sync paths regularly try to
 /// insert the same certificate, and the loser of that race should treat its failure as a no-op
-/// (the certificate is in fact present in storage) rather than a hard error.
+/// (the certificate is in storage) rather than a hard error.
 ///
 /// The `SameAuthorAndRound` variant means storage holds a different certificate by that author
 /// for that round.
@@ -134,12 +134,15 @@ pub struct StorageInner<N: Network> {
     /// which makes the checks done under it hold until the update is complete.
     /// The readers of those maps do not take it.
     ///
-    /// Lock order: `certificate_updates`, then `rounds`, then `certificates`, then `batch_ids`.
+    /// Lock order, for any code that holds more than one of them: `certificate_updates`, then
+    /// `rounds`, then `certificates`, then `batch_ids`. None of them is reentrant, so code that
+    /// holds one must not call a method of `Storage` that takes it again.
     certificate_updates: Mutex<()>,
     /// The map of `round` to a list of `(certificate ID, author)` entries.
     ///
     /// An update holds the write lock of this map until `certificates` and `batch_ids` are
-    /// updated as well. A reader that finds a certificate ID here thus finds it in those maps too.
+    /// updated as well. A reader that finds a certificate ID here finds it in those maps too, for
+    /// as long as it holds the read lock.
     rounds: RwLock<IndexMap<u64, IndexSet<(Field<N>, Address<N>)>>>,
     /// A cache of `certificate ID` to unprocessed `certificate`.
     unprocessed_certificates: RwLock<LruCache<Field<N>, BatchCertificate<N>>>,
@@ -345,19 +348,28 @@ impl<N: Network> Storage<N> {
         // Compute the next GC round.
         let next_gc_round = next_round.saturating_sub(self.max_gc_rounds);
         // Advance the GC round, recording the previous value.
+        // This must come before the sweep: `insert_certificate_atomic` relies on it to refuse a
+        // certificate for a round that is being swept.
         let previous_gc_round = self.gc_round.fetch_max(next_gc_round, Ordering::SeqCst);
         // Only the call that actually advanced the GC round performs the removal sweep.
         if next_gc_round > previous_gc_round {
+            // List the stored rounds to remove. An insertion that read the previous GC round holds
+            // `certificate_updates` until its round is stored, and a later one is refused, so no
+            // round at or below the GC round is stored after this.
+            let mut gc_rounds: Vec<u64> = {
+                let _update = self.certificate_updates.lock();
+                self.rounds.read().keys().copied().filter(|round| *round <= next_gc_round).collect()
+            };
+            gc_rounds.sort_unstable();
             // Remove the GC round(s) from storage.
-            for gc_round in previous_gc_round..=next_gc_round {
-                // Sweep the round as one update, so that no insertion into it is in progress.
-                let _guard = self.certificate_updates.lock();
+            for gc_round in gc_rounds {
+                let update = self.certificate_updates.lock();
                 // Iterate over the certificates for the GC round.
                 for id in self.get_certificate_ids_for_round(gc_round).into_iter() {
                     trace!(
                         "Garbage collecting certificate {id} at round {gc_round} (cut-off is round {next_gc_round})"
                     );
-                    self.remove_certificate_in_update(id);
+                    self.remove_certificate_locked(&update, id);
                 }
             }
         }
@@ -824,11 +836,9 @@ impl<N: Network> Storage<N> {
     /// This method assumes **all missing** transmissions are provided in the `missing_transmissions` map.
     ///
     /// This method triggers updates to the `rounds`, `certificates`, `batch_ids`, and `transmissions` maps.
-    /// The certificate becomes visible in the first three at once, and after its transmissions.
     ///
     /// # Errors
-    /// The callers do these checks too, but before `certificate_updates` is held. They are repeated
-    /// here, where no other update can invalidate them:
+    /// Checked while `certificate_updates` is held, so that no other update can invalidate them:
     /// - [`CheckCertificateError::RoundTooLow`] if garbage collection has reached the round.
     /// - [`CheckCertificateError::SameCertificate`] if the certificate is in storage.
     /// - [`CheckCertificateError::SameAuthorAndRound`] if storage holds a different certificate from
@@ -850,7 +860,7 @@ impl<N: Network> Storage<N> {
         // Retrieve the author of the batch.
         let author = certificate.author();
 
-        let _guard = self.certificate_updates.lock();
+        let update = self.certificate_updates.lock();
 
         // Garbage collection advances the GC round before it sweeps, and it sweeps under
         // `certificate_updates`. A round above the GC round is thus not swept until this is done.
@@ -864,6 +874,29 @@ impl<N: Network> Storage<N> {
         if !trusted_ledger_certificate && self.contains_certificate_in_round_from(round, author) {
             return Err(CheckCertificateError::SameAuthorAndRound { round, gc_round });
         }
+
+        self.insert_certificate_locked(&update, certificate, aborted_transmission_ids, missing_transmissions);
+        Ok(())
+    }
+
+    /// Writes the given `certificate` to the `rounds`, `certificates`, `batch_ids`, and `transmissions`
+    /// maps, without any check.
+    ///
+    /// The transmissions are written first. A reader that holds the read lock of `rounds` then sees
+    /// the certificate in all of the other three maps, or in none of them.
+    fn insert_certificate_locked(
+        &self,
+        _update: &MutexGuard<'_, ()>,
+        certificate: BatchCertificate<N>,
+        aborted_transmission_ids: HashSet<TransmissionID<N>>,
+        missing_transmissions: HashMap<TransmissionID<N>, Transmission<N>>,
+    ) {
+        // Retrieve the round.
+        let round = certificate.round();
+        // Retrieve the certificate ID.
+        let certificate_id = certificate.id();
+        // Retrieve the author of the batch.
+        let author = certificate.author();
 
         // Insert the certificate ID for each of the transmissions into storage.
         self.transmissions.insert_transmissions(
@@ -883,7 +916,6 @@ impl<N: Network> Storage<N> {
         }
         // Remove the unprocessed certificate.
         self.unprocessed_certificates.write().pop(&certificate_id);
-        Ok(())
     }
 
     /// Inserts the given unprocessed `certificate` into storage.
@@ -898,28 +930,15 @@ impl<N: Network> Storage<N> {
         Ok(())
     }
 
-    /// Removes the given `certificate ID` from storage.
-    ///
-    /// This method triggers updates to the `rounds`, `certificates`, `batch_ids`, and `transmissions` maps.
-    ///
-    /// If the certificate was successfully removed, `true` is returned.
-    /// If the certificate did not exist in storage, `false` is returned.
-    #[cfg(test)]
-    fn remove_certificate(&self, certificate_id: Field<N>) -> bool {
-        let _guard = self.certificate_updates.lock();
-        self.remove_certificate_in_update(certificate_id)
-    }
-
     /// Removes the given `certificate ID` from storage. This method is used to garbage collect individual certificates once blocks are committed.
     ///
-    /// The caller must hold `certificate_updates`.
-    ///
     /// This method triggers updates to the `rounds`, `certificates`, `batch_ids`, and `transmissions` maps.
-    /// The certificate disappears from the first three at once, and before its transmissions.
+    /// The transmissions are removed last. A reader that holds the read lock of `rounds` then sees
+    /// the certificate in all of the other three maps, or in none of them.
     ///
     /// If the certificate was successfully removed, `true` is returned.
     /// If the certificate did not exist in storage, `false` is returned.
-    fn remove_certificate_in_update(&self, certificate_id: Field<N>) -> bool {
+    fn remove_certificate_locked(&self, _update: &MutexGuard<'_, ()>, certificate_id: Field<N>) -> bool {
         // TODO (howardwu): We may want to use `shift_remove` below, in order to align compatibility
         //  with tests written to for `remove_certificate`. However, this will come with performance hits.
         //  It will be better to write tests that compare the union of the sets.
@@ -1139,34 +1158,21 @@ impl<N: Network> Storage<N> {
     #[cfg(test)]
     #[doc(hidden)]
     pub(crate) fn testing_only_insert_certificate_testing_only(&self, certificate: BatchCertificate<N>) {
-        // Retrieve the round.
-        let round = certificate.round();
-        // Retrieve the certificate ID.
-        let certificate_id = certificate.id();
-        // Retrieve the author of the batch.
-        let author = certificate.author();
-
-        // Insert the round to certificate ID entry.
-        self.rounds.write().entry(round).or_default().insert((certificate_id, author));
-        // Obtain the certificate's transmission ids.
-        let transmission_ids = certificate.transmission_ids().clone();
-        // Insert the certificate.
-        self.certificates.write().insert(certificate_id, certificate);
-        // Insert the batch ID.
-        self.batch_ids.write().insert(certificate_id, round);
-
         // Construct the dummy missing transmissions (for testing purposes).
-        let missing_transmissions = transmission_ids
+        let missing_transmissions = certificate
+            .transmission_ids()
             .iter()
             .map(|id| (*id, Transmission::Transaction(snarkvm::ledger::narwhal::Data::Buffer(bytes::Bytes::new()))))
             .collect::<HashMap<_, _>>();
-        // Insert the certificate ID for each of the transmissions into storage.
-        self.transmissions.insert_transmissions(
-            certificate_id,
-            transmission_ids,
-            Default::default(),
-            missing_transmissions,
-        );
+        // Insert the certificate, without the checks of `insert_certificate_atomic`.
+        let update = self.certificate_updates.lock();
+        self.insert_certificate_locked(&update, certificate, Default::default(), missing_transmissions);
+    }
+
+    /// Removes the given `certificate ID` from storage; see [`Self::remove_certificate_locked`].
+    fn remove_certificate(&self, certificate_id: Field<N>) -> bool {
+        let update = self.certificate_updates.lock();
+        self.remove_certificate_locked(&update, certificate_id)
     }
 }
 
@@ -1869,10 +1875,10 @@ pub(crate) mod tests {
         assert!(matches!(result, Err(CheckCertificateError::SameCertificate { .. })));
     }
 
-    /// Verify that `insert_certificate_atomic` repeats the checks of its callers, which two tasks
-    /// can both pass before either of them inserts.
+    /// Verify the errors of `insert_certificate_atomic`, which is the only check that holds when
+    /// two tasks pass `check_certificate` before either of them inserts.
     #[test]
-    fn test_insert_certificate_atomic_repeats_the_checks() {
+    fn test_insert_certificate_atomic_errors() {
         let rng = &mut TestRng::default();
 
         // Sample a committee.
@@ -1949,17 +1955,12 @@ pub(crate) mod tests {
         // Initialize the storage.
         let storage = Storage::<CurrentNetwork>::new(ledger, Arc::new(BFTMemoryService::new()), 1).unwrap();
 
-        for _ in 0..20 {
+        for author in &private_keys {
             // Construct a certificate with a full quorum of signers.
-            let author = &private_keys[rng.random_range(0..private_keys.len())];
             let other_keys: Vec<_> = private_keys.iter().cloned().filter(|k| k != author).collect();
             let certificate =
                 sample_batch_certificate_for_round_with_committee(1, Default::default(), author, &other_keys, rng);
-            if storage.contains_certificate_in_round_from(1, certificate.author()) {
-                continue;
-            }
-            let (_missing_transmissions, transmissions) = sample_transmissions(&certificate, rng);
-            let transmissions: HashMap<_, _> = transmissions.into_iter().map(|(k, (t, _))| (k, t)).collect();
+            let (transmissions, _) = sample_transmissions(&certificate, rng);
 
             let barrier = std::sync::Barrier::new(NUM_THREADS);
             let results: Vec<_> = std::thread::scope(|scope| {
