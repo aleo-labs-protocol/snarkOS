@@ -24,16 +24,30 @@
 //! direct dependency on `locktick` can build a second copy, whose `lock_snapshots` misses
 //! snarkVM's locks.
 //!
+//! Building with `--cfg shuttle` swaps the `parking_lot` locks for the ones of the `shuttle`
+//! concurrency testing tool, and the types of [`crate::atomic`] with them. A shuttle test runs
+//! its threads one at a time, and picks which one runs next at each operation on these types.
+//! Hazards of that build:
+//! - These locks and atomics panic outside a shuttle test, so the build can run nothing else.
+//! - The [`tokio`] locks stay the ones of `tokio`, and snarkVM keeps its own locks. Shuttle does
+//!   not see them: no thread switch happens at them, and a test deadlocks if one thread waits for
+//!   such a lock while its holder is switched out.
+//! - The two cfgs are mutually exclusive.
+//!
 //! The submodules mirror the layout of `locktick`. A lock's methods return the guard alias of
-//! its submodule in both builds. Under `--cfg locktick` that guard is a `locktick::LockGuard`
-//! that dereferences to the plain guard. Code that passes a guard to an associated function of
-//! the plain guard type, such as `parking_lot::MutexGuard::map`, compiles only without the cfg.
+//! its submodule in every build. Under `--cfg locktick` that guard is a `locktick::LockGuard`
+//! that dereferences to the plain guard, and under `--cfg shuttle` it is the guard of shuttle's
+//! lock. Code that passes a guard to an associated function of the plain guard type, such as
+//! `parking_lot::MutexGuard::map`, compiles only without the cfgs.
 //!
 //! `clippy.toml` disallows the lock types of `parking_lot`, `tokio` and `locktick` everywhere
 //! else. Turning these type aliases into `pub use` re-exports would make that lint flag every
 //! user of them.
 
 #![allow(clippy::disallowed_types)]
+
+#[cfg(all(locktick, shuttle))]
+compile_error!("`--cfg locktick` and `--cfg shuttle` both replace the locks of `snarkos_utilities::locks`: set one");
 
 #[cfg(not(locktick))]
 type Guard<G> = G;
@@ -44,16 +58,24 @@ type Guard<G> = ::snarkvm::utilities::locktick::LockGuard<G>;
 pub mod parking_lot {
     use super::Guard;
 
-    #[cfg(not(locktick))]
+    #[cfg(not(any(locktick, shuttle)))]
     use ::parking_lot as backend;
+    #[cfg(all(shuttle, not(locktick)))]
+    use ::shuttle_parking_lot as backend;
     #[cfg(locktick)]
     use ::snarkvm::utilities::locktick::parking_lot as backend;
 
+    /// The crate whose guards the locks of `backend` hand out, wrapped or not.
+    #[cfg(not(all(shuttle, not(locktick))))]
+    use ::parking_lot as guards;
+    #[cfg(all(shuttle, not(locktick)))]
+    use ::shuttle_parking_lot as guards;
+
     pub type Mutex<T> = backend::Mutex<T>;
     pub type RwLock<T> = backend::RwLock<T>;
-    pub type MutexGuard<'a, T> = Guard<::parking_lot::MutexGuard<'a, T>>;
-    pub type RwLockReadGuard<'a, T> = Guard<::parking_lot::RwLockReadGuard<'a, T>>;
-    pub type RwLockWriteGuard<'a, T> = Guard<::parking_lot::RwLockWriteGuard<'a, T>>;
+    pub type MutexGuard<'a, T> = Guard<guards::MutexGuard<'a, T>>;
+    pub type RwLockReadGuard<'a, T> = Guard<guards::RwLockReadGuard<'a, T>>;
+    pub type RwLockWriteGuard<'a, T> = Guard<guards::RwLockWriteGuard<'a, T>>;
 }
 
 /// Asynchronous locks from `tokio::sync`.

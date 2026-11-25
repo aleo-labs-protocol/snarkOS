@@ -26,3 +26,11 @@ rustflags = [
 locktick-build = ["build", "--config", "target.'cfg(all())'.rustflags=['--cfg','locktick']"]
 locktick-check = ["check", "--config", "target.'cfg(all())'.rustflags=['--cfg','locktick']"]
 locktick-clippy = ["clippy", "--config", "target.'cfg(all())'.rustflags=['--cfg','locktick']"]
+
+# `cargo shuttle-<command>` runs a cargo command with `--cfg shuttle`, which swaps the `parking_lot`
+# locks of `snarkos_utilities::locks` and the types of `snarkos_utilities::atomic` for the ones of
+# the `shuttle` concurrency testing tool. Only the tests in a `shuttle_tests` module can run in
+# that build, for example `cargo shuttle-test -p snarkos-node-bft --lib shuttle_tests`.
+# The hazards of the `locktick` aliases above apply.
+shuttle-test = ["test", "--config", "target.'cfg(all())'.rustflags=['--cfg','shuttle']"]
+shuttle-clippy = ["clippy", "--config", "target.'cfg(all())'.rustflags=['--cfg','shuttle']"]
