@@ -811,10 +811,10 @@ function compute_throughput {
 # Helper functions to download and build latest stable snarkOS release
 ######################################################################
 
-# A release node that is catching up can log this ERROR when block sync and the primary store the
-# same certificate at the same time. The node retries and recovers.
+# A release node that is catching up can log one of these ERRORs when block sync races with the
+# primary storing the same certificate, or with garbage collection. The node retries and recovers.
 # shellcheck disable=SC2034
-RELEASE_DUPLICATE_CERTIFICATE_ERROR="Failed to insert certificate '[0-9]+\\.\\.' from block [0-9]+ — Certificate with this author in round [0-9]+ is already in storage"
+RELEASE_CERTIFICATE_SYNC_RACE_ERROR="Failed to insert certificate '[0-9]+\\.\\.' from block [0-9]+ — Certificate (with this author in round [0-9]+ is already in storage|round [0-9]+ already exists in storage|round [0-9]+ is at or below the GC round [0-9]+)"
 
 # Release binary will be installed here via `cargo install --root`.
 SNARKOS_RELEASE_DIR="${SNARKOS_RELEASE_DIR:-$PWD/.ci/release-snarkos}"

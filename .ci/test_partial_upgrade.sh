@@ -297,7 +297,7 @@ upgrade_stop="Validators holding at least a third of the stake run ConsensusVers
 outdated_peer="The peer's consensus version for height [0-9]+ is behind ours"
 # The release binary leaves a task running when it shuts down this way.
 surplus_tasks="There are [0-9]+ surplus live tasks"
-expected_errors="$upgrade_stop|$outdated_peer|$surplus_tasks|$RELEASE_DUPLICATE_CERTIFICATE_ERROR"
+expected_errors="$upgrade_stop|$outdated_peer|$surplus_tasks|$RELEASE_CERTIFICATE_SYNC_RACE_ERROR"
 
 # Only the release validators may log the surplus task error.
 for ((node_index = penultimate_index; node_index < total_validators; node_index++)); do

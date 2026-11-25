@@ -62,8 +62,10 @@ pub enum CheckCertificateError {
 }
 
 impl CheckCertificateError {
-    /// Whether the error indicates the certificate is already in storage (a benign sync race
-    /// rather than a hard failure). Callers should not log benign errors at ERROR.
+    /// Whether storage declined the certificate for a reason other than the certificate being
+    /// invalid. Callers should not log benign errors at ERROR.
+    ///
+    /// This includes `SameAuthorAndRound`, although storage then holds a different certificate.
     pub fn is_benign(&self) -> bool {
         matches!(self, Self::SameCertificate { .. } | Self::SameAuthorAndRound { .. } | Self::RoundTooLow { .. })
     }
@@ -1498,6 +1500,36 @@ pub(crate) mod tests {
         assert!(storage.remove_certificate(certificate_1.id()));
         assert!(storage.contains_aborted_transmission(transmission_id));
         assert!(!storage.contains_retrievable_transmission(transmission_id));
+    }
+
+    /// Block sync skips a certificate that another task is in the middle of inserting (its round
+    /// entry is written, its certificate entry is not), and fails on a certificate whose author
+    /// has a different certificate in storage for the same round.
+    #[test]
+    fn test_sync_certificate_with_block_and_a_stored_round_entry() {
+        use snarkvm::prelude::Uniform;
+
+        let rng = &mut TestRng::default();
+
+        let transmission_id = TransmissionID::Transaction(
+            <CurrentNetwork as Network>::TransactionID::from(Field::rand(rng)),
+            <CurrentNetwork as Network>::TransmissionChecksum::from(rng.random::<u128>()),
+        );
+        let (storage, make_certificate) = sample_storage_and_certificates_for_transmission(transmission_id, true, rng);
+        let block = crate::test_helpers::sample_genesis_block(rng);
+
+        // The round entry holds the ID of the certificate itself.
+        let certificate = make_certificate(0, rng);
+        storage.rounds.write().entry(1).or_default().insert((certificate.id(), certificate.author()));
+        storage
+            .sync_certificate_with_block(&block, certificate, &Default::default(), false)
+            .expect("a certificate that is being inserted must be skipped");
+
+        // The round entry holds the ID of another certificate by the same author.
+        let certificate = make_certificate(1, rng);
+        storage.rounds.write().entry(1).or_default().insert((Field::rand(rng), certificate.author()));
+        let error = storage.sync_certificate_with_block(&block, certificate, &Default::default(), false).unwrap_err();
+        assert!(matches!(error.downcast_ref(), Some(CheckCertificateError::SameAuthorAndRound { .. })));
     }
 
     #[test]

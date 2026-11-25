@@ -631,7 +631,7 @@ done
 
 log "Upgrade test passed: all nodes upgraded to PR snarkos, the network kept advancing, and every node's consensus version matches the configured schedule."
 
-expected_errors="$RELEASE_DUPLICATE_CERTIFICATE_ERROR"
+expected_errors="$RELEASE_CERTIFICATE_SYNC_RACE_ERROR"
 # A release validator logs this ERROR once two upgraded validators schedule the new version.
 if [ -n "$NEW_VERSION_HEIGHT" ]; then
   expected_errors="$expected_errors|This node stops before building block [0-9]+, [0-9]+ blocks before that height; upgrade snarkOS before then"
