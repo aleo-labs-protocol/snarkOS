@@ -16,7 +16,7 @@ on:
       validators:
         description: "Network size, in validators"
         type: choice
-        options: ["5", "10", "16"]
+        options: ["5", "10", "16", "21"]
         default: "5"
       stockpile:
         description: "Stockpile to replay. Its network is the devnet's."
