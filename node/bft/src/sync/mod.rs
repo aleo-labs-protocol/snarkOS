@@ -1812,6 +1812,55 @@ mod tests {
         assert!(syncing_ledger.contains_block_height(2));
     }
 
+    /// Tests that the ledger builds no block from a subdag that also holds the certificates of the latest block.
+    ///
+    /// The BFT orders such a subdag when sync adds a block between the ordering and the ledger update.
+    #[tokio::test]
+    async fn test_prepare_block_rejects_committed_certificates() {
+        let rng = &mut TestRng::default();
+        let (genesis, blocks) = setup_commit_chain(rng).await;
+        let ledger = Arc::new(CoreLedgerService::new(
+            spawn_blocking!(CurrentLedger::load(genesis, StorageMode::new_test(None))).unwrap(),
+            SimpleStoppable::new(),
+        ));
+
+        let Authority::Quorum(committed_subdag) = blocks[1].authority().clone() else {
+            panic!("Expected a quorum block")
+        };
+        let Authority::Quorum(next_subdag) = blocks[2].authority().clone() else { panic!("Expected a quorum block") };
+
+        // Order the subdag of the third block as if the second block were not in the ledger.
+        let mut stale_subdag_map: BTreeMap<u64, IndexSet<BatchCertificate<CurrentNetwork>>> = BTreeMap::new();
+        for (round, certificates) in committed_subdag.iter().chain(next_subdag.iter()) {
+            stale_subdag_map.entry(*round).or_default().extend(certificates.iter().cloned());
+        }
+        let stale_subdag = Subdag::from(stale_subdag_map).unwrap();
+        assert_eq!(stale_subdag.anchor_round(), next_subdag.anchor_round());
+
+        let (committed_result, stale_result, block) = spawn_blocking!({
+            let ledger_update = ledger.begin_ledger_update()?;
+            // Advance the ledger to the second block.
+            for block in &blocks[..2] {
+                ledger_update.advance_to_next_block(block)?;
+            }
+            let committed_result =
+                ledger_update.prepare_advance_to_next_quorum_block(committed_subdag, Default::default());
+            let stale_result = ledger_update
+                .prepare_advance_to_next_quorum_block(stale_subdag, Default::default())
+                .map(|block| block.hash());
+            // The subdag without the committed certificates becomes the third block.
+            let block = ledger_update.prepare_advance_to_next_quorum_block(next_subdag, Default::default())?;
+            Ok((committed_result, stale_result, block))
+        })
+        .unwrap();
+
+        // The subdag of the latest block keeps its own error, which tells the BFT that the ledger already advanced.
+        assert!(matches!(committed_result, Err(CheckBlockError::InvalidRound { .. })));
+        let error = stale_result.expect_err("A subdag with committed certificates must not become a block").to_string();
+        assert!(error.contains("is already in the ledger"), "Unexpected error: {error}");
+        assert_eq!(block.height(), 3);
+    }
+
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn test_pending_certificates() -> anyhow::Result<()> {

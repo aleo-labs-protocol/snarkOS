@@ -40,6 +40,7 @@ use snarkvm::{
         Ledger,
         PendingBlock,
         Transaction,
+        authority::Authority,
         committee::Committee,
         narwhal::{BatchCertificate, Data, Subdag, Transmission, TransmissionID},
         puzzle::{Solution, SolutionID},
@@ -58,7 +59,7 @@ use snarkvm::{
     },
 };
 
-use anyhow::ensure;
+use anyhow::{anyhow, ensure};
 use indexmap::IndexMap;
 use rayon::prelude::*;
 
@@ -104,7 +105,24 @@ impl<'a, N: Network, C: ConsensusStorage<N>> LedgerUpdateService<N> for LedgerUp
         subdag: Subdag<N>,
         transmissions: IndexMap<TransmissionID<N>, Transmission<N>>,
     ) -> Result<Block<N>, CheckBlockError<N>> {
-        self.ledger.prepare_advance_to_next_quorum_block(subdag, transmissions, &mut rand::rng())
+        let block = self.ledger.prepare_advance_to_next_quorum_block(subdag, transmissions, &mut rand::rng())?;
+
+        // The caller orders the subdag before it begins this update, so a block added in between
+        // can hold some of its certificates. A block that commits them again forks this node.
+        if let Authority::Quorum(subdag) = block.authority() {
+            for certificate_id in subdag.certificate_ids() {
+                if self.ledger.contains_certificate(&certificate_id)? {
+                    return Err(anyhow!(
+                        "Certificate '{}' of the subdag for round {} is already in the ledger",
+                        fmt_id(certificate_id),
+                        subdag.anchor_round()
+                    )
+                    .into());
+                }
+            }
+        }
+
+        Ok(block)
     }
 
     /// Adds the given block as the next block in the ledger.
