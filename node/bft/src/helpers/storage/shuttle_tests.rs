@@ -24,7 +24,10 @@
 //! Hazard: shuttle switches threads only at the locks and atomics of `snarkos_utilities`. A
 //! thread that samples or signs inside a closure makes each run slow and tests nothing more.
 
-use super::{tests::sample_transmissions, *};
+use super::{
+    tests::{sample_certificate_with_transmission_ids, sample_transmissions},
+    *,
+};
 use snarkos_node_bft_ledger_service::MockLedgerService;
 use snarkos_node_bft_storage_service::BFTMemoryService;
 use snarkos_utilities::shuttle::{self, thread};
@@ -84,6 +87,26 @@ impl Fixture {
         );
         let (transmissions, _) = sample_transmissions(&certificate, &mut self.rng);
         (certificate, transmissions)
+    }
+
+    /// Samples a certificate like [`Self::certificate`], with the given transmission IDs.
+    fn certificate_with_transmission_ids(
+        &mut self,
+        author: usize,
+        round: u64,
+        previous_certificate_ids: IndexSet<Field<CurrentNetwork>>,
+        transmission_ids: IndexSet<TransmissionID<CurrentNetwork>>,
+    ) -> Certificate {
+        let author = self.private_keys[author];
+        let signers: Vec<_> = self.private_keys.iter().copied().filter(|key| *key != author).collect();
+        sample_certificate_with_transmission_ids(
+            round,
+            &author,
+            &signers,
+            previous_certificate_ids,
+            transmission_ids,
+            &mut self.rng,
+        )
     }
 }
 
@@ -267,6 +290,42 @@ fn insertion_during_garbage_collection_of_the_previous_round() {
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(storage.gc_round(), 1);
         assert_eq!(storage.rounds_iter().map(|(round, _)| round).collect::<Vec<_>>(), [2]);
+        assert_at_rest(&storage);
+    });
+}
+
+/// A task inserts a certificate while garbage collection removes the only other certificate that
+/// has its transmissions. The task provides no transmission, because the storage has them all.
+/// The storage keeps the certificate with its transmissions, or it does not keep the certificate.
+#[test]
+fn insertion_during_garbage_collection_of_its_transmissions() {
+    let mut fixture = Fixture::new();
+    let previous_certificates: Vec<_> =
+        (0..NUM_MEMBERS).map(|author| fixture.certificate(author, 1, Default::default())).collect();
+    let previous_certificate_ids = previous_certificates.iter().map(|(certificate, _)| certificate.id()).collect();
+    let transmission_ids = previous_certificates[1].0.transmission_ids().clone();
+    let certificate = fixture.certificate_with_transmission_ids(0, 2, previous_certificate_ids, transmission_ids);
+    let certificate = (certificate, Transmissions::new());
+    let committee = fixture.committee;
+
+    check(move || {
+        let storage = new_storage(&committee, 1);
+        for (previous_certificate, transmissions) in &previous_certificates {
+            storage
+                .insert_certificate(previous_certificate.clone(), transmissions.clone(), Default::default())
+                .unwrap();
+        }
+
+        let insert = spawn_insert(&storage, &certificate);
+        let garbage_collection = spawn_garbage_collection(&storage, 2);
+        let reader = spawn_reader(&storage);
+        let result = insert.join().unwrap();
+        garbage_collection.join().unwrap();
+        reader.join().unwrap();
+
+        assert!(matches!(result, Ok(()) | Err(CheckCertificateError::MissingTransmission { .. })), "{result:?}");
+        assert_eq!(storage.contains_certificate(certificate.0.id()), result.is_ok());
+        assert_eq!(storage.gc_round(), 1);
         assert_at_rest(&storage);
     });
 }
