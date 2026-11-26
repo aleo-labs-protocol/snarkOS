@@ -21,7 +21,13 @@ pub use signals::*;
 pub mod node_data;
 pub use node_data::*;
 
+pub mod atomic;
+
 pub mod locks;
+
+/// The `shuttle` concurrency testing tool, for the tests of a `--cfg shuttle` build; see [`locks`].
+#[cfg(shuttle)]
+pub use ::shuttle;
 
 mod callback_handle;
 pub use callback_handle::CallbackHandle;

@@ -16,7 +16,10 @@
 use crate::helpers::{check_timestamp_for_liveness, fmt_id};
 use snarkos_node_bft_ledger_service::LedgerService;
 use snarkos_node_bft_storage_service::StorageService;
-use snarkos_utilities::locks::parking_lot::{Mutex, MutexGuard, RwLock};
+use snarkos_utilities::{
+    atomic::{AtomicU32, AtomicU64, Ordering},
+    locks::parking_lot::{Mutex, MutexGuard, RwLock},
+};
 use snarkvm::{
     ledger::{
         block::{Block, Transaction},
@@ -34,10 +37,7 @@ use std::{
     cmp,
     collections::{HashMap, HashSet},
     num::NonZeroUsize,
-    sync::{
-        Arc,
-        atomic::{AtomicU32, AtomicU64, Ordering},
-    },
+    sync::Arc,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -1124,6 +1124,28 @@ impl<N: Network> Storage<N> {
 
 #[cfg(test)]
 impl<N: Network> Storage<N> {
+    /// Asserts that `rounds`, `certificates` and `batch_ids` describe the same set of certificates.
+    ///
+    /// This must hold at any time for a reader that holds the read lock of `rounds`.
+    pub(crate) fn assert_maps_agree(&self) {
+        let rounds = self.rounds.read();
+        let certificates = self.certificates.read();
+        let batch_ids = self.batch_ids.read();
+
+        let mut num_entries = 0;
+        for (round, entries) in rounds.iter() {
+            assert!(!entries.is_empty(), "round {round} is stored without a certificate");
+            for (id, author) in entries {
+                num_entries += 1;
+                let certificate = certificates.get(id).unwrap_or_else(|| panic!("round {round} lists a missing {id}"));
+                assert_eq!((certificate.id(), certificate.round(), certificate.author()), (*id, *round, *author));
+                assert_eq!(batch_ids.get(id), Some(round), "the batch ID of {id}");
+            }
+        }
+        assert_eq!(certificates.len(), num_entries, "a certificate is in no round");
+        assert_eq!(batch_ids.len(), num_entries, "a batch ID is in no round");
+    }
+
     /// Returns the ledger service.
     pub fn ledger(&self) -> &Arc<dyn LedgerService<N>> {
         &self.ledger
@@ -1175,6 +1197,9 @@ impl<N: Network> Storage<N> {
     }
 }
 
+#[cfg(all(test, shuttle))]
+mod shuttle_tests;
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1198,6 +1223,7 @@ pub(crate) mod tests {
         batch_ids: &[(Field<N>, u64)],
         transmissions: &HashMap<TransmissionID<N>, (Transmission<N>, IndexSet<Field<N>>)>,
     ) {
+        storage.assert_maps_agree();
         // Ensure the rounds are well-formed.
         assert_eq!(storage.rounds_iter().collect::<Vec<_>>(), *rounds);
         // Ensure the certificates are well-formed.

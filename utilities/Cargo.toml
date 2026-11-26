@@ -36,9 +36,16 @@ workspace = true
 workspace = true
 features = [ "utilities" ]
 
+[target.'cfg(shuttle)'.dependencies.shuttle]
+version = "0.9.10"
+
+[target.'cfg(shuttle)'.dependencies.shuttle-parking_lot]
+version = "0.12.5"
+features = [ "shuttle" ]
+
 [dev-dependencies.tokio]
 workspace = true
 features = [ "macros", "rt", "time" ]
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = [ 'cfg(locktick)' ] }
+[lints]
+workspace = true
