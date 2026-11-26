@@ -2247,6 +2247,10 @@ impl<N: Network> Primary<N> {
 
     /// Shuts down the primary.
     pub async fn shut_down(&self) {
+        // A primary that never ran (no workers) has nothing to stop or persist.
+        if self.workers.get().is_none() {
+            return;
+        }
         info!("Shutting down the primary...");
         // Remove the callback.
         self.primary_callback.clear();
@@ -4215,6 +4219,26 @@ mod tests {
         primary.try_increment_to_the_next_round(round + 4).await.unwrap();
         assert_eq!(primary.current_round(), round + 1);
         assert!(!signal.has_changed().unwrap());
+    }
+
+    /// Shutting down a primary that never ran must not panic, and must not write a proposal cache.
+    #[tokio::test]
+    async fn test_shut_down_before_run() {
+        let rng = &mut TestRng::default();
+        let (_, committee) = sample_committee(rng);
+        let ledger = Arc::new(MockLedgerService::new(committee));
+        let storage = Storage::new(ledger.clone(), Arc::new(BFTMemoryService::new()), 10).unwrap();
+        let block_sync = Arc::new(BlockSync::new(ledger.clone(), ConnectionMode::Gateway));
+        let dir = tempfile::tempdir().unwrap();
+        let node_data_dir = NodeDataDir::new(dir.path().to_path_buf());
+        let account = Account::new(rng).unwrap();
+        let primary =
+            Primary::new(account, storage, ledger, block_sync, None, &[], false, node_data_dir.clone(), None, 1)
+                .unwrap();
+
+        primary.shut_down().await;
+
+        assert!(!ProposalCache::<CurrentNetwork>::exists(&node_data_dir));
     }
 
     /// After `BFT::run`, the primary and the sync module must reach the BFT through their callbacks,
