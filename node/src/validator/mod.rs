@@ -70,6 +70,8 @@ pub struct Validator<N: Network, C: ConsensusStorage<N>> {
     pub(crate) handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
     /// Keeps track of sending pings.
     ping: Arc<Ping<N>>,
+    /// Stops the authority compaction once the last clone of the node is dropped.
+    _compaction_guard: Arc<crate::StopAuthorityCompactionOnDrop<N, C>>,
 }
 
 impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
@@ -113,6 +115,7 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
             spawn_blocking!(Ledger::<N, C>::load_with_options(genesis, storage_mode, options))
         }
         .with_context(|| "Failed to initialize the ledger")?;
+        let compaction_guard = Arc::new(crate::StopAuthorityCompactionOnDrop(ledger.clone()));
 
         // Later blocks finalized by this node are written as JSON beside the ledger.
         if history_json {
@@ -175,6 +178,7 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
             sync: sync.clone(),
             ping,
             handles: Default::default(),
+            _compaction_guard: compaction_guard,
         };
 
         // Stop the node once validators run a consensus version this build lacks.
