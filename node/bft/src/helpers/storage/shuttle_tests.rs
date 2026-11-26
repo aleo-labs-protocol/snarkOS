@@ -18,7 +18,8 @@
 //!
 //! Each test samples its certificates once. It then runs its closure many times, each time on a
 //! new storage and with another order of the steps of its threads; see [`check`]. A failure
-//! prints the seed that replays it, which `SHUTTLE_RANDOM_SEED` takes.
+//! prints the schedule that replays it, which `shuttle::replay` takes. The random scheduler also
+//! prints its seed, which `SHUTTLE_RANDOM_SEED` takes.
 //!
 //! Hazard: shuttle switches threads only at the locks and atomics of `snarkos_utilities`. A
 //! thread that samples or signs inside a closure makes each run slow and tests nothing more.
@@ -43,7 +44,8 @@ type InsertResult = Result<(), CheckCertificateError>;
 /// The number of thread orders that each test runs with each scheduler.
 const ITERATIONS: usize = 5_000;
 
-/// The number of points at which the PCT scheduler changes the priorities of the threads.
+/// The depth of the PCT scheduler, which changes the priorities of the threads at
+/// `PCT_DEPTH - 1` points.
 const PCT_DEPTH: usize = 3;
 
 /// The number of committee members, which is the smallest one that tolerates a fault.
