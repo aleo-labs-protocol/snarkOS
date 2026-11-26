@@ -2188,14 +2188,15 @@ mod tests {
             Sync::new(gateway, storage, ledger, block_sync)
         }
 
-        /// Puts a request for `certificate_id` that was sent to the peer into the pending queue,
+        /// Puts a request for `certificate_id` that was sent to `peer_ip` into the pending queue,
         /// and returns the receiver of its callback.
         fn insert_sent_request(
             sync: &Sync<CurrentNetwork>,
             certificate_id: Field<CurrentNetwork>,
+            peer_ip: SocketAddr,
         ) -> oneshot::Receiver<BatchCertificate<CurrentNetwork>> {
             let (sender, receiver) = oneshot::channel();
-            sync.pending.insert(certificate_id, PEER_IP, Some((sender, true)));
+            sync.pending.insert(certificate_id, peer_ip, Some((sender, true)));
             receiver
         }
 
@@ -2211,7 +2212,7 @@ mod tests {
             check_async(ITERATIONS, move || {
                 let (sync, certificate) = (new_sync(committee.clone()), certificate.clone());
                 async move {
-                    let earlier_request = insert_sent_request(&sync, certificate.id());
+                    let earlier_request = insert_sent_request(&sync, certificate.id(), PEER_IP);
 
                     let request = {
                         let (sync, certificate_id) = (sync.clone(), certificate.id());
@@ -2259,7 +2260,7 @@ mod tests {
             check_async(ITERATIONS, move || {
                 let (sync, certificate) = (new_sync(committee.clone()), certificate.clone());
                 async move {
-                    let first_request = insert_sent_request(&sync, certificate.id());
+                    let first_request = insert_sent_request(&sync, certificate.id(), PEER_IP);
 
                     let second_request = {
                         let (sync, certificate_id) = (sync.clone(), certificate.id());
@@ -2296,6 +2297,47 @@ mod tests {
             // Both orders must occur, or the test does not cover the race.
             assert!(NUM_FETCHED.load(Ordering::Relaxed) > 0, "the second request never came first");
             assert!(NUM_SENT.load(Ordering::Relaxed) > 0, "the response never came first");
+        }
+
+        /// Requests to enough peers are pending, so a request to one more peer checks the stake
+        /// of those peers, while the pending queue is locked. They hold enough stake, so the
+        /// request sends nothing, and it gets the response to one of the pending requests.
+        #[test]
+        fn request_checks_the_stake_of_the_sent_peers() {
+            let (committee, certificate) = sample_committee_and_certificate();
+            check_async(ITERATIONS, move || {
+                let (sync, certificate) = (new_sync(committee.clone()), certificate.clone());
+                let validators: Vec<_> = committee.members().keys().copied().take(2).collect();
+                async move {
+                    // Two connected validators have the request, which is the number of redundant requests.
+                    let sent_peers =
+                        [SocketAddr::from(([127, 0, 0, 1], 5001)), SocketAddr::from(([127, 0, 0, 1], 5002))];
+                    let mut sent_requests = Vec::new();
+                    for (peer_ip, address) in sent_peers.into_iter().zip(validators) {
+                        sync.gateway.insert_connected_peer(peer_ip, peer_ip, address);
+                        sent_requests.push(insert_sent_request(&sync, certificate.id(), peer_ip));
+                    }
+
+                    let request = {
+                        let (sync, certificate_id) = (sync.clone(), certificate.id());
+                        tokio::spawn(async move { sync.send_certificate_request(PEER_IP, certificate_id).await })
+                    };
+                    let response = {
+                        let (sync, certificate) = (sync.clone(), certificate.clone());
+                        tokio::spawn(async move {
+                            sleep(Duration::from_secs(1)).await;
+                            sync.finish_certificate_request(sent_peers[0], certificate.into());
+                        })
+                    };
+
+                    assert_eq!(request.await.unwrap().unwrap(), certificate);
+                    response.await.unwrap();
+                    for sent_request in sent_requests {
+                        assert_eq!(sent_request.await.unwrap(), certificate);
+                    }
+                    assert!(!sync.pending.contains(certificate.id()));
+                }
+            });
         }
     }
 }
