@@ -46,6 +46,9 @@
 //! - snarkVM keeps its own locks and the real `tokio`. Shuttle does not see them: no switch
 //!   happens at them, and a test deadlocks if one thread waits for such a lock while its holder
 //!   is switched out.
+//! - `tokio::io`, `tokio::net`, `tokio::fs` and `tokio::signal` stay the real ones, and so do the
+//!   types of `tokio-util` and `tokio-stream`. Shuttle does not see them either, and a socket or
+//!   a signal handler has no `tokio` runtime to register with.
 //! - The two cfgs are mutually exclusive.
 //!
 //! The submodules mirror the layout of `locktick`. A lock's methods return the guard alias of
