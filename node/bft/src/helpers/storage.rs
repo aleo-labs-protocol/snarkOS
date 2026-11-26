@@ -853,11 +853,8 @@ impl<N: Network> Storage<N> {
         missing_transmissions: HashMap<TransmissionID<N>, Transmission<N>>,
         trusted_ledger_certificate: bool,
     ) -> Result<(), CheckCertificateError> {
-        // Retrieve the round.
         let round = certificate.round();
-        // Retrieve the certificate ID.
         let certificate_id = certificate.id();
-        // Retrieve the author of the batch.
         let author = certificate.author();
 
         let update = self.certificate_updates.lock();
@@ -883,7 +880,8 @@ impl<N: Network> Storage<N> {
     /// maps, without any check.
     ///
     /// The transmissions are written first. A reader that holds the read lock of `rounds` then sees
-    /// the certificate in all of the other three maps, or in none of them.
+    /// the certificate in `rounds`, `certificates` and `batch_ids`, or in none of them. If it sees
+    /// the certificate, then `transmissions` holds its transmissions.
     fn insert_certificate_locked(
         &self,
         _update: &MutexGuard<'_, ()>,
@@ -934,7 +932,8 @@ impl<N: Network> Storage<N> {
     ///
     /// This method triggers updates to the `rounds`, `certificates`, `batch_ids`, and `transmissions` maps.
     /// The transmissions are removed last. A reader that holds the read lock of `rounds` then sees
-    /// the certificate in all of the other three maps, or in none of them.
+    /// the certificate in `rounds`, `certificates` and `batch_ids`, or in none of them. If it sees
+    /// the certificate, then `transmissions` holds its transmissions.
     ///
     /// If the certificate was successfully removed, `true` is returned.
     /// If the certificate did not exist in storage, `false` is returned.
