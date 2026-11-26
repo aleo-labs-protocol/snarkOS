@@ -609,9 +609,13 @@ impl<N: Network> Storage<N> {
         {
             // Garbage collection advances the GC round before it removes a certificate. If the
             // check failed because of a removal, the GC round now covers the previous round.
-            if previous_round > self.gc_round() {
+            let gc_round = self.gc_round();
+            if previous_round > gc_round {
                 return Err(error);
             }
+            debug!(
+                "Skipped the previous certificates of a batch in round {round} - round {previous_round} is garbage collected (gc = {gc_round}) - {error}"
+            );
         }
 
         Ok(Some(missing_transmissions))
@@ -629,7 +633,6 @@ impl<N: Network> Storage<N> {
         previous_round: u64,
         gc_log: &str,
     ) -> Result<()> {
-        // Retrieve the round.
         let round = batch_header.round();
         // Retrieve the committee lookback for the previous round.
         let Ok(previous_committee_lookback) = self.ledger.get_committee_lookback_for_round(previous_round) else {
