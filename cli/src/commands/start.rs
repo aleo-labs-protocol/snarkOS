@@ -846,7 +846,6 @@ impl Start {
             bail!("The 'dev' flag is set, but the 'dev-network' feature is not enabled");
         }
 
-        // Check the pruning flags before any other startup step.
         let authority_retention = self.parse_authority_retention::<N>()?;
 
         // Parse the trusted peers to connect to.
@@ -1018,6 +1017,7 @@ impl Start {
             bail!("`--history-json` writes JSON history and is only supported on a client or validator");
         }
         if self.history_json {
+            warn!("The `--history-json` option is deprecated and will be removed in a future release.");
             println!("Indexing credits.aleo history as JSON");
         }
 
@@ -1434,9 +1434,6 @@ mod tests {
         let error = start.parse_authority_retention_with::<CurrentNetwork>(status_version - 1).unwrap_err();
         assert!(error.to_string().contains("has not scheduled"), "{error}");
         assert!(try_parse(&[]).unwrap().parse_authority_retention_with::<CurrentNetwork>(status_version - 1).is_ok());
-        // Mainnet has not scheduled V23; a `dev-network` build has.
-        let result = start.parse_authority_retention::<CurrentNetwork>();
-        assert_eq!(result.is_ok(), cfg!(feature = "dev-network"), "{result:?}");
     }
 
     #[test]

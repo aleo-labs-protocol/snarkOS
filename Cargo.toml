@@ -45,7 +45,7 @@ members = [
 [workspace.dependencies.snarkvm]
 #path = "../snarkVM"
 git = "https://github.com/aleo-labs-protocol/snarkVM.git"
-rev = "84598a328aff8211c7048a79bbd65d5fdae0275e" # agent/compaction-v23-integration-r4
+rev = "5010658d1caa4dff263241520333a075245ffa69" # aleo-labs-protocol/snarkVM#3717
 #version = "=4.12.0"
 default-features = false
 
@@ -353,7 +353,8 @@ lto = "thin"
 debug = "line-tables-only"
 
 [profile.test]
-opt-level = 2
+# At 0 the snarkVM code in the tests runs 4-8x slower.
+opt-level = 1
 
 [package.metadata.cargo-machete]
 ignored = [

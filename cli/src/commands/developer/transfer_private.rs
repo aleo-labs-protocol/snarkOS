@@ -132,15 +132,17 @@ impl TransferPrivate {
             ];
 
             // Create a new transaction.
-            vm.execute(
-                &private_key,
-                ("credits.aleo", "transfer_private"),
-                inputs.iter(),
-                Some(fee_record),
-                priority_fee,
-                Some(&query),
-                rng,
-            )?
+            Developer::catch_halt(|| {
+                vm.execute(
+                    &private_key,
+                    ("credits.aleo", "transfer_private"),
+                    inputs.iter(),
+                    Some(fee_record),
+                    priority_fee,
+                    Some(&query),
+                    rng,
+                )
+            })?
         };
         let locator = Locator::<N>::from_str("credits.aleo/transfer_private")?;
         println!("✅ Created private transfer of {} microcredits to {}\n", &self.amount, recipient);
