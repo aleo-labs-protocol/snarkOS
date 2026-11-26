@@ -20,7 +20,7 @@ use crate::time::virtual_clock::IdleClock;
 use ::shuttle::{
     Config,
     Runner,
-    scheduler::{PctScheduler, RandomScheduler, Scheduler},
+    scheduler::{PctScheduler, RandomScheduler, ReplayScheduler, Scheduler},
 };
 use std::{
     future::Future,
@@ -35,10 +35,16 @@ const PCT_DEPTH: usize = 3;
 /// Shuttle's default of 60 KiB is too small for the test fixtures that build a transaction.
 const STACK_SIZE: usize = 8 * 1024 * 1024;
 
+/// The environment variable that names a file with the schedule of a failure. [`check`] then
+/// runs that schedule only.
+const REPLAY_FILE: &str = "SHUTTLE_REPLAY_FILE";
+
 /// Runs `test` under two schedulers, each with new seeds and for `iterations` orders of the
-/// steps of its threads and tasks. A failure prints the schedule that replays it, which
-/// `shuttle::replay` takes. The random scheduler also prints its seed, which
-/// `SHUTTLE_RANDOM_SEED` takes.
+/// steps of its threads and tasks.
+///
+/// A failure prints the schedule that replays it. To replay it, save it in a file, name the file
+/// in `SHUTTLE_REPLAY_FILE`, and run that test only. The random scheduler also prints its seed,
+/// which `SHUTTLE_RANDOM_SEED` takes.
 ///
 /// The PCT scheduler runs one thread until a random point, and then prefers another one. It
 /// finds the orders in which one thread stops between two particular steps while another one
@@ -62,6 +68,13 @@ pub fn check(iterations: usize, test: impl Fn() + Send + Sync + 'static) {
         Runner::new(scheduler, config).run(move || test());
         (had_choice.load(Ordering::Relaxed), took_random_data.load(Ordering::Relaxed))
     };
+
+    if let Ok(path) = std::env::var(REPLAY_FILE) {
+        let scheduler = ReplayScheduler::new_from_file(&path)
+            .unwrap_or_else(|error| panic!("could not read the schedule in '{path}': {error}"));
+        run(IdleClock::new(Box::new(scheduler)));
+        return;
+    }
 
     let (had_choice, took_random_data) = run(IdleClock::new(Box::new(RandomScheduler::new(1))));
     // The PCT scheduler panics on a test that gives it no threads to choose from.
