@@ -48,9 +48,22 @@ pub struct Proposal<N: Network> {
     /// The set of endorsing signatures accumulated so far from other validators
     /// (excludes the signature of the proposal author, which is in the `batch_header` component).
     signatures: IndexSet<Signature<N>>,
+    /// The addresses of the author and of the `signatures`.
+    /// Only [`Proposal::from_parts`] and [`Proposal::add_signature`] write `signatures` and `signers`.
+    signers: HashSet<Address<N>>,
 }
 
 impl<N: Network> Proposal<N> {
+    /// Returns a proposal with the signers derived from the author's signature and the given signatures.
+    fn from_parts(
+        batch_header: BatchHeader<N>,
+        transmissions: IndexMap<TransmissionID<N>, Transmission<N>>,
+        signatures: IndexSet<Signature<N>>,
+    ) -> Self {
+        let signers = signatures.iter().chain(Some(batch_header.signature())).map(Signature::to_address).collect();
+        Self { batch_header, transmissions, signatures, signers }
+    }
+
     /// Initializes a new instance of the proposal.
     ///
     /// The `committee` input is the active (i.e. lookback) committee for the batch round.
@@ -74,7 +87,7 @@ impl<N: Network> Proposal<N> {
             ensure!(a == b, "The transmission IDs do not match in the batch header and transmissions");
         }
         // Return the proposal.
-        Ok(Self { batch_header, transmissions, signatures: Default::default() })
+        Ok(Self::from_parts(batch_header, transmissions, Default::default()))
     }
 
     /// Returns the proposed batch header.
@@ -108,32 +121,20 @@ impl<N: Network> Proposal<N> {
     }
 
     /// Returns all the signers, including author and endorsers.
-    pub fn signers(&self) -> HashSet<Address<N>> {
-        self.signatures.iter().chain(Some(self.batch_header.signature())).map(Signature::to_address).collect()
+    pub const fn signers(&self) -> &HashSet<Address<N>> {
+        &self.signers
     }
 
     /// Returns the non-signers, i.e. the committee members that have not signed the proposal.
     pub fn nonsigners(&self, committee: &Committee<N>) -> HashSet<Address<N>> {
-        // Retrieve the current signers.
-        let signers = self.signers();
-        // Initialize a set for the non-signers.
-        let mut nonsigners = HashSet::new();
-        // Iterate through the committee members.
-        for address in committee.members().keys() {
-            // Insert the address if it is not a signer.
-            if !signers.contains(address) {
-                nonsigners.insert(*address);
-            }
-        }
-        // Return the non-signers.
-        nonsigners
+        committee.members().keys().filter(|address| !self.signers.contains(*address)).copied().collect()
     }
 
     /// Returns `true` if the signers of the batch (author and endorsers)
     /// have reached the quorum threshold for the committee.
     pub fn is_quorum_threshold_reached(&self, committee: &Committee<N>) -> bool {
         // Check if the batch has reached the quorum threshold.
-        committee.is_quorum_threshold_reached(&self.signers())
+        committee.is_quorum_threshold_reached(&self.signers)
     }
 
     /// Returns `true` if the proposal contains the given transmission ID.
@@ -165,7 +166,7 @@ impl<N: Network> Proposal<N> {
             bail!("Signature from a non-committee member - '{signer}'")
         }
         // Ensure the signer is new.
-        if self.signers().contains(&signer) {
+        if self.signers.contains(&signer) {
             return Ok(false);
         }
         // Verify the signature. If the signature is not valid, return an error.
@@ -174,8 +175,9 @@ impl<N: Network> Proposal<N> {
             bail!("Signature verification failed")
         }
 
-        // Insert the new signature and return success.
+        // Insert the new signature and its signer, and return success.
         self.signatures.insert(signature);
+        self.signers.insert(signer);
         Ok(true)
     }
 
@@ -253,7 +255,7 @@ impl<N: Network> FromBytes for Proposal<N> {
             }
         }
 
-        Ok(Self { batch_header, transmissions, signatures })
+        Ok(Self::from_parts(batch_header, transmissions, signatures))
     }
 }
 
@@ -281,7 +283,7 @@ pub(crate) mod tests {
         let batch_header = certificate.batch_header().clone();
         let signatures = certificate.signatures().copied().collect();
 
-        Proposal { batch_header, transmissions, signatures }
+        Proposal::from_parts(batch_header, transmissions, signatures)
     }
 
     /// Returns a committee of `num_members` validators, their private keys, and an empty proposal by the first one.
@@ -308,7 +310,7 @@ pub(crate) mod tests {
     fn check_signers(proposal: &Proposal<CurrentNetwork>, committee: &Committee<CurrentNetwork>) {
         let expected = derive_signers(proposal);
         assert_eq!(expected.len(), proposal.signatures.len() + 1);
-        assert_eq!(proposal.signers().iter().copied().collect::<HashSet<_>>(), expected);
+        assert_eq!(*proposal.signers(), expected);
 
         let expected_nonsigners: HashSet<_> =
             committee.members().keys().copied().filter(|address| !expected.contains(address)).collect();
@@ -329,8 +331,8 @@ pub(crate) mod tests {
             let expected_bytes = expected.to_bytes_le().unwrap();
             let recovered = Proposal::read_le(&expected_bytes[..]).unwrap();
             assert_eq!(expected, recovered);
-            assert_eq!(recovered.signers().iter().copied().collect::<HashSet<_>>(), derive_signers(&expected));
-            assert_eq!(expected.signers().iter().copied().collect::<HashSet<_>>(), derive_signers(&expected));
+            assert_eq!(*recovered.signers(), derive_signers(&expected));
+            assert_eq!(*expected.signers(), derive_signers(&expected));
         }
     }
 
@@ -364,7 +366,7 @@ pub(crate) mod tests {
 
         let (committee, private_keys, mut proposal) = sample_empty_proposal(10, rng);
         let author = Address::try_from(&private_keys[0]).unwrap();
-        assert_eq!(proposal.signers().iter().copied().collect::<HashSet<_>>(), HashSet::from([author]));
+        assert_eq!(*proposal.signers(), HashSet::from([author]));
         check_signers(&proposal, &committee);
 
         // The author is already a signer.
