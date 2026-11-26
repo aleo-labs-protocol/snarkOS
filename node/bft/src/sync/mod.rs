@@ -45,7 +45,7 @@ use std::{
     future::Future,
     net::SocketAddr,
     ops::Deref,
-    sync::Arc,
+    sync::{Arc, Weak},
     time::{Duration, Instant},
 };
 use tokio::{sync::oneshot, task::JoinHandle};
@@ -86,7 +86,8 @@ pub struct Sync<N: Network> {
     /// The pending certificates queue.
     pending: Arc<Pending<Field<N>, BatchCertificate<N>>>,
     /// The sync callback (used by [`BFT`]).
-    sync_callback: Arc<CallbackHandle<Arc<dyn SyncCallback<N>>>>,
+    /// Held weakly, as the callback owns a clone of this sync module.
+    sync_callback: Arc<CallbackHandle<Weak<dyn SyncCallback<N>>>>,
     /// Handles to the spawned background tasks.
     handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
     /// The response lock.
@@ -131,8 +132,14 @@ impl<N: Network> Sync<N> {
         }
     }
 
+    /// Returns `true` if the sync callback is set and its target is alive (only used in unit tests).
+    #[cfg(test)]
+    pub(crate) fn has_live_callback(&self) -> bool {
+        self.sync_callback.upgrade().is_some()
+    }
+
     /// Initializes the sync module and sync the storage with the ledger at bootup.
-    pub fn initialize(&self, sync_callback: Option<Arc<dyn SyncCallback<N>>>) -> Result<()> {
+    pub fn initialize(&self, sync_callback: Option<Weak<dyn SyncCallback<N>>>) -> Result<()> {
         // If a callback was provided, set it.
         if let Some(callback) = sync_callback {
             self.sync_callback.set(callback).with_context(|| "Failed to set sync callback")?;
@@ -432,7 +439,7 @@ impl<N: Network> Sync<N> {
         }
 
         // Add all certificates to the BFT DAG, and update the committed round.
-        if let Some(cb) = self.sync_callback.get() {
+        if let Some(cb) = self.sync_callback.upgrade() {
             for block in ledger_blocks.into_iter() {
                 if let Authority::Quorum(subdag) = block.authority() {
                     for round in subdag.values() {
@@ -710,7 +717,7 @@ impl<N: Network> Sync<N> {
         }
 
         // Sync the BFT DAG with the block's certificates.
-        if let Some(cb) = self.sync_callback.get() {
+        if let Some(cb) = self.sync_callback.upgrade() {
             for round in subdag.values() {
                 for certificate in round {
                     cb.add_certificate_from_sync(certificate.clone());
@@ -989,7 +996,7 @@ impl<N: Network> Sync<N> {
             storage.sync_round_with_block(block.round());
 
             if within_gc_range
-                && let Some(cb) = self.sync_callback.get()
+                && let Some(cb) = self.sync_callback.upgrade()
                 && let Authority::Quorum(subdag) = block.authority()
             {
                 for round in subdag.values() {
@@ -1458,7 +1465,9 @@ mod tests {
         )
         .unwrap();
 
-        sync.initialize(Some(Arc::new(syncing_bft.clone()))).unwrap();
+        // The sync module holds its callback weakly, so keep it alive for the test.
+        let callback = Arc::new(syncing_bft.clone());
+        sync.initialize(Some(Arc::downgrade(&callback) as _)).unwrap();
 
         // -- Run test -- //
 
@@ -1528,7 +1537,8 @@ mod tests {
         )
         .unwrap();
 
-        sync.initialize(Some(Arc::new(syncing_bft.clone()))).unwrap();
+        let callback = Arc::new(syncing_bft.clone());
+        sync.initialize(Some(Arc::downgrade(&callback) as _)).unwrap();
 
         // Sync all blocks in order.
         for block in &blocks {
@@ -1620,7 +1630,8 @@ mod tests {
         )
         .unwrap();
 
-        sync.initialize(Some(Arc::new(syncing_bft.clone()))).unwrap();
+        let callback = Arc::new(syncing_bft.clone());
+        sync.initialize(Some(Arc::downgrade(&callback) as _)).unwrap();
 
         // -- Run test -- //
         let last_block = blocks.pop().unwrap();
@@ -1706,7 +1717,8 @@ mod tests {
         )
         .unwrap();
 
-        sync.initialize(Some(Arc::new(syncing_bft.clone()))).unwrap();
+        let callback = Arc::new(syncing_bft.clone());
+        sync.initialize(Some(Arc::downgrade(&callback) as _)).unwrap();
 
         // -- Run test -- //
         let last_block = blocks.pop().unwrap();
@@ -1789,7 +1801,8 @@ mod tests {
         )
         .unwrap();
 
-        sync.initialize(Some(Arc::new(syncing_bft.clone()))).unwrap();
+        let callback = Arc::new(syncing_bft.clone());
+        sync.initialize(Some(Arc::downgrade(&callback) as _)).unwrap();
 
         // -- Run test -- //
         let last_block = blocks.pop().unwrap();

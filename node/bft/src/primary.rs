@@ -88,7 +88,7 @@ use std::{
     future::Future,
     net::SocketAddr,
     pin::Pin,
-    sync::{Arc, OnceLock},
+    sync::{Arc, OnceLock, Weak},
     time::Instant,
 };
 use tokio::{sync::Notify, task::JoinHandle};
@@ -163,7 +163,8 @@ pub struct Primary<N: Network> {
     workers: Arc<OnceLock<Vec<Worker<N>>>>,
 
     /// The primary callback (used by [`BFT`]).
-    primary_callback: Arc<CallbackHandle<Arc<dyn PrimaryCallback<N>>>>,
+    /// Held weakly, as the callback owns a clone of this primary.
+    primary_callback: Arc<CallbackHandle<Weak<dyn PrimaryCallback<N>>>>,
 
     /// The batch proposal, if the primary is currently proposing a batch.
     proposed_batch: Arc<ProposedBatch<N>>,
@@ -309,8 +310,8 @@ impl<N: Network> Primary<N> {
     pub async fn run(
         &self,
         ping: Option<Arc<Ping<N>>>,
-        primary_callback: Option<Arc<dyn PrimaryCallback<N>>>,
-        sync_callback: Option<Arc<dyn SyncCallback<N>>>,
+        primary_callback: Option<Weak<dyn PrimaryCallback<N>>>,
+        sync_callback: Option<Weak<dyn SyncCallback<N>>>,
         primary_sender: PrimarySender<N>,
         primary_receiver: PrimaryReceiver<N>,
     ) -> Result<()> {
@@ -604,7 +605,7 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
         // Ensure the primary has not proposed a batch for this round before.
         if self.storage.contains_certificate_in_round_from(round, self.gateway.account().address()) {
             // If a BFT sender was provided, attempt to advance the current round.
-            if let Some(cb) = &*self.primary_callback.get_ref() {
+            if let Some(cb) = self.primary_callback.get_ref().as_ref().and_then(Weak::upgrade) {
                 match cb.try_advance_to_next_round(self.current_round()) {
                     true => (), // continue,
                     false => return Ok(false),
@@ -1763,6 +1764,14 @@ impl<N: Network> Primary<N> {
 
     /// Increments to the next round.
     async fn try_increment_to_the_next_round(&self, next_round: u64) -> Result<()> {
+        let callback = match self.primary_callback.get().map(|cb| cb.upgrade()) {
+            // No BFT callback was set (the Narwhal case).
+            None => None,
+            // A BFT callback was set and the BFT is gone, so the node is exiting: do nothing.
+            Some(None) => return Ok(()),
+            Some(callback) => callback,
+        };
+
         // If the next round is within GC range, then iterate to the penultimate round.
         if self.current_round() + self.storage.max_gc_rounds() >= next_round {
             let mut fast_forward_round = self.current_round();
@@ -1785,7 +1794,7 @@ impl<N: Network> Primary<N> {
         // Attempt to advance to the next round.
         if current_round < next_round {
             // If a BFT sender was provided, send the current round to the BFT.
-            let is_ready = if let Some(cb) = self.primary_callback.get() {
+            let is_ready = if let Some(cb) = callback {
                 cb.try_advance_to_next_round(current_round)
             }
             // Otherwise, handle the Narwhal case.
@@ -1909,7 +1918,7 @@ impl<N: Network> Primary<N> {
         self.gateway.broadcast(Event::BatchCertified(certificate.clone().into()));
 
         // If a BFT sender was provided, send the certificate to the BFT.
-        if let Some(cb) = self.primary_callback.get() {
+        if let Some(cb) = self.primary_callback.upgrade() {
             // Await the callback to continue.
             cb.add_new_certificate(certificate).await.with_context(|| {
                 format!("Failed to insert our newly certified batch for round {round} into the DAG")
@@ -2007,7 +2016,7 @@ impl<N: Network> Primary<N> {
 
         debug!("Stored a batch certificate for round {batch_round} from '{peer_ip}'");
         // If a BFT sender was provided, send the round and certificate to the BFT.
-        if let Some(cb) = self.primary_callback.get() {
+        if let Some(cb) = self.primary_callback.upgrade() {
             cb.add_new_certificate(certificate).await.with_context(|| "Failed to update the DAG from sync")?;
         }
         // Wake the round-increment task to re-check quorum.
@@ -2275,13 +2284,22 @@ impl<N: Network> Primary<N> {
 #[cfg(test)]
 mod tests {
     use super::{proposal_task::BatchPropose as _, *};
-    use crate::test_helpers::sample_transaction;
+    use crate::{
+        BFT,
+        helpers::init_primary_channels,
+        test_helpers::{sample_genesis_block, sample_transaction},
+    };
 
-    use snarkos_node_bft_ledger_service::MockLedgerService;
+    use snarkos_node_bft_ledger_service::{CoreLedgerService, MockLedgerService};
     use snarkos_node_bft_storage_service::BFTMemoryService;
     use snarkos_node_sync::BlockSync;
+    use snarkos_utilities::SimpleStoppable;
     use snarkvm::{
-        ledger::committee::{Committee, MIN_VALIDATOR_STAKE},
+        ledger::{
+            Ledger,
+            committee::{Committee, MIN_VALIDATOR_STAKE},
+            store::{StorageMode, helpers::memory::ConsensusMemory},
+        },
         prelude::{Address, Signature},
     };
 
@@ -4175,5 +4193,79 @@ mod tests {
         let proposal = final_result.expect("quorum should be reached").unwrap().unwrap();
         assert_eq!(proposal.batch_id(), batch_id);
         assert_eq!(state, ProposedBatchState::Certified(batch_id));
+    }
+
+    /// Without a BFT callback the primary advances the round by itself. With a callback whose
+    /// target is gone, it must not: the BFT that decides was dropped.
+    #[tokio::test]
+    async fn test_increment_round_does_nothing_once_the_callback_target_is_gone() {
+        let mut rng = TestRng::default();
+        let (primary, _) = primary_without_handlers(&mut rng);
+        let mut signal = primary.proposal_task.subscribe();
+
+        // No callback: the round advances and the proposal task is signalled.
+        let round = primary.current_round();
+        primary.try_increment_to_the_next_round(round + 1).await.unwrap();
+        assert_eq!(primary.current_round(), round + 1);
+        assert!(signal.has_changed().unwrap());
+        signal.mark_unchanged();
+
+        // A callback whose target is gone: neither happens, also when fast-forwarding.
+        primary.primary_callback.set(Weak::<BFT<CurrentNetwork>>::new()).unwrap();
+        primary.try_increment_to_the_next_round(round + 4).await.unwrap();
+        assert_eq!(primary.current_round(), round + 1);
+        assert!(!signal.has_changed().unwrap());
+    }
+
+    /// After `BFT::run`, the primary and the sync module must reach the BFT through their callbacks,
+    /// and a BFT that is dropped without `shut_down` must release the ledger once its tasks are gone.
+    #[test]
+    fn test_bft_callbacks_do_not_keep_the_ledger_alive() {
+        type CurrentLedger = Ledger<CurrentNetwork, ConsensusMemory<CurrentNetwork>>;
+
+        let rng = &mut TestRng::default();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        let ledger = runtime.block_on(async {
+            let genesis = sample_genesis_block(rng);
+            let ledger = Arc::new(CoreLedgerService::new(
+                spawn_blocking!(CurrentLedger::load(genesis, StorageMode::new_test(None))).unwrap(),
+                SimpleStoppable::new(),
+            ));
+            let max_gc_rounds = BatchHeader::<CurrentNetwork>::MAX_GC_ROUNDS as u64;
+            let storage = Storage::new(ledger.clone(), Arc::new(BFTMemoryService::new()), max_gc_rounds).unwrap();
+            let block_sync = Arc::new(BlockSync::new(ledger.clone(), ConnectionMode::Gateway));
+            let bft = BFT::new(
+                Account::new(rng).unwrap(),
+                storage,
+                ledger.clone(),
+                block_sync,
+                Some("127.0.0.1:0".parse().unwrap()),
+                &[],
+                false,
+                NodeDataDir::new_test(None),
+                None,
+                1,
+            )
+            .unwrap();
+
+            // Run a clone and keep the original, as `Consensus` does.
+            let (primary_sender, primary_receiver) = init_primary_channels();
+            bft.clone().run(None, None, primary_sender, primary_receiver).await.unwrap();
+
+            // The primary still reaches the BFT, which has no quorum and keeps the round.
+            let primary = bft.primary();
+            assert!(primary.primary_callback.upgrade().is_some(), "the callback target is gone after `BFT::run`");
+            assert!(primary.sync.has_live_callback(), "the sync callback is unset or dead after `BFT::run`");
+            let round = primary.current_round();
+            primary.try_increment_to_the_next_round(round + 1).await.unwrap();
+            assert_eq!(primary.current_round(), round, "the primary advanced the round without the BFT");
+
+            Arc::downgrade(&ledger)
+        });
+
+        // The BFT handle is gone. Dropping the runtime drops the tasks that `run` spawned.
+        drop(runtime);
+        assert!(ledger.upgrade().is_none(), "the ledger is still referenced after the BFT and its tasks were dropped");
     }
 }

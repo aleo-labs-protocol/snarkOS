@@ -47,6 +47,8 @@ use std::{
     net::SocketAddr,
     sync::{
         Arc,
+        OnceLock,
+        Weak,
         atomic::{AtomicI64, Ordering},
     },
 };
@@ -70,6 +72,9 @@ pub struct BFT<N: Network> {
     /// callback for a prior commit is still in-flight would re-walk already-committed rounds
     /// (because `last_committed_round` hasn't been updated yet), causing duplicate subdag commits.
     commit_lock: Arc<Mutex<()>>,
+    /// The instance that the primary and the sync module call back into, set by [`Self::run`].
+    /// They hold it weakly (it owns clones of both), so the BFT handles own it here.
+    callback_target: Arc<OnceLock<Arc<Self>>>,
 }
 
 impl<N: Network> BFT<N> {
@@ -105,6 +110,7 @@ impl<N: Network> BFT<N> {
             leader_certificate_timer: Default::default(),
             consensus_sender: Default::default(),
             commit_lock: Default::default(),
+            callback_target: Default::default(),
         })
     }
 
@@ -120,10 +126,13 @@ impl<N: Network> BFT<N> {
         primary_receiver: PrimaryReceiver<N>,
     ) -> Result<()> {
         info!("Starting the BFT instance...");
-        // Set up callbacks.
-        let primary_callback = Some(Arc::new(self.clone()) as Arc<dyn PrimaryCallback<N>>);
-
-        let sync_callback = Some(Arc::new(self.clone()) as Arc<dyn SyncCallback<N>>);
+        // Set up callbacks. The target gets an empty `callback_target`, so that it does not own itself.
+        let callback_target = Arc::new(Self { callback_target: Default::default(), ..self.clone() });
+        if self.callback_target.set(callback_target.clone()).is_err() {
+            bail!("`BFT::run` cannot be called more than once.");
+        }
+        let primary_callback = Some(Arc::downgrade(&callback_target) as Weak<dyn PrimaryCallback<N>>);
+        let sync_callback = Some(Arc::downgrade(&callback_target) as Weak<dyn SyncCallback<N>>);
 
         // Next, run the primary instance.
         self.primary.run(ping, primary_callback, sync_callback, primary_sender, primary_receiver).await?;
