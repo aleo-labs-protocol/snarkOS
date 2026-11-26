@@ -1209,8 +1209,8 @@ mod tests {
     /// The async tests of this module under the `shuttle` scheduler; see `snarkos_utilities::locks`.
     /// Run them with `cargo shuttle-test -p snarkos-node-bft --lib shuttle_tests`.
     ///
-    /// Each one runs in many orders of the steps of its tasks, with the clock of
-    /// `snarkos_utilities::time`, which moves only when no task can run.
+    /// Each one runs in many orders of the steps of its tasks; see
+    /// `snarkos_utilities::shuttle_test::check_async`.
     #[cfg(shuttle)]
     mod shuttle_tests {
         use super::*;

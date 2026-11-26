@@ -1631,7 +1631,7 @@ impl<N: Network> Primary<N> {
         let self_ = self.clone();
         self.spawn(async move {
             loop {
-                let round_start = Instant::now();
+                let round_start = snarkos_utilities::time::Instant::now();
                 let current_round = self_.current_round();
 
                 // Inner loop: wait and try to increment while we're still in the same round.
@@ -4179,9 +4179,6 @@ mod tests {
     /// Tests of the primary under the `shuttle` scheduler, which also picks the order in which
     /// the tasks of a test run; see `snarkos_utilities::locks` for that build and its hazards.
     /// Run them with `cargo shuttle-test -p snarkos-node-bft --lib shuttle_tests`.
-    ///
-    /// Hazard: `tokio::time` has no clock there, so a test must take its timers from
-    /// `snarkos_utilities::time`.
     #[cfg(shuttle)]
     mod shuttle_tests {
         use super::*;

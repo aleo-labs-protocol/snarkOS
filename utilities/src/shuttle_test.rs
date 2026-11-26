@@ -29,7 +29,7 @@ use std::{future::Future, sync::Arc};
 const PCT_DEPTH: usize = 3;
 
 /// The stack size of each thread and task of a test, which is the one of the threads of the node.
-/// Shuttle's default of 2 MiB is too small for the test fixtures that build a transaction.
+/// Shuttle's default of 60 KiB is too small for the test fixtures that build a transaction.
 const STACK_SIZE: usize = 8 * 1024 * 1024;
 
 /// Runs `test` under two schedulers, each with new seeds and for `iterations` orders of the

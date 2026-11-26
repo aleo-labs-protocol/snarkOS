@@ -32,11 +32,11 @@ use ::shuttle::{
     scheduler::{Schedule, Scheduler, Task, TaskId},
 };
 use std::{
-    cell::Cell,
+    borrow::Cow,
     collections::BTreeMap,
     fmt,
     future::Future,
-    ops::{Add, AddAssign, Sub},
+    ops::{Add, Sub},
     pin::Pin,
     sync::{
         Arc,
@@ -44,25 +44,24 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     task::{Context, Poll, Waker},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 ::shuttle::lazy_static! {
     /// The clock of the current execution. Shuttle makes a new one for each execution.
     ///
-    /// The lock is a `std` one on purpose, and it is never held across an `await`: shuttle runs
-    /// one task at a time, and a shuttle lock would add a point to switch tasks at each use.
-    static ref CLOCK: Mutex<Clock> = Mutex::new(Clock::default());
+    /// The lock is never held across an `await`. Hazard: a shuttle lock here adds a point to
+    /// switch tasks at each use of a timer.
+    static ref CLOCK: Mutex<Clock> = Mutex::new(Clock::new());
 }
 
-thread_local! {
-    /// The clock task of the current execution, which [`IdleClock`] holds back. An execution
-    /// runs on one thread, and [`IdleClock`] clears this when the next one starts.
-    static CLOCK_TASK: Cell<Option<TaskId>> = const { Cell::new(None) };
-}
+/// The label of the clock task of an execution, which [`IdleClock`] holds back.
+#[derive(Clone, Debug)]
+struct ClockTask;
 
-#[derive(Default)]
 struct Clock {
+    /// The system time at the start of the execution, in whole seconds.
+    start: SystemTime,
     /// The time since the start of the execution.
     now: Duration,
     /// The number of timers made so far, which makes the keys of `timers` unique.
@@ -82,17 +81,35 @@ struct Timer {
     is_dropped: Arc<AtomicBool>,
 }
 
-/// Returns the time that the clock of the current execution is at, which is zero outside an
-/// execution. Code that reads the real clock adds it, so that the two clocks move together.
-pub fn elapsed() -> Duration {
+impl Clock {
+    fn new() -> Self {
+        let start = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        Self {
+            start: UNIX_EPOCH + Duration::from_secs(start),
+            now: Duration::ZERO,
+            num_timers: 0,
+            timers: BTreeMap::new(),
+            has_task: false,
+            task_waker: None,
+        }
+    }
+}
+
+/// Returns the system time. In an execution, it is the time at which the execution started, in
+/// whole seconds, plus the time of its clock. A timestamp in seconds thus changes only when the
+/// clock moves, and not with the real time that an execution takes.
+pub fn system_now() -> SystemTime {
     match current::try_get_current_task() {
-        Some(_) => CLOCK.lock().unwrap().now,
-        None => Duration::ZERO,
+        Some(_) => {
+            let clock = CLOCK.lock().unwrap();
+            clock.start + clock.now
+        }
+        None => SystemTime::now(),
     }
 }
 
 /// A point in time of the clock; see `tokio::time::Instant`.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Instant(Duration);
 
 impl Instant {
@@ -107,10 +124,6 @@ impl Instant {
     pub fn duration_since(&self, earlier: Self) -> Duration {
         self.0.saturating_sub(earlier.0)
     }
-
-    pub fn saturating_duration_since(&self, earlier: Self) -> Duration {
-        self.duration_since(earlier)
-    }
 }
 
 impl Add<Duration> for Instant {
@@ -118,20 +131,6 @@ impl Add<Duration> for Instant {
 
     fn add(self, duration: Duration) -> Self {
         Self(self.0.saturating_add(duration))
-    }
-}
-
-impl AddAssign<Duration> for Instant {
-    fn add_assign(&mut self, duration: Duration) {
-        *self = *self + duration;
-    }
-}
-
-impl Sub<Duration> for Instant {
-    type Output = Self;
-
-    fn sub(self, duration: Duration) -> Self {
-        Self(self.0.saturating_sub(duration))
     }
 }
 
@@ -159,16 +158,6 @@ pub fn sleep(duration: Duration) -> Sleep {
 /// Waits until `deadline`; see `tokio::time::sleep_until`.
 pub fn sleep_until(deadline: Instant) -> Sleep {
     Sleep { deadline, timer: None }
-}
-
-impl Sleep {
-    pub fn deadline(&self) -> Instant {
-        self.deadline
-    }
-
-    pub fn is_elapsed(&self) -> bool {
-        Instant::now() >= self.deadline
-    }
 }
 
 impl Future for Sleep {
@@ -215,13 +204,11 @@ impl Drop for Sleep {
 
 /// Moves the clock from deadline to deadline, for as long as the execution runs.
 async fn run_clock() {
-    CLOCK_TASK.with(|task| task.set(Some(current::me())));
-    // `IdleClock` knows this task from here on. Give it the first decision on when time moves.
-    future::yield_now().await;
+    current::set_label_for_task(current::me(), ClockTask);
     loop {
-        NextDeadline.await;
-        // Let the tasks that were woken run. Under `IdleClock`, this task then waits for them.
+        // Let the other tasks run. Under `IdleClock`, this task waits here for all of them.
         future::yield_now().await;
+        NextDeadline.await;
     }
 }
 
@@ -317,7 +304,6 @@ impl<S> IdleClock<S> {
 
 impl<S: Scheduler> Scheduler for IdleClock<S> {
     fn new_execution(&mut self) -> Option<Schedule> {
-        CLOCK_TASK.with(|task| task.set(None));
         self.scheduler.new_execution()
     }
 
@@ -327,14 +313,19 @@ impl<S: Scheduler> Scheduler for IdleClock<S> {
         current_task: Option<TaskId>,
         is_yielding: bool,
     ) -> Option<TaskId> {
-        let clock_task = CLOCK_TASK.with(Cell::get);
-        let is_clock_task = |task: &Task| Some(task.id()) == clock_task;
+        let clock_task =
+            runnable_tasks.iter().position(|task| current::get_label_for_task::<ClockTask>(task.id()).is_some());
         // The list also holds blocked tasks that can wake with no cause. They do not count: with
         // only those and the clock task in the list, the clock task must be able to run.
-        let other_tasks: Vec<_> = if runnable_tasks.iter().any(|task| !is_clock_task(task) && task.runnable()) {
-            runnable_tasks.iter().copied().filter(|task| !is_clock_task(task)).collect()
-        } else {
-            runnable_tasks.to_vec()
+        let other_tasks = match clock_task {
+            Some(clock_task)
+                if runnable_tasks.iter().enumerate().any(|(i, task)| i != clock_task && task.runnable()) =>
+            {
+                let mut other_tasks = runnable_tasks.to_vec();
+                other_tasks.remove(clock_task);
+                Cow::Owned(other_tasks)
+            }
+            _ => Cow::Borrowed(runnable_tasks),
         };
         if other_tasks.len() > 1 {
             self.had_choice.store(true, Ordering::Relaxed);

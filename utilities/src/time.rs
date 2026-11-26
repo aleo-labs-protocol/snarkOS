@@ -24,9 +24,17 @@
 //! the real one. Code that uses it directly does not keep the order of deadlines in a test.
 
 #[cfg(shuttle)]
-pub mod virtual_clock;
+pub(crate) mod virtual_clock;
 
 #[cfg(not(shuttle))]
 pub use ::tokio::time::{Instant, Sleep, Timeout, error, sleep, sleep_until, timeout, timeout_at};
 #[cfg(shuttle)]
 pub use virtual_clock::{Instant, Sleep, Timeout, error, sleep, sleep_until, timeout, timeout_at};
+
+/// Returns the system time. Under `--cfg shuttle`, it follows the clock of the test.
+#[cfg(not(shuttle))]
+pub fn system_now() -> std::time::SystemTime {
+    std::time::SystemTime::now()
+}
+#[cfg(shuttle)]
+pub use virtual_clock::system_now;
