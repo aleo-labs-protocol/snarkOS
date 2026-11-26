@@ -56,15 +56,25 @@ features = [ "console", "ledger", "utilities" ]
 [dependencies.http]
 workspace = true
 
-[dependencies.tokio]
+[target.'cfg(not(shuttle))'.dependencies.tokio]
 workspace = true
+features = [ "rt" ]
+
+[target.'cfg(shuttle)'.dependencies.tokio]
+package = "shuttle-tokio-impl"
+version = "0.1.2"
 features = [ "rt" ]
 
 [dependencies.tracing]
 workspace = true
 
-[dev-dependencies.tokio]
+[target.'cfg(not(shuttle))'.dev-dependencies.tokio]
 workspace = true
+features = [ "io-util", "macros", "net", "rt", "rt-multi-thread" ]
+
+[target.'cfg(shuttle)'.dev-dependencies.tokio]
+package = "shuttle-tokio-impl"
+version = "0.1.2"
 features = [ "io-util", "macros", "net", "rt", "rt-multi-thread" ]
 
 [dev-dependencies.tokio-test]

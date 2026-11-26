@@ -224,8 +224,9 @@ jobs:
         run: cargo locktick-clippy -q -p snarkos-utilities --message-format=json | grep '"name":"locktick"' > /dev/null
       - run: cargo locktick-clippy --workspace --all-targets --all-features -- -D warnings
 
-  # The tests that run under the shuttle scheduler. No other test can run in a
-  # `--cfg shuttle` build, so the name filter selects them.
+  # The tests that are made for the shuttle scheduler, which the name filter
+  # selects. In a `--cfg shuttle` build, any other test panics at its first
+  # lock, or runs under shuttle's scheduler, which it is not written for.
   test-shuttle:
     needs: schedule-due
     runs-on: [self-hosted, linux, x64, cpu]
@@ -244,7 +245,7 @@ jobs:
         run: cargo shuttle-test -p snarkos-node-bft --lib shuttle_tests -- --list | grep 'shuttle_tests::.* test$' > /dev/null
       - run: cargo shuttle-test -p snarkos-node-bft --lib shuttle_tests
       # No other job compiles the code that is behind the cfg.
-      - run: cargo shuttle-clippy -p snarkos-utilities -p snarkos-node-bft --all-targets -- -D warnings
+      - run: cargo shuttle-clippy --workspace --exclude snarkos-cli --exclude snarkos --all-targets --all-features -- -D warnings
 
   # Each line of `runs` is one cargo command. Lines with the same `-p` set and
   # cargo flags share one build; nextest's `-E` and `--no-tests` are not cargo

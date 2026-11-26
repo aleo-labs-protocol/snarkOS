@@ -26,12 +26,29 @@
 //!
 //! Building with `--cfg shuttle` swaps the `parking_lot` locks for the ones of the `shuttle`
 //! concurrency testing tool, and the types of [`crate::atomic`] with them. A shuttle test runs
-//! its threads one at a time, and picks which one runs next at each operation on these types.
+//! its threads and tasks one at a time, and picks which one runs next at each operation on these
+//! types.
+//!
+//! In that build, the `tokio` dependency of a workspace crate is the package
+//! `shuttle-tokio-impl`: its `Cargo.toml` names one package for `cfg(shuttle)` and the other
+//! one for `cfg(not(shuttle))`. The [`tokio`] locks are thus shuttle's as well, and so are the
+//! tasks, the channels and the timers. The exceptions are `snarkos-cli` and
+//! `snarkos-ledger-distribution`, which build a `tokio` runtime with options that shuttle's
+//! runtime does not have. `snarkos-cli` and the `snarkos` binary do not compile in that build.
+//!
 //! Hazards of that build:
-//! - These locks and atomics panic outside a shuttle test, so the build can run nothing else.
-//! - The [`tokio`] locks stay the ones of `tokio`, and snarkVM keeps its own locks. Shuttle does
-//!   not see them: no thread switch happens at them, and a test deadlocks if one thread waits for
-//!   such a lock while its holder is switched out.
+//! - These types panic outside a shuttle test, so the build can run no test that takes a lock
+//!   without one. A `#[tokio::test]` is a shuttle test there.
+//! - A `tokio` type of a crate that has the two entries is not the type of the same name in a
+//!   crate that does not. A new crate that exchanges such a type with them needs the entries too.
+//! - Time is not real. `tokio::time::sleep` ends as soon as shuttle runs the task again, and
+//!   `tokio::time::timeout` ends only when the test expires it with `tokio::time::trigger_timeouts`.
+//! - snarkVM keeps its own locks and the real `tokio`. Shuttle does not see them: no switch
+//!   happens at them, and a test deadlocks if one thread waits for such a lock while its holder
+//!   is switched out.
+//! - `tokio::io`, `tokio::net`, `tokio::fs` and `tokio::signal` stay the real ones, and so do the
+//!   types of `tokio-util` and `tokio-stream`. Shuttle does not see them either, and a socket or
+//!   a signal handler has no `tokio` runtime to register with.
 //! - The two cfgs are mutually exclusive.
 //!
 //! The submodules mirror the layout of `locktick`. A lock's methods return the guard alias of

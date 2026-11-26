@@ -27,10 +27,11 @@ locktick-build = ["build", "--config", "target.'cfg(all())'.rustflags=['--cfg','
 locktick-check = ["check", "--config", "target.'cfg(all())'.rustflags=['--cfg','locktick']"]
 locktick-clippy = ["clippy", "--config", "target.'cfg(all())'.rustflags=['--cfg','locktick']"]
 
-# `cargo shuttle-<command>` runs a cargo command with `--cfg shuttle`, which swaps the `parking_lot`
-# locks of `snarkos_utilities::locks` and the types of `snarkos_utilities::atomic` for the ones of
-# the `shuttle` concurrency testing tool. Only the tests in a `shuttle_tests` module can run in
-# that build, for example `cargo shuttle-test -p snarkos-node-bft --lib shuttle_tests`.
+# `cargo shuttle-<command>` runs a cargo command with `--cfg shuttle`; see `snarkos_utilities::locks`
+# for what that build swaps. The tests in a `shuttle_tests` module are made for it:
+# `cargo shuttle-test -p snarkos-node-bft --lib shuttle_tests`.
+# `snarkos-cli` and `snarkos` do not compile in it, so a workspace command must exclude them:
+# `cargo shuttle-clippy --workspace --exclude snarkos-cli --exclude snarkos`.
 # The hazards of the `locktick` aliases above apply.
 shuttle-test = ["test", "--config", "target.'cfg(all())'.rustflags=['--cfg','shuttle']"]
 shuttle-clippy = ["clippy", "--config", "target.'cfg(all())'.rustflags=['--cfg','shuttle']"]

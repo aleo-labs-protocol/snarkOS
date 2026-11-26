@@ -91,6 +91,15 @@ pub const PRIMARY_PING_INTERVAL: Duration = Duration::from_millis(2 * (MAX_BATCH
 /// The interval at which each worker broadcasts a ping to every other node.
 pub const WORKER_PING_INTERVAL: Duration = Duration::from_millis(4 * (MAX_BATCH_DELAY.as_millis() as u64));
 
+#[cfg(not(shuttle))]
+pub(crate) use tokio::task::block_in_place;
+
+/// Runs `f`. Shuttle's `tokio` has no `block_in_place`, and it runs one task at a time.
+#[cfg(shuttle)]
+pub(crate) fn block_in_place<F: FnOnce() -> R, R>(f: F) -> R {
+    f()
+}
+
 /// A helper macro to spawn a blocking task.
 #[macro_export]
 macro_rules! spawn_blocking {

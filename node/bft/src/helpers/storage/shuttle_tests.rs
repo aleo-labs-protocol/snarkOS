@@ -21,8 +21,8 @@
 //! prints the schedule that replays it, which `shuttle::replay` takes. The random scheduler also
 //! prints its seed, which `SHUTTLE_RANDOM_SEED` takes.
 //!
-//! Hazard: shuttle switches threads only at the locks and atomics of `snarkos_utilities`. A
-//! thread that samples or signs inside a closure makes each run slow and tests nothing more.
+//! Hazard: shuttle switches threads only at the types that the cfg swaps. A thread that samples
+//! or signs inside a closure makes each run slow and tests nothing more.
 
 use super::{tests::sample_transmissions, *};
 use snarkos_node_bft_ledger_service::MockLedgerService;
@@ -41,7 +41,7 @@ type Certificate = BatchCertificate<CurrentNetwork>;
 type Transmissions = HashMap<TransmissionID<CurrentNetwork>, Transmission<CurrentNetwork>>;
 type InsertResult = Result<(), CheckCertificateError>;
 
-/// The number of thread orders that each test runs with each scheduler.
+/// The number of thread orders that each test of this module runs with each scheduler.
 const ITERATIONS: usize = 5_000;
 
 /// The depth of the PCT scheduler, which changes the priorities of the threads at
@@ -87,17 +87,17 @@ impl Fixture {
     }
 }
 
-/// Runs `test` under two schedulers, each with new seeds.
+/// Runs `test` under two schedulers, each with new seeds and for `iterations` thread orders.
 ///
 /// The PCT scheduler runs one thread until a random point, and then prefers another one. It
 /// finds the orders in which one thread stops between two particular steps while another one
 /// runs to its end. The random scheduler picks a thread at every step, so its threads advance
 /// together, and it almost never produces those orders.
-fn check(test: impl Fn() + Send + Sync + 'static) {
+pub(crate) fn check(iterations: usize, test: impl Fn() + Send + Sync + 'static) {
     let test = Arc::new(test);
     let pct_test = test.clone();
-    shuttle::check_pct(move || pct_test(), ITERATIONS, PCT_DEPTH);
-    shuttle::check_random(move || test(), ITERATIONS);
+    shuttle::check_pct(move || pct_test(), iterations, PCT_DEPTH);
+    shuttle::check_random(move || test(), iterations);
 }
 
 /// Returns an empty storage whose GC round is 0.
@@ -173,7 +173,7 @@ fn same_certificate_inserted_twice() {
     let certificate = fixture.certificate(0, 1, Default::default());
     let committee = fixture.committee;
 
-    check(move || {
+    check(ITERATIONS, move || {
         let storage = new_storage(&committee, 1);
 
         let inserts = [spawn_insert(&storage, &certificate), spawn_insert(&storage, &certificate)];
@@ -196,7 +196,7 @@ fn two_certificates_of_one_author_and_round() {
     assert_ne!(certificates[0].0.id(), certificates[1].0.id());
     let committee = fixture.committee;
 
-    check(move || {
+    check(ITERATIONS, move || {
         let storage = new_storage(&committee, 1);
 
         let inserts = [spawn_insert(&storage, &certificates[0]), spawn_insert(&storage, &certificates[1])];
@@ -220,7 +220,7 @@ fn insertion_during_garbage_collection_of_its_round() {
     let certificate = fixture.certificate(0, 1, Default::default());
     let committee = fixture.committee;
 
-    check(move || {
+    check(ITERATIONS, move || {
         let storage = new_storage(&committee, 1);
 
         let insert = spawn_insert(&storage, &certificate);
@@ -250,7 +250,7 @@ fn insertion_during_garbage_collection_of_the_previous_round() {
     let certificate = fixture.certificate(0, 2, previous_certificate_ids);
     let committee = fixture.committee;
 
-    check(move || {
+    check(ITERATIONS, move || {
         let storage = new_storage(&committee, 1);
         for (previous_certificate, transmissions) in &previous_certificates {
             storage

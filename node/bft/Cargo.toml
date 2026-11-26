@@ -115,8 +115,13 @@ features = [ "utilities" ]
 [dependencies.time]
 workspace = true
 
-[dependencies.tokio]
+[target.'cfg(not(shuttle))'.dependencies.tokio]
 workspace = true
+features = [ "macros", "rt-multi-thread", "signal" ]
+
+[target.'cfg(shuttle)'.dependencies.tokio]
+package = "shuttle-tokio-impl"
+version = "0.1.2"
 features = [ "macros", "rt-multi-thread", "signal" ]
 
 [dependencies.tokio-util]

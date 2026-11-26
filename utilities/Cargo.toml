@@ -22,8 +22,13 @@ test-helpers = [ ]
 [dependencies.anyhow]
 workspace = true
 
-[dependencies.tokio]
+[target.'cfg(not(shuttle))'.dependencies.tokio]
 workspace = true
+features = [ "macros", "rt", "signal", "sync" ]
+
+[target.'cfg(shuttle)'.dependencies.tokio]
+package = "shuttle-tokio-impl"
+version = "0.1.2"
 features = [ "macros", "rt", "signal", "sync" ]
 
 [dependencies.tracing]
@@ -43,8 +48,13 @@ version = "0.9.10"
 version = "0.12.5"
 features = [ "shuttle" ]
 
-[dev-dependencies.tokio]
+[target.'cfg(not(shuttle))'.dev-dependencies.tokio]
 workspace = true
+features = [ "macros", "rt", "time" ]
+
+[target.'cfg(shuttle)'.dev-dependencies.tokio]
+package = "shuttle-tokio-impl"
+version = "0.1.2"
 features = [ "macros", "rt", "time" ]
 
 [lints]

@@ -130,6 +130,8 @@ version = "2"
 [workspace.dependencies.time]
 version = "0.3"
 
+# Hazard: a crate that exchanges `tokio` types with other workspace crates must also name the
+# package `shuttle-tokio-impl` for `cfg(shuttle)`; see `snarkos_utilities::locks`.
 [workspace.dependencies.tokio]
 version = "1.48"
 

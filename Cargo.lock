@@ -1153,10 +1153,13 @@ dependencies = [
  "num-traits",
  "oorandom",
  "page_size",
+ "plotters",
+ "rayon",
  "regex",
  "serde",
  "serde_json",
  "tinytemplate",
+ "tokio",
  "walkdir",
 ]
 
@@ -3928,6 +3931,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
+name = "plotters"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5aeb6f403d7a4911efb1e33402027fc44f29b5bf6def3effcc22d7bb75f2b747"
+dependencies = [
+ "num-traits",
+ "plotters-backend",
+ "plotters-svg",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
+name = "plotters-backend"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df42e13c12958a16b3f7f4386b9ab1f3e7933914ecea48da7139435263a4172a"
+
+[[package]]
+name = "plotters-svg"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51bae2ac328883f7acdfea3d66a7c35751187f870bc81f94563733a154d7a670"
+dependencies = [
+ "plotters-backend",
+]
+
+[[package]]
 name = "poly1305"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5415,6 +5446,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "shuttle-tokio-impl"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96e0b2e7154d42772d6cff8a8a2fbcb88f3a651bde826bb703d876fabfc39af4"
+dependencies = [
+ "cfg-if",
+ "shuttle-tokio-impl-inner",
+ "tokio",
+]
+
+[[package]]
+name = "shuttle-tokio-impl-inner"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "257c8b8eadb89aea456b54f0037bf4f3a6e0a31dde3550bad853c8737b927459"
+dependencies = [
+ "criterion",
+ "futures",
+ "pin-project",
+ "pin-project-lite",
+ "regex",
+ "shuttle",
+ "shuttle-engine",
+ "shuttle-tokio-macros-impl",
+ "smallvec",
+ "test-log",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "shuttle-tokio-macros-impl"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d0c94fc6e0f817b69ca12a686a8c6a0de3664b343ba09bee3ad850385532efb"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "shuttle",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "signal-hook"
 version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5609,6 +5685,7 @@ dependencies = [
  "anyhow",
  "crossterm",
  "ratatui",
+ "shuttle-tokio-impl",
  "snarkos-node",
  "snarkos-utilities",
  "snarkvm",
@@ -5664,6 +5741,7 @@ dependencies = [
  "rand_chacha 0.10.0",
  "reqwest",
  "serde_json",
+ "shuttle-tokio-impl",
  "snarkos-account",
  "snarkos-node-bft",
  "snarkos-node-cdn",
@@ -5711,6 +5789,7 @@ dependencies = [
  "rand_distr",
  "rayon",
  "sha2 0.11.0",
+ "shuttle-tokio-impl",
  "smol_str",
  "snarkos-account",
  "snarkos-node-bft",
@@ -5768,6 +5847,7 @@ dependencies = [
  "indexmap 2.14.2",
  "rand 0.10.3",
  "rayon",
+ "shuttle-tokio-impl",
  "snarkos-node-metrics",
  "snarkos-utilities",
  "snarkvm",
@@ -5800,6 +5880,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "shuttle-tokio-impl",
  "snarkos-node-metrics",
  "snarkos-utilities",
  "snarkvm",
@@ -5819,6 +5900,7 @@ dependencies = [
  "itertools 0.15.0",
  "lru 0.19.0",
  "once_cell",
+ "shuttle-tokio-impl",
  "snarkos-account",
  "snarkos-node-bft",
  "snarkos-node-bft-ledger-service",
@@ -5839,6 +5921,7 @@ dependencies = [
  "built",
  "metrics-exporter-prometheus",
  "rayon",
+ "shuttle-tokio-impl",
  "snarkos-utilities",
  "snarkvm",
  "tokio",
@@ -5854,6 +5937,7 @@ dependencies = [
  "bytes",
  "rand 0.10.3",
  "serde",
+ "shuttle-tokio-impl",
  "smol_str",
  "snarkos-node-tcp",
  "snarkos-utilities",
@@ -5886,6 +5970,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+ "shuttle-tokio-impl",
  "snarkos-node-bft-ledger-service",
  "snarkos-node-cdn",
  "snarkos-node-consensus",
@@ -5918,6 +6003,7 @@ dependencies = [
  "rand 0.10.3",
  "rand_chacha 0.10.0",
  "rayon",
+ "shuttle-tokio-impl",
  "snarkos-account",
  "snarkos-node-bft-ledger-service",
  "snarkos-node-metrics",
@@ -5966,6 +6052,7 @@ dependencies = [
  "itertools 0.15.0",
  "rand 0.10.3",
  "serde",
+ "shuttle-tokio-impl",
  "snarkos-node-bft-ledger-service",
  "snarkos-node-metrics",
  "snarkos-node-network",
@@ -5987,6 +6074,7 @@ name = "snarkos-node-sync-communication-service"
 version = "4.13.1"
 dependencies = [
  "async-trait",
+ "shuttle-tokio-impl",
  "tokio",
 ]
 
@@ -6010,6 +6098,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "once_cell",
+ "shuttle-tokio-impl",
  "snarkos-node-metrics",
  "snarkos-utilities",
  "thiserror 2.0.20",
@@ -6026,6 +6115,7 @@ dependencies = [
  "parking_lot",
  "shuttle",
  "shuttle-parking_lot",
+ "shuttle-tokio-impl",
  "snarkvm",
  "tokio",
  "tracing",
