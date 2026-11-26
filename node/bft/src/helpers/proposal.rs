@@ -260,8 +260,12 @@ impl<N: Network> FromBytes for Proposal<N> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::helpers::storage::tests::sample_transmissions;
-    use snarkvm::{console::network::MainnetV0, utilities::TestRng};
+    use crate::helpers::{now, storage::tests::sample_transmissions};
+    use snarkvm::{
+        console::{account::PrivateKey, network::MainnetV0},
+        ledger::committee::test_helpers::sample_committee_for_round_and_members,
+        utilities::TestRng,
+    };
 
     type CurrentNetwork = MainnetV0;
 
@@ -280,6 +284,41 @@ pub(crate) mod tests {
         Proposal { batch_header, transmissions, signatures }
     }
 
+    /// Returns a committee of `num_members` validators, their private keys, and an empty proposal by the first one.
+    fn sample_empty_proposal(
+        num_members: usize,
+        rng: &mut TestRng,
+    ) -> (Committee<CurrentNetwork>, Vec<PrivateKey<CurrentNetwork>>, Proposal<CurrentNetwork>) {
+        let private_keys: Vec<_> = (0..num_members).map(|_| PrivateKey::new(rng).unwrap()).collect();
+        let addresses = private_keys.iter().map(|key| Address::try_from(key).unwrap()).collect();
+        let committee = sample_committee_for_round_and_members(1, addresses, rng);
+        let batch_header =
+            BatchHeader::new(&private_keys[0], 1, now(), committee.id(), Default::default(), Default::default(), rng)
+                .unwrap();
+        let proposal = Proposal::new(committee.clone(), batch_header, Default::default()).unwrap();
+        (committee, private_keys, proposal)
+    }
+
+    /// Derives the signers from the author's signature and the endorsing signatures.
+    fn derive_signers(proposal: &Proposal<CurrentNetwork>) -> HashSet<Address<CurrentNetwork>> {
+        proposal.signatures.iter().chain(Some(proposal.batch_header.signature())).map(Signature::to_address).collect()
+    }
+
+    /// Checks `signers`, `nonsigners` and `is_quorum_threshold_reached` against the derived signers.
+    fn check_signers(proposal: &Proposal<CurrentNetwork>, committee: &Committee<CurrentNetwork>) {
+        let expected = derive_signers(proposal);
+        assert_eq!(expected.len(), proposal.signatures.len() + 1);
+        assert_eq!(proposal.signers().iter().copied().collect::<HashSet<_>>(), expected);
+
+        let expected_nonsigners: HashSet<_> =
+            committee.members().keys().copied().filter(|address| !expected.contains(address)).collect();
+        assert_eq!(proposal.nonsigners(committee), expected_nonsigners);
+
+        let is_quorum = committee.is_quorum_threshold_reached(&expected);
+        assert_eq!(proposal.is_quorum_threshold_reached(committee), is_quorum);
+        assert_eq!(proposal.to_certificate(committee).is_ok(), is_quorum);
+    }
+
     #[test]
     fn test_bytes() {
         let rng = &mut TestRng::default();
@@ -288,7 +327,113 @@ pub(crate) mod tests {
             let expected = sample_proposal(rng);
             // Check the byte representation.
             let expected_bytes = expected.to_bytes_le().unwrap();
-            assert_eq!(expected, Proposal::read_le(&expected_bytes[..]).unwrap());
+            let recovered = Proposal::read_le(&expected_bytes[..]).unwrap();
+            assert_eq!(expected, recovered);
+            assert_eq!(recovered.signers().iter().copied().collect::<HashSet<_>>(), derive_signers(&expected));
+            assert_eq!(expected.signers().iter().copied().collect::<HashSet<_>>(), derive_signers(&expected));
+        }
+    }
+
+    #[test]
+    fn test_bytes_layout() {
+        let rng = &mut TestRng::default();
+
+        let (committee, private_keys, mut proposal) = sample_empty_proposal(4, rng);
+        for private_key in &private_keys[1..3] {
+            let signature = private_key.sign(&[proposal.batch_id()], rng).unwrap();
+            assert!(proposal.add_signature(Address::try_from(private_key).unwrap(), signature, &committee).unwrap());
+        }
+
+        // The header, the number of transmissions, the number of signatures, and the signatures in insertion order.
+        let mut expected_bytes = proposal.batch_header.to_bytes_le().unwrap();
+        expected_bytes.extend(0u32.to_le_bytes());
+        expected_bytes.extend(2u32.to_le_bytes());
+        for signature in &proposal.signatures {
+            expected_bytes.extend(signature.to_bytes_le().unwrap());
+        }
+        assert_eq!(proposal.to_bytes_le().unwrap(), expected_bytes);
+
+        let recovered = Proposal::read_le(&expected_bytes[..]).unwrap();
+        assert_eq!(recovered, proposal);
+        check_signers(&recovered, &committee);
+    }
+
+    #[test]
+    fn test_add_signature() {
+        let rng = &mut TestRng::default();
+
+        let (committee, private_keys, mut proposal) = sample_empty_proposal(10, rng);
+        let author = Address::try_from(&private_keys[0]).unwrap();
+        assert_eq!(proposal.signers().iter().copied().collect::<HashSet<_>>(), HashSet::from([author]));
+        check_signers(&proposal, &committee);
+
+        // The author is already a signer.
+        let signature = private_keys[0].sign(&[proposal.batch_id()], rng).unwrap();
+        assert!(!proposal.add_signature(author, signature, &committee).unwrap());
+        assert!(proposal.signatures.is_empty());
+        check_signers(&proposal, &committee);
+
+        for private_key in &private_keys[1..] {
+            let signer = Address::try_from(private_key).unwrap();
+            let signature = private_key.sign(&[proposal.batch_id()], rng).unwrap();
+            assert!(proposal.add_signature(signer, signature, &committee).unwrap());
+            assert!(proposal.signatures.contains(&signature));
+            check_signers(&proposal, &committee);
+
+            // A second signature by the same signer is not added, whether it is the same signature or a new one.
+            let num_signatures = proposal.signatures.len();
+            assert!(!proposal.add_signature(signer, signature, &committee).unwrap());
+            let other_signature = private_key.sign(&[proposal.batch_id()], rng).unwrap();
+            assert!(!proposal.add_signature(signer, other_signature, &committee).unwrap());
+            assert_eq!(proposal.signatures.len(), num_signatures);
+            check_signers(&proposal, &committee);
+
+            // The proposal survives a round trip through its bytes.
+            let recovered = Proposal::read_le(&proposal.to_bytes_le().unwrap()[..]).unwrap();
+            assert_eq!(recovered, proposal);
+            check_signers(&recovered, &committee);
+        }
+        assert!(proposal.nonsigners(&committee).is_empty());
+        assert!(proposal.is_quorum_threshold_reached(&committee));
+    }
+
+    #[test]
+    fn test_add_signature_rejects_invalid() {
+        let rng = &mut TestRng::default();
+
+        let (committee, private_keys, mut proposal) = sample_empty_proposal(4, rng);
+        let batch_id = proposal.batch_id();
+        let signer = Address::try_from(&private_keys[1]).unwrap();
+        let other = Address::try_from(&private_keys[2]).unwrap();
+
+        // A signature by a non-member.
+        let outsider_key = PrivateKey::new(rng).unwrap();
+        let outsider = Address::try_from(&outsider_key).unwrap();
+        let signature = outsider_key.sign(&[batch_id], rng).unwrap();
+        assert!(proposal.add_signature(outsider, signature, &committee).is_err());
+
+        // A signature over another message.
+        let signature = private_keys[1].sign(&[batch_id + Field::from_u8(1)], rng).unwrap();
+        assert!(proposal.add_signature(signer, signature, &committee).is_err());
+
+        // A signature by a member other than the claimed signer.
+        let signature = private_keys[1].sign(&[batch_id], rng).unwrap();
+        assert!(proposal.add_signature(other, signature, &committee).is_err());
+
+        // A signature by a non-member, claimed for a member.
+        let signature = outsider_key.sign(&[batch_id], rng).unwrap();
+        assert!(proposal.add_signature(signer, signature, &committee).is_err());
+
+        // None of the rejected signatures changes the proposal.
+        assert!(proposal.signatures.is_empty());
+        check_signers(&proposal, &committee);
+        assert_eq!(proposal.nonsigners(&committee).len(), 3);
+
+        // The rejected signers can still sign.
+        for private_key in &private_keys[1..3] {
+            let signature = private_key.sign(&[batch_id], rng).unwrap();
+            assert!(proposal.add_signature(Address::try_from(private_key).unwrap(), signature, &committee).unwrap());
+            check_signers(&proposal, &committee);
         }
     }
 }
