@@ -203,9 +203,9 @@ mod tests {
     /// `insert_transmissions` must return when a declared transmission is neither provided nor
     /// aborted, rather than deadlock on a re-entrant lock acquisition.
     ///
-    /// That branch is reached through the gap between `find_missing_transmissions` and
-    /// `insert_transmissions`, which take separate locks: a concurrent `remove_transmissions` can
-    /// evict an entry the first call saw and therefore left out of `missing_transmissions`.
+    /// A caller reaches that branch if it relies on `find_missing_transmissions` for what to
+    /// provide. The two calls take separate locks: a concurrent `remove_transmissions` can evict
+    /// an entry the first call saw and therefore left out of `missing_transmissions`.
     ///
     /// The call runs on its own thread so a regression fails on the timeout rather than hanging
     /// the test binary.

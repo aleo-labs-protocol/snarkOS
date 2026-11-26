@@ -41,7 +41,7 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-/// Errors returned by [`Storage::check_certificate`] (and therefore [`Storage::insert_certificate`]).
+/// Errors returned by [`Storage::check_certificate`] and [`Storage::insert_certificate`].
 ///
 /// The `SameCertificate` variant describes a benign race: concurrent sync paths regularly try to
 /// insert the same certificate, and the loser of that race should treat its failure as a no-op
@@ -49,6 +49,8 @@ use tokio_util::sync::CancellationToken;
 ///
 /// The `SameAuthorAndRound` variant means storage holds a different certificate by that author
 /// for that round.
+///
+/// The `MissingTransmission` variant comes from the insertion only.
 #[derive(Debug, thiserror::Error)]
 pub enum CheckCertificateError {
     #[error("Certificate round {round} already exists in storage (gc_round = {gc_round})")]
@@ -57,6 +59,16 @@ pub enum CheckCertificateError {
     SameAuthorAndRound { round: u64, gc_round: u64 },
     #[error("Certificate round {round} is at or below the GC round {gc_round}")]
     RoundTooLow { round: u64, gc_round: u64 },
+    /// Storage does not have a transmission of the certificate, and the caller did not provide
+    /// it. The certificate can be valid: the caller leaves out a transmission that storage has,
+    /// and garbage collection can remove it before the insertion. This error is not benign: the
+    /// certificate is not stored. Block sync gets the transmission and inserts again. The
+    /// primary gives up on the certificate of a peer. It fetches the transmission and inserts
+    /// again when it gets the certificate again, or when a later certificate refers to it.
+    #[error(
+        "Transmission {transmission_id} of the certificate in round {round} is not in storage (gc_round = {gc_round})"
+    )]
+    MissingTransmission { transmission_id: String, round: u64, gc_round: u64 },
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -66,6 +78,8 @@ impl CheckCertificateError {
     /// invalid. Callers should not log benign errors at ERROR.
     ///
     /// This includes `SameAuthorAndRound`, although storage then holds a different certificate.
+    /// It does not include `MissingTransmission`, although the certificate can be valid: the
+    /// certificate is not in storage then, and the caller has more to do.
     pub fn is_benign(&self) -> bool {
         matches!(self, Self::SameCertificate { .. } | Self::SameAuthorAndRound { .. } | Self::RoundTooLow { .. })
     }
@@ -570,6 +584,17 @@ impl<N: Network> Storage<N> {
         transmissions: HashMap<TransmissionID<N>, Transmission<N>>,
         aborted_transmissions: HashSet<TransmissionID<N>>,
     ) -> Result<Option<HashMap<TransmissionID<N>, Transmission<N>>>> {
+        self.check_batch_header_inner(batch_header, Some((transmissions, aborted_transmissions)))
+    }
+
+    /// Checks the given batch header like [`Self::check_batch_header`]. If `transmissions` is
+    /// `None`, it does not check the transmissions, and it returns no missing transmissions.
+    #[allow(clippy::type_complexity)]
+    fn check_batch_header_inner(
+        &self,
+        batch_header: &BatchHeader<N>,
+        transmissions: Option<(HashMap<TransmissionID<N>, Transmission<N>>, HashSet<TransmissionID<N>>)>,
+    ) -> Result<Option<HashMap<TransmissionID<N>, Transmission<N>>>> {
         // Retrieve the round.
         let round = batch_header.round();
         // Retrieve the GC round.
@@ -596,10 +621,13 @@ impl<N: Network> Storage<N> {
         check_timestamp_for_liveness(batch_header.timestamp())?;
 
         // Determine which transmissions in this batch are missing from storage.
-        let missing_transmissions = self
-            .transmissions
-            .find_missing_transmissions(batch_header, transmissions, aborted_transmissions)
-            .map_err(|e| anyhow!("{e} for round {round} {gc_log}"))?;
+        let missing_transmissions = match transmissions {
+            Some((transmissions, aborted_transmissions)) => self
+                .transmissions
+                .find_missing_transmissions(batch_header, transmissions, aborted_transmissions)
+                .map_err(|e| anyhow!("{e} for round {round} {gc_log}"))?,
+            None => HashMap::new(),
+        };
 
         // Compute the previous round.
         let previous_round = round.saturating_sub(1);
@@ -758,6 +786,17 @@ impl<N: Network> Storage<N> {
         transmissions: HashMap<TransmissionID<N>, Transmission<N>>,
         aborted_transmissions: HashSet<TransmissionID<N>>,
     ) -> Result<HashMap<TransmissionID<N>, Transmission<N>>, CheckCertificateError> {
+        self.check_certificate_inner(certificate, Some((transmissions, aborted_transmissions)))
+    }
+
+    /// Checks the given certificate like [`Self::check_certificate`]. If `transmissions` is
+    /// `None`, it does not check the transmissions, and it returns no missing transmissions.
+    #[allow(clippy::type_complexity)]
+    fn check_certificate_inner(
+        &self,
+        certificate: &BatchCertificate<N>,
+        transmissions: Option<(HashMap<TransmissionID<N>, Transmission<N>>, HashSet<TransmissionID<N>>)>,
+    ) -> Result<HashMap<TransmissionID<N>, Transmission<N>>, CheckCertificateError> {
         // Retrieve the round.
         let round = certificate.round();
         // Retrieve the GC round.
@@ -782,8 +821,7 @@ impl<N: Network> Storage<N> {
         }
 
         // Ensure the batch header is well-formed.
-        let Some(missing_transmissions) =
-            self.check_batch_header(certificate.batch_header(), transmissions, aborted_transmissions)?
+        let Some(missing_transmissions) = self.check_batch_header_inner(certificate.batch_header(), transmissions)?
         else {
             return Err(CheckCertificateError::SameCertificate { round, gc_round });
         };
@@ -848,19 +886,22 @@ impl<N: Network> Storage<N> {
         if certificate.round() <= self.gc_round() {
             return Err(CheckCertificateError::RoundTooLow { round: certificate.round(), gc_round: self.gc_round() });
         }
-        // Ensure the certificate and its transmissions are valid.
-        let missing_transmissions =
-            self.check_certificate(&certificate, transmissions, aborted_transmissions.clone())?;
+        // Ensure the certificate is valid. The insertion checks its transmissions, under the lock
+        // that garbage collection removes transmissions under.
+        self.check_certificate_inner(&certificate, None)?;
         // Note: a referenced ID that storage only knows as aborted, and that nobody provided, is
         // counted against the certificate by `insert_transmissions` itself - callers outside the
         // block sync always pass an empty set of aborted IDs.
-        // Insert the certificate into storage.
-        self.insert_certificate_atomic(certificate, aborted_transmissions, missing_transmissions, false)
+        // Insert the certificate into storage, with every transmission that the caller provided.
+        // Hazard: without the ones that storage has, the insertion fails if garbage collection
+        // removes one of them first.
+        self.insert_certificate_atomic(certificate, aborted_transmissions, transmissions, false)
     }
 
     /// Inserts the given `certificate` into storage.
     ///
-    /// This method assumes **all missing** transmissions are provided in the `missing_transmissions` map.
+    /// The `missing_transmissions` map must have each transmission of the certificate that storage
+    /// does not have. It can have others.
     ///
     /// This method triggers updates to the `rounds`, `certificates`, `batch_ids`, and `transmissions` maps.
     ///
@@ -871,6 +912,8 @@ impl<N: Network> Storage<N> {
     /// - [`CheckCertificateError::SameAuthorAndRound`] if storage holds a different certificate from
     ///   the same author for the same round. A `trusted_ledger_certificate` is exempt, and is
     ///   stored in addition to that certificate.
+    /// - [`CheckCertificateError::MissingTransmission`] if a transmission of the certificate is
+    ///   neither in storage, nor in `missing_transmissions`, nor aborted.
     ///
     /// Storage is unchanged if an error is returned.
     fn insert_certificate_atomic(
@@ -897,6 +940,23 @@ impl<N: Network> Storage<N> {
         }
         if !trusted_ledger_certificate && self.contains_certificate_in_round_from(round, author) {
             return Err(CheckCertificateError::SameAuthorAndRound { round, gc_round });
+        }
+        // Garbage collection removes a transmission with the last certificate that has it, under
+        // `certificate_updates`. A transmission that storage had when the caller chose what to
+        // provide can thus be gone by now.
+        for transmission_id in certificate.transmission_ids() {
+            // A ledger certificate with a ratification is stored without it.
+            let is_ledger_ratification =
+                trusted_ledger_certificate && matches!(transmission_id, TransmissionID::Ratification);
+            let is_available = is_ledger_ratification
+                || missing_transmissions.contains_key(transmission_id)
+                || aborted_transmission_ids.contains(transmission_id)
+                || self.contains_retrievable_transmission(*transmission_id)
+                || self.contains_aborted_transmission(*transmission_id);
+            if !is_available {
+                let transmission_id = transmission_id.to_string();
+                return Err(CheckCertificateError::MissingTransmission { transmission_id, round, gc_round });
+            }
         }
 
         self.insert_certificate_locked(&update, certificate, aborted_transmission_ids, missing_transmissions);
@@ -1044,6 +1104,67 @@ impl<N: Network> Storage<N> {
             trace!("Got certificate {} for round {} more than once.", certificate.id(), certificate.round());
             return Ok(());
         }
+        // Insert the batch certificate into storage.
+        let certificate_id = fmt_id(certificate.id());
+        debug!(
+            "Syncing certificate '{certificate_id}' for round {} with {} transmissions",
+            certificate.round(),
+            certificate.transmission_ids().len()
+        );
+
+        let insert = |certificate, (missing_transmissions, aborted_transmissions)| {
+            if trusted_ledger_certificate {
+                self.insert_certificate_atomic(certificate, aborted_transmissions, missing_transmissions, true)
+            } else {
+                self.insert_certificate(certificate, missing_transmissions, aborted_transmissions)
+            }
+        };
+        let transmissions =
+            self.transmissions_of_certificate_in_block(block, &certificate, unconfirmed_transactions, false)?;
+        let result = match insert(certificate.clone(), transmissions) {
+            // Garbage collection removed a transmission that the lookup above left out because
+            // storage had it. The second lookup provides a copy of each one that storage has, so
+            // a removal does not matter to it.
+            Err(err @ CheckCertificateError::MissingTransmission { .. }) => {
+                debug!("Syncing certificate '{certificate_id}' from block {} again - {err}", block.height());
+                let transmissions =
+                    self.transmissions_of_certificate_in_block(block, &certificate, unconfirmed_transactions, true)?;
+                insert(certificate, transmissions)
+            }
+            result => result,
+        };
+        match result {
+            // The checks at the top of this function are not atomic with the insertion: garbage
+            // collection can pass the round, or another task can store the certificate, in between.
+            Err(err @ (CheckCertificateError::RoundTooLow { .. } | CheckCertificateError::SameCertificate { .. })) => {
+                trace!("Skipping certificate '{certificate_id}' from block {} - {err}", block.height());
+                Ok(())
+            }
+            result => result.with_context(|| {
+                format!("Failed to insert certificate '{certificate_id}' from block {}", block.height())
+            }),
+        }
+    }
+
+    /// Returns the transmissions of the `certificate` that storage cannot retrieve, taken from the
+    /// `block` or the ledger, and the IDs of the ones that are aborted. If `copy_stored`, it also
+    /// returns a copy of each transmission that storage has.
+    ///
+    /// Hazard: without `copy_stored`, garbage collection can remove a transmission that this
+    /// leaves out because storage has it. The insertion of the certificate then fails with
+    /// [`CheckCertificateError::MissingTransmission`].
+    ///
+    /// Hazard: this reads the ledger, which can run `rayon` tasks, and its callers run in `rayon`
+    /// tasks too. A caller that holds `certificate_updates` can thus get another insertion to
+    /// run on its own thread, which then waits for that lock for ever.
+    #[allow(clippy::type_complexity)]
+    fn transmissions_of_certificate_in_block(
+        &self,
+        block: &Block<N>,
+        certificate: &BatchCertificate<N>,
+        unconfirmed_transactions: &HashMap<N::TransactionID, Transaction<N>>,
+        copy_stored: bool,
+    ) -> Result<(HashMap<TransmissionID<N>, Transmission<N>>, HashSet<TransmissionID<N>>)> {
         // Retrieve the transmissions for the certificate.
         let mut missing_transmissions = HashMap::new();
 
@@ -1066,7 +1187,11 @@ impl<N: Network> Storage<N> {
             // skipped here: storage holds no transmission for it, so it has to go through the
             // classification below - which either recovers the transmission from the block, or
             // declares the ID as aborted for this certificate as well.
-            if self.contains_retrievable_transmission(*transmission_id) {
+            if !copy_stored && self.contains_retrievable_transmission(*transmission_id) {
+                continue;
+            }
+            if copy_stored && let Some(transmission) = self.get_transmission(*transmission_id) {
+                missing_transmissions.insert(*transmission_id, transmission);
                 continue;
             }
             // Retrieve the transmission.
@@ -1122,30 +1247,7 @@ impl<N: Network> Storage<N> {
                 }
             }
         }
-        // Insert the batch certificate into storage.
-        let certificate_id = fmt_id(certificate.id());
-        debug!(
-            "Syncing certificate '{certificate_id}' for round {} with {} transmissions",
-            certificate.round(),
-            certificate.transmission_ids().len()
-        );
-
-        let result = if trusted_ledger_certificate {
-            self.insert_certificate_atomic(certificate, aborted_transmissions, missing_transmissions, true)
-        } else {
-            self.insert_certificate(certificate, missing_transmissions, aborted_transmissions)
-        };
-        match result {
-            // The checks at the top of this function are not atomic with the insertion: garbage
-            // collection can pass the round, or another task can store the certificate, in between.
-            Err(err @ (CheckCertificateError::RoundTooLow { .. } | CheckCertificateError::SameCertificate { .. })) => {
-                trace!("Skipping certificate '{certificate_id}' from block {} - {err}", block.height());
-                Ok(())
-            }
-            result => result.with_context(|| {
-                format!("Failed to insert certificate '{certificate_id}' from block {}", block.height())
-            }),
-        }
+        Ok((missing_transmissions, aborted_transmissions))
     }
 }
 
@@ -1260,6 +1362,31 @@ pub(crate) mod tests {
         assert_eq!(storage.batch_ids_iter().collect::<Vec<_>>(), *batch_ids);
         // Ensure the transmissions are well-formed.
         assert_eq!(storage.transmissions_iter().collect::<HashMap<_, _>>(), *transmissions);
+    }
+
+    /// Samples a certificate of `author` for `round` with the given transmission IDs, which the
+    /// `signers` sign.
+    pub(crate) fn sample_certificate_with_transmission_ids(
+        round: u64,
+        author: &snarkvm::prelude::PrivateKey<CurrentNetwork>,
+        signers: &[snarkvm::prelude::PrivateKey<CurrentNetwork>],
+        previous_certificate_ids: IndexSet<Field<CurrentNetwork>>,
+        transmission_ids: IndexSet<TransmissionID<CurrentNetwork>>,
+        rng: &mut TestRng,
+    ) -> BatchCertificate<CurrentNetwork> {
+        let committee_id = snarkvm::prelude::Uniform::rand(rng);
+        let batch_header = BatchHeader::new(
+            author,
+            round,
+            crate::helpers::now(),
+            committee_id,
+            transmission_ids,
+            previous_certificate_ids,
+            rng,
+        )
+        .unwrap();
+        let signatures = signers.iter().map(|signer| signer.sign(&[batch_header.batch_id()], rng).unwrap()).collect();
+        BatchCertificate::from(batch_header, signatures).unwrap()
     }
 
     /// Samples a random transmission.
@@ -1652,6 +1779,50 @@ pub(crate) mod tests {
         assert!(matches!(error.downcast_ref(), Some(CheckCertificateError::SameAuthorAndRound { .. })));
     }
 
+    /// The second lookup of block sync copies the transmissions that storage has. The certificate
+    /// is then stored with its transmission, although the last certificate that had it is removed
+    /// before the insertion.
+    #[test]
+    fn test_sync_certificate_copies_stored_transmissions_for_its_second_attempt() {
+        use snarkvm::prelude::Uniform;
+
+        let rng = &mut TestRng::default();
+
+        let transmission_id = TransmissionID::Transaction(
+            <CurrentNetwork as Network>::TransactionID::from(Field::rand(rng)),
+            <CurrentNetwork as Network>::TransmissionChecksum::from(rng.random::<u128>()),
+        );
+        let (storage, make_certificate) = sample_storage_and_certificates_for_transmission(transmission_id, false, rng);
+        let block = crate::test_helpers::sample_genesis_block(rng);
+
+        // Storage has the transmission through the first certificate.
+        let certificate_1 = make_certificate(0, rng);
+        let transmissions = [(transmission_id, sample_transmission(rng))].into_iter().collect();
+        storage.insert_certificate(certificate_1.clone(), transmissions, Default::default()).unwrap();
+        let certificate_2 = make_certificate(1, rng);
+
+        // The first lookup leaves the transmission out, and the second one copies it.
+        let lookup = |copy_stored| {
+            storage
+                .transmissions_of_certificate_in_block(&block, &certificate_2, &Default::default(), copy_stored)
+                .unwrap()
+        };
+        let (left_out, aborted) = lookup(false);
+        assert!(left_out.is_empty() && aborted.is_empty());
+        let (copied, aborted) = lookup(true);
+        assert_eq!(copied.keys().collect::<Vec<_>>(), [&transmission_id]);
+        assert!(aborted.is_empty());
+
+        // The first certificate is removed, and the transmission with it.
+        assert!(storage.remove_certificate(certificate_1.id()));
+        assert!(!storage.contains_retrievable_transmission(transmission_id));
+
+        let result = storage.insert_certificate(certificate_2.clone(), left_out, Default::default());
+        assert!(matches!(result, Err(CheckCertificateError::MissingTransmission { .. })), "{result:?}");
+        storage.insert_certificate(certificate_2, copied, Default::default()).unwrap();
+        assert!(storage.contains_retrievable_transmission(transmission_id));
+    }
+
     #[test]
     fn test_sync_certificate_with_a_previously_aborted_transmission() {
         check_sync_certificate_with_a_previously_aborted_transmission(true);
@@ -1893,6 +2064,65 @@ pub(crate) mod tests {
         // Inserting the exact same certificate again must fail with `SameCertificate`.
         let result = storage.insert_certificate(certificate, transmissions, Default::default());
         assert!(matches!(result, Err(CheckCertificateError::SameCertificate { .. })));
+    }
+
+    /// Verify that the atomic insertion returns `CheckCertificateError::MissingTransmission` for a
+    /// certificate with a transmission that is neither in storage, nor provided, nor aborted, and
+    /// that it accepts each of the three.
+    #[test]
+    fn test_check_certificate_error_missing_transmission() {
+        let rng = &mut TestRng::default();
+
+        // Sample a committee.
+        let (committee, private_keys) =
+            snarkvm::ledger::committee::test_helpers::sample_committee_and_keys_for_round(0, 10, rng);
+        // Initialize the ledger.
+        let ledger = Arc::new(MockLedgerService::new(committee));
+        // Initialize the storage.
+        let storage = Storage::<CurrentNetwork>::new(ledger, Arc::new(BFTMemoryService::new()), 1).unwrap();
+
+        // Construct three certificates of round 1 with a full quorum of signers.
+        let mut sample_certificate = |author: usize| {
+            let author = private_keys[author];
+            let other_keys: Vec<_> = private_keys.iter().cloned().filter(|k| *k != author).collect();
+            let certificate =
+                sample_batch_certificate_for_round_with_committee(1, Default::default(), &author, &other_keys, rng);
+            let (transmissions, _) = sample_transmissions(&certificate, rng);
+            (certificate, transmissions)
+        };
+        let (provided, provided_transmissions) = sample_certificate(0);
+        let (aborted, aborted_transmissions) = sample_certificate(1);
+        let (missing, missing_transmissions) = sample_certificate(2);
+
+        // A certificate with no transmission in storage and none provided is not stored.
+        let insert = |certificate: &BatchCertificate<_>, aborted_ids, transmissions| {
+            storage.insert_certificate_atomic(certificate.clone(), aborted_ids, transmissions, false)
+        };
+        let result = insert(&missing, Default::default(), Default::default());
+        assert!(matches!(result, Err(CheckCertificateError::MissingTransmission { .. })), "{result:?}");
+        assert!(!storage.contains_certificate(missing.id()));
+        assert_storage(&storage, &[], &[], &[], &Default::default());
+
+        // The transmissions are provided, or the caller declares them as aborted.
+        insert(&provided, Default::default(), provided_transmissions).unwrap();
+        insert(&aborted, aborted_transmissions.into_keys().collect(), Default::default()).unwrap();
+        insert(&missing, Default::default(), missing_transmissions).unwrap();
+
+        // The transmissions are in storage, or storage knows them as aborted, through another certificate.
+        let mut sample_certificate_like = |author: usize, other: &BatchCertificate<_>| {
+            let author = private_keys[author];
+            let other_keys: Vec<_> = private_keys.iter().cloned().filter(|k| *k != author).collect();
+            let transmission_ids = other.transmission_ids().clone();
+            sample_certificate_with_transmission_ids(1, &author, &other_keys, Default::default(), transmission_ids, rng)
+        };
+        let stored = sample_certificate_like(3, &provided);
+        let stored_as_aborted = sample_certificate_like(4, &aborted);
+        insert(&stored, Default::default(), Default::default()).unwrap();
+        insert(&stored_as_aborted, Default::default(), Default::default()).unwrap();
+
+        for certificate in [&provided, &aborted, &missing, &stored, &stored_as_aborted] {
+            assert!(storage.contains_certificate(certificate.id()));
+        }
     }
 
     /// Verify that a certificate that only the round lookup finds is reported as
