@@ -603,57 +603,84 @@ impl<N: Network> Storage<N> {
 
         // Compute the previous round.
         let previous_round = round.saturating_sub(1);
-        // Check if the previous round is within range of the GC round.
-        if previous_round > gc_round {
-            // Retrieve the committee lookback for the previous round.
-            let Ok(previous_committee_lookback) = self.ledger.get_committee_lookback_for_round(previous_round) else {
-                bail!("Missing committee for the previous round {previous_round} in storage {gc_log}")
-            };
-            // Ensure the previous round certificates exists in storage.
-            if !self.contains_certificates_for_round(previous_round) {
-                bail!("Missing certificates for the previous round {previous_round} in storage {gc_log}")
+        // Check the previous certificates, unless the previous round is garbage collected.
+        if previous_round > gc_round
+            && let Err(error) = self.check_previous_certificates(batch_header, previous_round, &gc_log)
+        {
+            // Garbage collection advances the GC round before it removes a certificate. If the
+            // check failed because of a removal, the GC round now covers the previous round.
+            let gc_round = self.gc_round();
+            if previous_round > gc_round {
+                return Err(error);
             }
-            // Ensure the number of previous certificate IDs is at or below the number of committee members.
-            // Skipped under a dev committee: its first rounds reference the real committee's
-            // certificates, which can outnumber it.
-            #[cfg(feature = "dev-committee-override")]
-            let under_dev_committee = self.ledger.dev_committee_for_round(previous_round)?.is_some();
-            #[cfg(not(feature = "dev-committee-override"))]
-            let under_dev_committee = false;
-            if !under_dev_committee
-                && batch_header.previous_certificate_ids().len() > previous_committee_lookback.num_members()
-            {
-                bail!("Too many previous certificates for round {round} {gc_log}")
-            }
-            // Initialize a set of the previous authors.
-            let mut previous_authors = HashSet::with_capacity(batch_header.previous_certificate_ids().len());
-            // Ensure storage contains all declared previous certificates (up to GC).
-            for previous_certificate_id in batch_header.previous_certificate_ids() {
-                // Retrieve the previous certificate.
-                let Some(previous_certificate) = self.get_certificate(*previous_certificate_id) else {
-                    bail!(
-                        "Missing previous certificate '{}' for certificate in round {round} {gc_log}",
-                        fmt_id(previous_certificate_id)
-                    )
-                };
-                // Ensure the previous certificate is for the previous round.
-                if previous_certificate.round() != previous_round {
-                    bail!("Round {round} certificate contains a round {previous_round} certificate {gc_log}")
-                }
-                // Ensure the previous author is new.
-                if previous_authors.contains(&previous_certificate.author()) {
-                    bail!("Round {round} certificate contains a duplicate author {gc_log}")
-                }
-                // Insert the author of the previous certificate.
-                previous_authors.insert(previous_certificate.author());
-            }
-            // Ensure the previous certificates have reached the quorum threshold.
-            if !previous_committee_lookback.is_quorum_threshold_reached(&previous_authors) {
-                bail!("Previous certificates for a batch in round {round} did not reach quorum threshold {gc_log}")
-            }
+            debug!(
+                "Skipped the previous certificates of a batch in round {round} - round {previous_round} is garbage collected (gc = {gc_round}) - {error}"
+            );
         }
 
         Ok(Some(missing_transmissions))
+    }
+
+    /// Checks the previous certificates of the given batch header, which are the ones of
+    /// `previous_round`; see [`Self::check_batch_header`] for the conditions.
+    ///
+    /// Hazard: garbage collection can remove the certificates of `previous_round` while this
+    /// runs. This then returns an error for a valid batch header. The caller must read the GC
+    /// round again, and ignore the error if that round has reached `previous_round`.
+    fn check_previous_certificates(
+        &self,
+        batch_header: &BatchHeader<N>,
+        previous_round: u64,
+        gc_log: &str,
+    ) -> Result<()> {
+        let round = batch_header.round();
+        // Retrieve the committee lookback for the previous round.
+        let Ok(previous_committee_lookback) = self.ledger.get_committee_lookback_for_round(previous_round) else {
+            bail!("Missing committee for the previous round {previous_round} in storage {gc_log}")
+        };
+        // Ensure the previous round certificates exists in storage.
+        if !self.contains_certificates_for_round(previous_round) {
+            bail!("Missing certificates for the previous round {previous_round} in storage {gc_log}")
+        }
+        // Ensure the number of previous certificate IDs is at or below the number of committee members.
+        // Skipped under a dev committee: its first rounds reference the real committee's
+        // certificates, which can outnumber it.
+        #[cfg(feature = "dev-committee-override")]
+        let under_dev_committee = self.ledger.dev_committee_for_round(previous_round)?.is_some();
+        #[cfg(not(feature = "dev-committee-override"))]
+        let under_dev_committee = false;
+        if !under_dev_committee
+            && batch_header.previous_certificate_ids().len() > previous_committee_lookback.num_members()
+        {
+            bail!("Too many previous certificates for round {round} {gc_log}")
+        }
+        // Initialize a set of the previous authors.
+        let mut previous_authors = HashSet::with_capacity(batch_header.previous_certificate_ids().len());
+        // Ensure storage contains all declared previous certificates (up to GC).
+        for previous_certificate_id in batch_header.previous_certificate_ids() {
+            // Retrieve the previous certificate.
+            let Some(previous_certificate) = self.get_certificate(*previous_certificate_id) else {
+                bail!(
+                    "Missing previous certificate '{}' for certificate in round {round} {gc_log}",
+                    fmt_id(previous_certificate_id)
+                )
+            };
+            // Ensure the previous certificate is for the previous round.
+            if previous_certificate.round() != previous_round {
+                bail!("Round {round} certificate contains a round {previous_round} certificate {gc_log}")
+            }
+            // Ensure the previous author is new.
+            if previous_authors.contains(&previous_certificate.author()) {
+                bail!("Round {round} certificate contains a duplicate author {gc_log}")
+            }
+            // Insert the author of the previous certificate.
+            previous_authors.insert(previous_certificate.author());
+        }
+        // Ensure the previous certificates have reached the quorum threshold.
+        if !previous_committee_lookback.is_quorum_threshold_reached(&previous_authors) {
+            bail!("Previous certificates for a batch in round {round} did not reach quorum threshold {gc_log}")
+        }
+        Ok(())
     }
 
     /// Check the validity of a certificate coming from another validator.

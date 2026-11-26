@@ -241,7 +241,6 @@ fn insertion_during_garbage_collection_of_its_round() {
 /// A task inserts a certificate while garbage collection removes the round before it, which holds
 /// the certificates that it refers to. The certificate is above the GC round, so it is stored.
 #[test]
-#[ignore = "fails: the insertion checks the previous certificates against a GC round that it read before the sweep"]
 fn insertion_during_garbage_collection_of_the_previous_round() {
     let mut fixture = Fixture::new();
     let previous_certificates: Vec<_> =
