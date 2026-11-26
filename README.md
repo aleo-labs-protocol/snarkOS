@@ -19,6 +19,7 @@
   * [3.1 Run an Aleo Client](#31-run-an-aleo-client)
   * [3.2 Run an Aleo Validator](#32-run-an-aleo-validator)
   * [3.3 Run an Aleo Prover](#33-run-an-aleo-prover)
+  * [3.4 Prune Old Authority Data](#34-prune-old-authority-data)
 * [4. FAQs](#4-faqs)
 * [5. Command Line Interface](#5-command-line-interface)
 * [6. Development Guide](#6-development-guide)
@@ -271,6 +272,24 @@ Enter the Aleo Prover account private key:
 APrivateKey1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
+## 3.4 Prune Old Authority Data
+
+Start a client or validator with `--prune-authority-data` to keep the authority data (the certificates) of
+only the last 500,000 blocks, about two weeks. Older blocks keep their headers and transactions.
+`/v2/block/{height}` answers `410 Gone` for them, and peers fetch them from other nodes.
+
+The first start with the flag prunes the existing ledger before the node joins the network. This can take a
+while on a large ledger. A pruned ledger that is opened without the flag keeps working and stops pruning.
+
+The flag requires router message version 34 (consensus version V23), which lets peers learn which blocks a
+node serves. On a network that has not scheduled V23, the node refuses to start. Until V23 activates, peers
+still on message version 33 stay connected, and those that request blocks the node has pruned are
+disconnected.
+
+If no peer serves the blocks a node needs, the node shuts down after 5 minutes, so that a restart syncs them
+from the CDN. With `--nocdn`, or `--dev` without `--cdn`, it keeps waiting: add a peer with `--peers`, or
+restore a ledger snapshot.
+
 ## 4. FAQs
 
 ### 1. My node is unable to compile.
@@ -448,10 +467,13 @@ The following are the options for the `snarkos start` command:
           For validators, it also contains the latest proposal cache, which is required to participate in consensus.
 
       --cdn <CDN>
-          Enables the node to prefetch initial blocks from a CDN
+          Enables the node to prefetch initial blocks from a CDN, also with `--dev` (which otherwise disables it)
 
       --nocdn
           If the flag is set, the node will not prefetch from a CDN
+
+      --prune-authority-data
+          Prune the authority data (certificates) of blocks older than the retention window. See "Prune Old Authority Data"
 
       --dev <DEV>
           Enables development mode used to set up test networks.

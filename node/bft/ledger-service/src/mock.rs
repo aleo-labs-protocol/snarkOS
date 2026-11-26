@@ -165,6 +165,11 @@ impl<N: Network> LedgerService<N> for MockLedgerService<N> {
         unreachable!("MockLedgerService does not support get_blocks")
     }
 
+    /// Returns `None`: the mock ledger prunes nothing.
+    fn authority_pruned_below(&self) -> Result<Option<u32>> {
+        Ok(None)
+    }
+
     /// Returns the solution for the given solution ID.
     fn get_solution(&self, _solution_id: &SolutionID<N>) -> Result<Option<Solution<N>>> {
         unreachable!("MockLedgerService does not support get_solution")

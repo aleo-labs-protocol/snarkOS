@@ -110,6 +110,10 @@ pub trait LedgerService<N: Network>: std::fmt::Debug + Send + Sync {
     /// The range is inclusive of the start and exclusive of the end.
     fn get_blocks(&self, heights: Range<u32>) -> Result<Vec<Block<N>>>;
 
+    /// Returns the authority-pruning watermark `W`: the blocks at heights `1..W` have had their
+    /// authority pruned and cannot be served. `None` if nothing has been pruned.
+    fn authority_pruned_below(&self) -> Result<Option<u32>>;
+
     /// Returns the solution for the given solution ID, or `None` if no such solution exists.
     fn get_solution(&self, solution_id: &SolutionID<N>) -> Result<Option<Solution<N>>>;
 

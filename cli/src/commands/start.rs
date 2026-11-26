@@ -21,11 +21,12 @@ use crate::helpers::{
 use snarkos_account::Account;
 use snarkos_display::Display;
 use snarkos_node::{
+    AuthorityRetention,
     Node,
     bft::MEMORY_POOL_PORT,
     network::{NodeType, bootstrap_peers},
     rest::{DEFAULT_REST_PORT, RestVerificationLimits},
-    router::DEFAULT_NODE_PORT,
+    router::{DEFAULT_NODE_PORT, messages::Message},
 };
 use snarkos_utilities::{DevHotswapConfig, NodeDataDir, SignalHandler, jwt_secret_file, node_data};
 
@@ -38,7 +39,14 @@ use snarkvm::{
     ledger::{
         block::Block,
         committee::{Committee, MIN_DELEGATOR_STAKE, MIN_VALIDATOR_STAKE},
-        store::{ConsensusStore, StorageMode, aleo_dir, aleo_ledger_dir, helpers::memory::ConsensusMemory},
+        store::{
+            AUTHORITY_RETENTION_BLOCKS,
+            ConsensusStore,
+            StorageMode,
+            aleo_dir,
+            aleo_ledger_dir,
+            helpers::memory::ConsensusMemory,
+        },
     },
     prelude::{FromBytes, Itertools, ToBits, ToBytes},
     synthesizer::VM,
@@ -341,13 +349,17 @@ pub struct Start {
     #[clap(long)]
     pub auto_db_checkpoints: Option<PathBuf>,
 
-    /// Enables the node to prefetch initial blocks from a CDN
+    /// Enables the node to prefetch initial blocks from a CDN, also with `--dev` (which otherwise disables it)
     #[clap(long, conflicts_with = "nocdn")]
     pub cdn: Option<http::Uri>,
 
     /// If the flag is set, the node will not prefetch from a CDN
     #[clap(long)]
     pub nocdn: bool,
+
+    /// Prune the authority data (certificates) of blocks older than the retention window. See "Prune Old Authority Data"
+    #[clap(long)]
+    pub prune_authority_data: bool,
 
     /// Enables development mode used to set up test networks.
     ///
@@ -381,6 +393,11 @@ pub struct Start {
     /// If development mode is enabled, specify whether to run the node on a production ledger.
     #[clap(long, group = "dev_flags", requires = "dev_num_validators", default_value_t = false)]
     pub dev_on_prod: bool,
+
+    /// If development mode is enabled, set how many recent blocks' authority data this node keeps with
+    /// `--prune-authority-data`.
+    #[clap(long, group = "dev_flags", requires = "prune_authority_data", hide = true)]
+    pub dev_authority_retention_blocks: Option<u32>,
 
     /// If the flag is set, the node will attempt to automatically migrate the node data to the new format.
     #[clap(long)]
@@ -482,34 +499,58 @@ impl Start {
         Ok(Some(url))
     }
 
+    /// Returns how much authority data the node keeps.
+    fn parse_authority_retention<N: Network>(&self) -> Result<AuthorityRetention> {
+        self.parse_authority_retention_with::<N>(Message::<N>::latest_message_version())
+    }
+
+    /// Returns how much authority data the node keeps on a network whose latest scheduled router
+    /// message version is `latest_message_version`. Pruning is refused until
+    /// `Message::STATUS_MESSAGE_VERSION` is scheduled, as peers learn which blocks a node serves only
+    /// from its status replies and Ping floors. Until that version activates, peers on older
+    /// versions stay connected, and those that request blocks below the watermark are disconnected.
+    fn parse_authority_retention_with<N: Network>(&self, latest_message_version: u32) -> Result<AuthorityRetention> {
+        if !self.prune_authority_data {
+            return Ok(AuthorityRetention::default());
+        }
+        if !matches!(self.parse_node_type(), NodeType::Client | NodeType::Validator) {
+            bail!("`--prune-authority-data` prunes the ledger and is only supported on a client or validator");
+        }
+        let status_version = Message::<N>::STATUS_MESSAGE_VERSION;
+        ensure!(
+            latest_message_version >= status_version,
+            "--prune-authority-data needs router message version {status_version} (ConsensusVersion::V23), which \
+             this network has not scheduled."
+        );
+        AuthorityRetention::prune::<N>(self.dev_authority_retention_blocks.unwrap_or(AUTHORITY_RETENTION_BLOCKS))
+    }
+
     /// Returns the CDN to prefetch initial blocks from, or `None` if fetching from the CDN is disabled.
     fn parse_cdn<N: Network>(&self) -> Result<Option<http::Uri>> {
-        // Disable CDN if:
-        //  1. The node is in development mode.
-        //  2. The user has explicitly disabled CDN.
-        //  3. The node is a prover (no need to sync).
-        let no_cdn_reasons = [("--dev", self.dev.is_some()), ("--nocdn", self.nocdn), ("--prover", self.prover)]
+        // Disable CDN if the user has explicitly disabled it, or the node is a prover (no need to sync).
+        let no_cdn_reasons = [("--nocdn", self.nocdn), ("--prover", self.prover)]
             .into_iter()
             .filter_map(|(reason, flag_set)| flag_set.then_some(reason))
             .join(" and ");
         if !no_cdn_reasons.is_empty() {
             info!("CDN disabled because the following flags are set: {no_cdn_reasons}.");
-            Ok(None)
+            return Ok(None);
         }
-        // Enable the CDN otherwise.
-        else {
-            // Determine the CDN URL.
-            match &self.cdn {
-                // Use the provided CDN URL if it is not empty.
-                Some(cdn) => match cdn.to_string().is_empty() {
-                    true => Ok(None),
-                    false => Ok(Some(cdn.clone())),
-                },
-                // If no CDN URL is provided, determine the CDN URL based on the network ID.
-                None => {
-                    let uri = format!("{}/{}", snarkos_node_cdn::CDN_BASE_URL, N::SHORT_NAME);
-                    Ok(Some(http::Uri::try_from(&uri).with_context(|| "Unexpected error")?))
-                }
+        match &self.cdn {
+            // Use the provided CDN URL if it is not empty, even in development mode.
+            Some(cdn) => match cdn.to_string().is_empty() {
+                true => Ok(None),
+                false => Ok(Some(cdn.clone())),
+            },
+            // Development mode does not use the default CDN.
+            None if self.dev.is_some() => {
+                info!("CDN disabled because --dev is set and no --cdn is given.");
+                Ok(None)
+            }
+            // Otherwise, determine the CDN URL based on the network ID.
+            None => {
+                let uri = format!("{}/{}", snarkos_node_cdn::CDN_BASE_URL, N::SHORT_NAME);
+                Ok(Some(http::Uri::try_from(&uri).with_context(|| "Unexpected error")?))
             }
         }
     }
@@ -805,6 +846,8 @@ impl Start {
             bail!("The 'dev' flag is set, but the 'dev-network' feature is not enabled");
         }
 
+        let authority_retention = self.parse_authority_retention::<N>()?;
+
         // Parse the trusted peers to connect to.
         let mut trusted_peers = self.parse_trusted_addrs(&self.peers)?;
         // Parse the trusted validators to connect to.
@@ -1000,9 +1043,9 @@ impl Start {
 
         // Initialize the node.
         let node = match node_type {
-            NodeType::Validator => Node::new_validator(node_ip, self.bft, rest_ip, self.rest_rps, rest_verification_limits, history_api_url.clone(), self.history_json, account, &trusted_peers, &trusted_validators, genesis, cdn, storage_mode, node_data_dir, self.trusted_peers_only, self.auto_db_checkpoints.clone(), dev_txs, self.dev, dev_hotswap_config, self.proposal_spent_limit_multiplier, signal_handler.clone()).await,
+            NodeType::Validator => Node::new_validator(node_ip, self.bft, rest_ip, self.rest_rps, rest_verification_limits, history_api_url.clone(), self.history_json, authority_retention, account, &trusted_peers, &trusted_validators, genesis, cdn, storage_mode, node_data_dir, self.trusted_peers_only, self.auto_db_checkpoints.clone(), dev_txs, self.dev, dev_hotswap_config, self.proposal_spent_limit_multiplier, signal_handler.clone()).await,
             NodeType::Prover => Node::new_prover(node_ip, account, &trusted_peers, genesis, node_data_dir, self.trusted_peers_only, self.dev, signal_handler.clone()).await,
-            NodeType::Client => Node::new_client(node_ip, rest_ip, self.rest_rps, rest_verification_limits, history_api_url.clone(), self.history_json, account, &trusted_peers, genesis, cdn, storage_mode, node_data_dir, self.trusted_peers_only, self.auto_db_checkpoints.clone(), self.dev, signal_handler.clone()).await,
+            NodeType::Client => Node::new_client(node_ip, rest_ip, self.rest_rps, rest_verification_limits, history_api_url.clone(), self.history_json, authority_retention, account, &trusted_peers, genesis, cdn, storage_mode, node_data_dir, self.trusted_peers_only, self.auto_db_checkpoints.clone(), self.dev, signal_handler.clone()).await,
             NodeType::BootstrapClient => Node::new_bootstrap_client(node_ip, account, *genesis.header(), genesis.hash(), self.dev).await,
         }?;
 
@@ -1354,6 +1397,46 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_authority_retention() {
+        let status_version = Message::<CurrentNetwork>::STATUS_MESSAGE_VERSION;
+        let try_parse = |args: &[&str]| Start::try_parse_from(["snarkos"].iter().chain(args));
+        // Parses on a network that has scheduled status replies.
+        let parse =
+            |args: &[&str]| try_parse(args).unwrap().parse_authority_retention_with::<CurrentNetwork>(status_version);
+        assert_eq!(parse(&[]).unwrap(), AuthorityRetention::default());
+        let standard = AuthorityRetention::prune::<CurrentNetwork>(AUTHORITY_RETENTION_BLOCKS).unwrap();
+        assert_eq!(parse(&["--prune-authority-data"]).unwrap(), standard);
+        assert_eq!(parse(&["--validator", "--prune-authority-data"]).unwrap(), standard);
+        // Only clients and validators prune.
+        assert!(parse(&["--prover", "--prune-authority-data"]).is_err());
+        assert!(parse(&["--bootstrap-client", "--prune-authority-data"]).is_err());
+
+        // A devnet window sets what this node keeps, down to snarkVM's minimum.
+        let min = snarkvm::ledger::store::min_authority_retention_blocks::<CurrentNetwork>();
+        let window = |blocks: u32| {
+            ["--dev", "0", "--prune-authority-data", "--dev-authority-retention-blocks", &blocks.to_string()]
+                .map(String::from)
+        };
+        let parse_window = |blocks| {
+            let args = window(blocks);
+            Start::try_parse_from(["snarkos"].iter().map(|s| s.to_string()).chain(args))
+                .unwrap()
+                .parse_authority_retention_with::<CurrentNetwork>(status_version)
+        };
+        assert_eq!(parse_window(min).unwrap(), AuthorityRetention::prune::<CurrentNetwork>(min).unwrap());
+        assert!(parse_window(min - 1).is_err());
+        // The devnet window requires `--dev` and `--prune-authority-data`.
+        assert!(try_parse(&["--prune-authority-data", "--dev-authority-retention-blocks", "300"]).is_err());
+        assert!(try_parse(&["--dev", "0", "--dev-authority-retention-blocks", "300"]).is_err());
+
+        // Pruning is refused before status replies are scheduled, and only then.
+        let start = try_parse(&["--prune-authority-data"]).unwrap();
+        let error = start.parse_authority_retention_with::<CurrentNetwork>(status_version - 1).unwrap_err();
+        assert!(error.to_string().contains("has not scheduled"), "{error}");
+        assert!(try_parse(&[]).unwrap().parse_authority_retention_with::<CurrentNetwork>(status_version - 1).is_ok());
+    }
+
+    #[test]
     fn test_parse_cdn() -> Result<()> {
         // Validator (Prod)
         let config = Start::try_parse_from(["snarkos", "--validator", "--private-key", "aleo1xx"].iter()).unwrap();
@@ -1373,7 +1456,7 @@ mod tests {
             ["snarkos", "--dev", "0", "--validator", "--private-key", "aleo1xx", "--cdn", "url"].iter(),
         )
         .unwrap();
-        assert!(config.parse_cdn::<CurrentNetwork>()?.is_none());
+        assert!(config.parse_cdn::<CurrentNetwork>()?.is_some());
         let config = Start::try_parse_from(
             ["snarkos", "--dev", "0", "--validator", "--private-key", "aleo1xx", "--nocdn"].iter(),
         )?;
@@ -1419,7 +1502,7 @@ mod tests {
             ["snarkos", "--dev", "0", "--client", "--private-key", "aleo1xx", "--cdn", "url"].iter(),
         )
         .unwrap();
-        assert!(config.parse_cdn::<CurrentNetwork>()?.is_none());
+        assert!(config.parse_cdn::<CurrentNetwork>()?.is_some());
         let config =
             Start::try_parse_from(["snarkos", "--dev", "0", "--client", "--private-key", "aleo1xx", "--nocdn"].iter())
                 .unwrap();
@@ -1437,7 +1520,7 @@ mod tests {
         let config = Start::try_parse_from(["snarkos", "--dev", "0"].iter()).unwrap();
         assert!(config.parse_cdn::<CurrentNetwork>()?.is_none());
         let config = Start::try_parse_from(["snarkos", "--dev", "0", "--cdn", "url"].iter()).unwrap();
-        assert!(config.parse_cdn::<CurrentNetwork>()?.is_none());
+        assert!(config.parse_cdn::<CurrentNetwork>()?.is_some());
         let config = Start::try_parse_from(["snarkos", "--dev", "0", "--nocdn"].iter()).unwrap();
         assert!(config.parse_cdn::<CurrentNetwork>()?.is_none());
 

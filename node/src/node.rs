@@ -14,6 +14,7 @@
 // limitations under the License.
 
 use crate::{
+    AuthorityRetention,
     BootstrapClient,
     Client,
     Prover,
@@ -94,6 +95,7 @@ impl<N: Network> Node<N> {
         rest_verification_limits: RestVerificationLimits,
         history_api_url: Option<String>,
         history_json: bool,
+        authority_retention: AuthorityRetention,
         account: Account<N>,
         trusted_peers: &[SocketAddr],
         trusted_validators: &[SocketAddr],
@@ -118,6 +120,7 @@ impl<N: Network> Node<N> {
                 rest_verification_limits,
                 history_api_url,
                 history_json,
+                authority_retention,
                 account,
                 trusted_peers,
                 trusted_validators,
@@ -186,6 +189,7 @@ impl<N: Network> Node<N> {
         rest_verification_limits: RestVerificationLimits,
         history_api_url: Option<String>,
         history_json: bool,
+        authority_retention: AuthorityRetention,
         account: Account<N>,
         trusted_peers: &[SocketAddr],
         genesis: Block<N>,
@@ -205,6 +209,7 @@ impl<N: Network> Node<N> {
                 rest_verification_limits,
                 history_api_url,
                 history_json,
+                authority_retention,
                 account,
                 trusted_peers,
                 genesis,
