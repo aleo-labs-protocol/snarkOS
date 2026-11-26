@@ -4182,7 +4182,16 @@ mod tests {
     #[cfg(shuttle)]
     mod shuttle_tests {
         use super::*;
-        use snarkos_utilities::{shuttle::future::block_on, shuttle_test::check};
+        use crate::helpers::init_primary_channels;
+        use snarkos_utilities::{
+            shuttle::future::block_on,
+            shuttle_test::{check, check_async},
+            time::sleep,
+        };
+        use std::{
+            sync::atomic::{AtomicUsize, Ordering},
+            time::Duration,
+        };
 
         /// The number of task orders that each test runs with each scheduler.
         const ITERATIONS: usize = 500;
@@ -4245,6 +4254,223 @@ mod tests {
                     assert_eq!((certificates[0].author(), certificates[0].batch_id()), (author, batch_id));
                     assert_eq!(*primary.proposed_batch.read(), ProposedBatchState::None);
                 });
+            });
+        }
+
+        /// Returns the certificate of each peer of the primary for round 1, with no transmissions.
+        fn sample_peer_certificates(
+            accounts: &[(SocketAddr, Account<CurrentNetwork>)],
+            committee: &Committee<CurrentNetwork>,
+            rng: &mut TestRng,
+        ) -> Vec<(SocketAddr, BatchCertificate<CurrentNetwork>)> {
+            accounts
+                .iter()
+                .skip(1)
+                .map(|(peer_ip, account)| {
+                    let batch_header = BatchHeader::new(
+                        account.private_key(),
+                        1,
+                        now(),
+                        committee.id(),
+                        Default::default(),
+                        Default::default(),
+                        rng,
+                    )
+                    .unwrap();
+                    let signatures =
+                        peer_signatures_for_batch(account.address(), accounts, batch_header.batch_id(), rng);
+                    (*peer_ip, BatchCertificate::from(batch_header, signatures).unwrap())
+                })
+                .collect()
+        }
+
+        /// Runs a primary with its handlers from round 1, with one solution in its worker. Its
+        /// peers answer the batch that it proposes: their signatures for the batch arrive
+        /// `signature_delay` after the proposal, and their certificates of round 1 arrive
+        /// `certificate_delay` after it. The certificates of the peers end round 1.
+        ///
+        /// Checks the primary once it is at rest, and returns the number of executions in which it
+        /// certified its batch of round 1, and the number of those in which the batch expired.
+        fn peers_answer_the_proposal(signature_delay: Duration, certificate_delay: Duration) -> (usize, usize) {
+            /// The time that the primary has to propose its batch of round 2, after the last event.
+            const TIME_TO_REST: Duration = Duration::from_millis(2 * MAX_BATCH_DELAY.as_millis() as u64);
+
+            let mut rng = TestRng::default();
+            let (accounts, committee) = sample_committee(&mut rng);
+            let author = accounts[0].1.address();
+            let height = CurrentNetwork::CONSENSUS_HEIGHT(ConsensusVersion::V1).unwrap();
+            let (solution_id, solution) = sample_unconfirmed_solution(&mut rng);
+            let transmission_id =
+                TransmissionID::from((solution_id, solution.to_checksum::<CurrentNetwork>().unwrap()));
+
+            let peer_certificates = sample_peer_certificates(&accounts, &committee, &mut rng);
+
+            let num_certified = Arc::new(AtomicUsize::new(0));
+            let num_expired = Arc::new(AtomicUsize::new(0));
+            let (num_certified_, num_expired_) = (num_certified.clone(), num_expired.clone());
+
+            check_async(ITERATIONS, move || {
+                let (accounts, committee, solution) = (accounts.clone(), committee.clone(), solution.clone());
+                let peer_certificates = peer_certificates.clone();
+                let (num_certified, num_expired) = (num_certified_.clone(), num_expired_.clone());
+                async move {
+                    let primary = primary_with_committee(0, &accounts, committee, height);
+                    map_account_addresses(&primary, &accounts);
+                    primary.workers()[0].process_unconfirmed_solution(solution_id, solution).await.unwrap();
+                    let (sender, receiver) = init_primary_channels();
+                    primary.start_handlers(receiver);
+
+                    // The proposal task proposes the batch of round 1.
+                    primary.wait_for_proposal().await;
+                    let batch_id = primary.proposed_batch.read().as_proposal().unwrap().batch_id();
+                    let signatures: Vec<_> = accounts
+                        .iter()
+                        .skip(1)
+                        .map(|(peer_ip, account)| {
+                            let signature = account.sign(&[batch_id], &mut rand::rng()).unwrap();
+                            (*peer_ip, BatchSignature::new(batch_id, signature))
+                        })
+                        .collect();
+
+                    let signatures_arrive = {
+                        let sender = sender.tx_batch_signature.clone();
+                        tokio::spawn(async move {
+                            sleep(signature_delay).await;
+                            for signature in signatures {
+                                sender.send(signature).await.unwrap();
+                            }
+                        })
+                    };
+                    let certificates_arrive = {
+                        let sender = sender.tx_batch_certified.clone();
+                        tokio::spawn(async move {
+                            sleep(certificate_delay).await;
+                            for (peer_ip, certificate) in peer_certificates {
+                                sender.send((peer_ip, Data::Object(certificate))).await.unwrap();
+                            }
+                        })
+                    };
+                    signatures_arrive.await.unwrap();
+                    certificates_arrive.await.unwrap();
+                    sleep(TIME_TO_REST).await;
+
+                    // The certificates of the peers end round 1, and the primary proposes for round 2.
+                    assert_eq!(primary.current_round(), 2);
+                    let own_certificate = primary.storage.get_certificate_for_round_with_author(1, author);
+                    let num_certificates = primary.storage.get_certificates_for_round(1).len();
+                    assert_eq!(num_certificates, accounts.len() - 1 + own_certificate.iter().len());
+                    {
+                        let proposed_batch = primary.proposed_batch.read();
+                        let Some(proposal) = proposed_batch.as_proposal() else {
+                            panic!("the primary has no batch for round 2: {:?}", *proposed_batch);
+                        };
+                        assert_eq!(proposal.round(), 2);
+
+                        // The solution is in one place.
+                        let is_stored = primary.storage.contains_retrievable_transmission(transmission_id);
+                        let is_proposed = proposal.contains_transmission(transmission_id);
+                        let is_ready = primary.workers()[0].transmission_ids().contains(&transmission_id);
+                        match &own_certificate {
+                            Some(certificate) => {
+                                assert_eq!(certificate.batch_id(), batch_id);
+                                assert!(proposal.batch_header().previous_certificate_ids().contains(&certificate.id()));
+                                assert_eq!((is_stored, is_proposed, is_ready), (true, false, false));
+                                num_certified.fetch_add(1, Ordering::Relaxed);
+                            }
+                            // The batch of round 2 has the solution, unless the primary built it
+                            // before the expired batch gave the solution back to the worker.
+                            None => {
+                                assert!(!is_stored);
+                                assert_ne!(is_proposed, is_ready);
+                                num_expired.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+
+                    // The handlers wait for events for ever. Let the execution end without them.
+                    primary.handles.lock().clear();
+                }
+            });
+
+            (num_certified.load(Ordering::Relaxed), num_expired.load(Ordering::Relaxed))
+        }
+
+        /// The signatures and the certificates of the peers arrive as soon as the primary
+        /// proposes. The primary certifies its batch, unless round 1 ends before the signatures
+        /// reach the quorum.
+        #[test]
+        fn peers_answer_with_the_proposal() {
+            let (num_certified, num_expired) = peers_answer_the_proposal(Duration::ZERO, Duration::ZERO);
+            assert!(num_certified > 0, "the signatures never came first");
+            assert!(num_expired > 0, "the certificates never came first");
+        }
+
+        /// The signatures and the certificates of the peers arrive at the instant at which the
+        /// timer of the round-increment task ends.
+        #[test]
+        fn peers_answer_at_the_round_timer() {
+            // The proposal task proposes `MIN_BATCH_DELAY` after the start of the round.
+            let delay = MAX_BATCH_DELAY - MIN_BATCH_DELAY;
+            let (num_certified, num_expired) = peers_answer_the_proposal(delay, delay);
+            assert!(num_certified > 0, "the signatures never came first");
+            assert!(num_expired > 0, "the certificates never came first");
+        }
+
+        /// The signatures and the certificates of the peers arrive at the instant at which the
+        /// proposal task sends the batch again.
+        #[test]
+        fn peers_answer_at_the_rebroadcast() {
+            let (num_certified, num_expired) = peers_answer_the_proposal(MAX_BATCH_DELAY, MAX_BATCH_DELAY);
+            assert!(num_certified > 0, "the signatures never came first");
+            assert!(num_expired > 0, "the certificates never came first");
+        }
+
+        /// The primary has certified its batch. The certificates of the peers arrive at the
+        /// instant at which the proposal task tries to send the batch again.
+        #[test]
+        fn certificates_arrive_at_the_rebroadcast() {
+            let (num_certified, num_expired) = peers_answer_the_proposal(Duration::ZERO, MAX_BATCH_DELAY);
+            assert!(num_certified > 0);
+            assert_eq!(num_expired, 0);
+        }
+
+        /// The certificates of the peers end round 1 at the instant at which the primary proposes
+        /// its batch of round 1. The primary is in round 2 from then on, so it proposes its batch
+        /// of round 2 as soon as `MIN_BATCH_DELAY` has elapsed since its last proposal.
+        #[test]
+        #[ignore = "fails: the proposal task clears its ready flag after it proposes, and loses the signal of a round that started in the meantime"]
+        fn round_ends_as_the_primary_proposes() {
+            let mut rng = TestRng::default();
+            let (accounts, committee) = sample_committee(&mut rng);
+            let height = CurrentNetwork::CONSENSUS_HEIGHT(ConsensusVersion::V1).unwrap();
+            let peer_certificates = sample_peer_certificates(&accounts, &committee, &mut rng);
+
+            check_async(ITERATIONS, move || {
+                let (accounts, committee) = (accounts.clone(), committee.clone());
+                let peer_certificates = peer_certificates.clone();
+                async move {
+                    let primary = primary_with_committee(0, &accounts, committee, height);
+                    map_account_addresses(&primary, &accounts);
+                    let (sender, receiver) = init_primary_channels();
+                    primary.start_handlers(receiver);
+
+                    // The proposal task proposes `MIN_BATCH_DELAY` after it starts.
+                    sleep(MIN_BATCH_DELAY).await;
+                    for (peer_ip, certificate) in peer_certificates {
+                        sender.tx_batch_certified.send((peer_ip, Data::Object(certificate))).await.unwrap();
+                    }
+                    sleep(MIN_BATCH_DELAY + Duration::from_millis(1)).await;
+
+                    assert_eq!(primary.current_round(), 2);
+                    {
+                        let proposed_batch = primary.proposed_batch.read();
+                        let round = proposed_batch.as_proposal().map(Proposal::round);
+                        assert_eq!(round, Some(2), "the primary has no batch for round 2: {:?}", *proposed_batch);
+                    }
+
+                    // The handlers wait for events for ever. Let the execution end without them.
+                    primary.handles.lock().clear();
+                }
             });
         }
     }
