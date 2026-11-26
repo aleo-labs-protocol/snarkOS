@@ -30,6 +30,3 @@ features = [ "sync" ]
 
 [features]
 default = [ ]
-
-[lints]
-workspace = true

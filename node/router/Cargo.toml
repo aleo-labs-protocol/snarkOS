@@ -140,6 +140,3 @@ features = [ "test-helpers" ]
 [dev-dependencies.snarkvm]
 workspace = true
 features = [ "test-helpers" ]
-
-[lints]
-workspace = true

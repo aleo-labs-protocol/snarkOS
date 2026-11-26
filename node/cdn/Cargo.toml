@@ -85,6 +85,3 @@ version = "0.14"
 
 [package.metadata.cargo-machete]
 ignored = ["serde"]
-
-[lints]
-workspace = true

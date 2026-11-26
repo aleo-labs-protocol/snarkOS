@@ -47,6 +47,3 @@ features = [ "rt" ]
 package = "shuttle-tokio-impl"
 version = "0.1.2"
 features = [ "rt" ]
-
-[lints]
-workspace = true

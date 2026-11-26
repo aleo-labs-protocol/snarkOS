@@ -83,6 +83,3 @@ features = [ "io-util", "macros", "rt-multi-thread" ]
 
 [build-dependencies.built]
 workspace = true
-
-[lints]
-workspace = true

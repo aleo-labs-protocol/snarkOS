@@ -43,8 +43,9 @@
 //!   crate that does not. A new crate that exchanges such a type with them needs the entries too.
 //! - Time is not real. `tokio::time::sleep` ends as soon as shuttle runs the task again, and
 //!   `tokio::time::timeout` ends only when the test expires it with `tokio::time::trigger_timeouts`.
-//! - snarkVM keeps its own locks. Shuttle does not see them: no switch happens at them, and a
-//!   test deadlocks if one thread waits for such a lock while its holder is switched out.
+//! - snarkVM keeps its own locks and the real `tokio`. Shuttle does not see them: no switch
+//!   happens at them, and a test deadlocks if one thread waits for such a lock while its holder
+//!   is switched out.
 //! - The two cfgs are mutually exclusive.
 //!
 //! The submodules mirror the layout of `locktick`. A lock's methods return the guard alias of

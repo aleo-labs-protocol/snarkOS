@@ -91,7 +91,6 @@ pub const PRIMARY_PING_INTERVAL: Duration = Duration::from_millis(2 * (MAX_BATCH
 /// The interval at which each worker broadcasts a ping to every other node.
 pub const WORKER_PING_INTERVAL: Duration = Duration::from_millis(4 * (MAX_BATCH_DELAY.as_millis() as u64));
 
-/// Runs the blocking `f` on the current thread; see `tokio::task::block_in_place`.
 #[cfg(not(shuttle))]
 pub(crate) use tokio::task::block_in_place;
 

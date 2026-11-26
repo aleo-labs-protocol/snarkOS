@@ -178,6 +178,3 @@ workspace = true
 ignored = [
   "serde_json", # Need to set preserve_order feature
 ]
-
-[lints]
-workspace = true

@@ -49,6 +49,3 @@ workspace = true
 
 [build-dependencies.built]
 workspace = true
-
-[lints]
-workspace = true

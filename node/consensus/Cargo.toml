@@ -93,6 +93,3 @@ features = [ "test-helpers" ]
 
 [dev-dependencies.tracing-test]
 workspace = true
-
-[lints]
-workspace = true

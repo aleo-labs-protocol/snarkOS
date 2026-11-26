@@ -4176,12 +4176,9 @@ mod tests {
         assert_eq!(state, ProposedBatchState::Certified(batch_id));
     }
 
-    /// Tests of the primary under the `shuttle` scheduler; see `snarkos_utilities::locks`.
+    /// Tests of the primary under the `shuttle` scheduler, which also picks the order in which
+    /// the tasks of a test run; see `snarkos_utilities::locks` for that build and its hazards.
     /// Run them with `cargo shuttle-test -p snarkos-node-bft --lib shuttle_tests`.
-    ///
-    /// In that build `tokio` is shuttle's implementation of it, so shuttle also picks the order
-    /// in which the tasks of a test run. Hazard: time is not real there, so a test must not
-    /// depend on a `sleep` or a `timeout`; see `snarkos_utilities::locks`.
     #[cfg(shuttle)]
     mod shuttle_tests {
         use super::*;

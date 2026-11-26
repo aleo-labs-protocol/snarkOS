@@ -114,6 +114,3 @@ features = [ "env-filter", "fmt" ]
 
 [dev-dependencies.tracing-test]
 workspace = true
-
-[lints]
-workspace = true
