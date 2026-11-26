@@ -29,11 +29,12 @@ pub(super) trait BatchPropose: Send + Sync {
     /// Returns the current consensus round.
     fn current_round(&self) -> u64;
 
-    /// Attempts to propose a batch.
+    /// Attempts to propose a batch for the current round, which can be a later round than the
+    /// caller last saw.
     ///
-    /// Returns `Ok(true)` when a batch was successfully proposed, `Ok(false)` to retry, and
-    /// `Err` on an unexpected error.
-    async fn propose_batch(&self) -> Result<bool>;
+    /// Returns `Ok(Some(round))` when a batch was successfully proposed for `round`, `Ok(None)`
+    /// to retry, and `Err` on an unexpected error.
+    async fn propose_batch(&self) -> Result<Option<u64>>;
 }
 
 /// Manages batch proposal readiness and drives the batch proposal loop.
@@ -54,68 +55,104 @@ impl<N: Network> Clone for ProposalTask<N> {
 
 /// The inner state of a [`ProposalTask`], shared via `Arc`.
 struct ProposalTaskInner {
-    /// Tracks whether the primary is ready to propose a new batch.
+    /// The highest round that [`ProposalTask::signal`] named as ready for a batch proposal.
     ///
-    /// Initialized to `true` so round 1 can be proposed immediately without an explicit signal.
-    /// Set to `true` by [`ProposalTask::signal`] when a new round starts,
-    /// and reset to `false` after a batch is successfully proposed.
-    ready: watch::Sender<bool>,
+    /// The task is ready when this is above the round of its last proposal, so a proposal uses
+    /// up the signals of its round and of the rounds before it, and no later one. Hazard: a flag
+    /// that the task clears when it proposes cannot tell the two apart. It loses the signal of a
+    /// round that starts while the task proposes, or keeps one for a round that has its batch.
+    ready_round: watch::Sender<u64>,
+    /// Whether the task proposes its first batch without a signal, so that the primary can
+    /// propose in the round that it starts in.
+    is_ready_at_start: bool,
 }
 
 impl<N: Network> Default for ProposalTask<N> {
     fn default() -> Self {
-        let (ready, _) = watch::channel(true);
-        Self { inner: Arc::new(ProposalTaskInner { ready }), _phantom: PhantomData }
+        Self::new(true)
     }
 }
 
 impl<N: Network> ProposalTask<N> {
-    /// Signals that the primary is ready to propose a new batch for the current round.
+    fn new(is_ready_at_start: bool) -> Self {
+        let (ready_round, _) = watch::channel(0);
+        Self { inner: Arc::new(ProposalTaskInner { ready_round, is_ready_at_start }), _phantom: PhantomData }
+    }
+
+    /// Signals that the primary is ready to propose a new batch for `round`, the round that it
+    /// is in.
     ///
     /// Should be called from [`Primary::try_increment_to_the_next_round`] whenever the primary
     /// successfully advances to a new round.
-    pub fn signal(&self) {
-        self.inner.ready.send_replace(true);
+    pub fn signal(&self, round: u64) {
+        self.inner.ready_round.send_if_modified(|ready_round| {
+            let is_higher = round > *ready_round;
+            if is_higher {
+                *ready_round = round;
+            }
+            is_higher
+        });
     }
 
     /// Runs the batch proposal loop. This is intended to be spawned as a long-running task.
     ///
-    /// Each iteration covers one full round (wait → propose → wait for signatures).
+    /// Each iteration waits for a round to be ready, proposes a batch, and waits for its
+    /// signatures. It ends when the round of the batch ends. If the call that sends the batch
+    /// again proposes a batch for a later round, the iteration goes on with that round.
     /// The three stages are implemented as separate methods; see their doc-comments for details.
     pub(super) async fn run<P: BatchPropose + 'static>(self, primary: P) {
-        let mut ready_rx = self.inner.ready.subscribe();
+        let mut ready_rx = self.inner.ready_round.subscribe();
         let mut earliest_proposal = Instant::now() + MIN_BATCH_DELAY;
+        // The lowest signalled round that makes the task ready. It is the one after the round of
+        // the last proposal, or any round before the first proposal. A signal that the task has
+        // not used thus stays good for later rounds.
+        let mut min_ready_round = if self.inner.is_ready_at_start { 0 } else { 1 };
 
         loop {
             let round = primary.current_round();
             let round_start = Instant::now();
 
-            if !Self::wait_until_proposal_ready(&primary, &mut ready_rx, round, round_start, earliest_proposal).await {
+            if !Self::wait_until_proposal_ready(
+                &primary,
+                &mut ready_rx,
+                round,
+                min_ready_round,
+                round_start,
+                earliest_proposal,
+            )
+            .await
+            {
                 continue; // round changed; restart
             }
 
-            if !Self::propose(&primary, round).await {
+            let Some(mut proposed_round) = Self::propose(&primary, round).await else {
                 continue; // round changed; restart
+            };
+
+            loop {
+                earliest_proposal = Instant::now() + MIN_BATCH_DELAY;
+                min_ready_round = proposed_round.saturating_add(1);
+
+                match Self::wait_for_signatures(&primary, &mut ready_rx, proposed_round).await {
+                    Some(new_round) => proposed_round = new_round, // proposed for a later round
+                    None => break,
+                }
             }
-            earliest_proposal = Instant::now() + MIN_BATCH_DELAY;
-
-            // Reset readiness so the next round waits for an explicit signal.
-            self.inner.ready.send_replace(false);
-
-            Self::wait_for_signatures(&primary, &mut ready_rx, round).await;
         }
     }
 
     /// Stage 1: Wait until conditions are met to propose a batch.
     ///
     /// Blocks until the minimum spacing from the last successful proposal has elapsed, and either
-    /// `signal()` fires (leader cert arrived) or MAX_BATCH_DELAY expires since `round_start`.
+    /// `signal()` names `min_ready_round` or a later round (leader cert arrived), or
+    /// MAX_BATCH_DELAY expires since `round_start`.
     ///
     /// Returns `true` if ready to propose, `false` if the round changed (caller should restart).
     async fn wait_until_proposal_ready<P: BatchPropose>(
         primary: &P,
-        ready_rx: &mut watch::Receiver<bool>,
+        ready_rx: &mut watch::Receiver<u64>,
         round: u64,
+        min_ready_round: u64,
         round_start: Instant,
         earliest_proposal: Instant,
     ) -> bool {
@@ -135,7 +172,7 @@ impl<N: Network> ProposalTask<N> {
                     debug!("Did not receive leader certificate within MAX_BATCH_DELAY");
                     return true;
                 },
-                _ = Self::wait_until_ready(ready_rx) => {
+                _ = Self::wait_until_ready(ready_rx, min_ready_round) => {
                     return true;
                 },
                 _ = sleep(CREATE_BATCH_INTERVAL) => {
@@ -147,12 +184,12 @@ impl<N: Network> ProposalTask<N> {
 
     /// Stage 2: Propose a batch.
     ///
-    /// Calls `propose_batch()` until it returns `Ok(true)` (batch submitted to the network),
-    /// retrying from CREATE_BATCH_INTERVAL and backing off to at most MAX_BATCH_DELAY.
+    /// Calls `propose_batch()` until it submits a batch to the network, retrying from
+    /// CREATE_BATCH_INTERVAL and backing off to at most MAX_BATCH_DELAY.
     ///
-    /// Returns `true` if the batch was submitted, `false` if the round changed (caller should
-    /// restart).
-    async fn propose<P: BatchPropose>(primary: &P, round: u64) -> bool {
+    /// Returns the round of the batch if it was submitted, which can be a later round than
+    /// `round`. Returns `None` if the round changed before that (caller should restart).
+    async fn propose<P: BatchPropose>(primary: &P, round: u64) -> Option<u64> {
         let mut attempt = 1u32;
         let mut backoff = CREATE_BATCH_INTERVAL;
 
@@ -162,7 +199,7 @@ impl<N: Network> ProposalTask<N> {
             // "we were behind and have since caught up" check: a syncing node restarts here
             // rather than retrying against a round it has already moved past.
             if primary.current_round() != round {
-                return false;
+                return None;
             }
 
             if attempt > 1 {
@@ -173,7 +210,7 @@ impl<N: Network> ProposalTask<N> {
                 sleep(backoff).await;
                 backoff = (backoff.saturating_mul(2)).min(MAX_BATCH_DELAY);
                 if primary.current_round() != round {
-                    return false;
+                    return None;
                 }
             }
 
@@ -181,8 +218,8 @@ impl<N: Network> ProposalTask<N> {
             // critical path, and only one batch needs to be proposed at a time.
             debug!("Trying batch proposal for round {round} (attempt #{attempt})");
             match primary.propose_batch().await {
-                Ok(true) => return true, // batch submitted; proceed to Stage 3
-                Ok(false) => {}          // not ready yet; retry
+                Ok(Some(proposed_round)) => return Some(proposed_round), // batch submitted; proceed to Stage 3
+                Ok(None) => {}                                           // not ready yet; retry
                 Err(err) => {
                     warn!("{}", flatten_error(err.context("Cannot propose a batch")));
                 }
@@ -192,29 +229,37 @@ impl<N: Network> ProposalTask<N> {
         }
     }
 
-    /// Stage 3: Wait for the proposed batch to collect enough signatures.
+    /// Stage 3: Wait for the proposed batch of `round` to collect enough signatures.
     ///
     /// Periodically rebroadcasts the batch to non-signers (via `propose_batch`) at most once per
-    /// MAX_BATCH_DELAY until the round advances. Returns when the round changes.
-    async fn wait_for_signatures<P: BatchPropose>(primary: &P, ready_rx: &mut watch::Receiver<bool>, round: u64) {
+    /// MAX_BATCH_DELAY until the round advances. Returns `None` when the round changes.
+    ///
+    /// The round can change just before a rebroadcast, and `propose_batch` then proposes a
+    /// batch for the new round. Returns that round in this case.
+    async fn wait_for_signatures<P: BatchPropose>(
+        primary: &P,
+        ready_rx: &mut watch::Receiver<u64>,
+        round: u64,
+    ) -> Option<u64> {
         loop {
             if primary.current_round() != round {
-                return;
+                return None;
             }
 
             // Wait for the rebroadcast interval or an explicit round-advance signal,
             // whichever comes first.
             tokio::select! {
-                _ = Self::wait_until_ready(ready_rx) => return, // round advanced
+                _ = Self::wait_until_ready(ready_rx, round.saturating_add(1)) => return None, // round advanced
                 _ = sleep(MAX_BATCH_DELAY) => {}
             }
 
             if primary.current_round() != round {
-                return;
+                return None;
             }
 
             // Rebroadcast to non-signers (`propose_batch` handles this internally).
             match primary.propose_batch().await {
+                Ok(Some(new_round)) if new_round != round => return Some(new_round),
                 Ok(_) => {}
                 Err(err) => {
                     warn!("{}", flatten_error(err.context("Cannot rebroadcast a batch")));
@@ -223,17 +268,15 @@ impl<N: Network> ProposalTask<N> {
         }
     }
 
-    /// Waits until the readiness watch channel holds `true`. Returns immediately if it already does.
-    ///
-    /// Spurious wakeups (e.g. from a reset to `false`) are handled by re-checking the value in a loop.
-    async fn wait_until_ready(receiver: &mut watch::Receiver<bool>) {
+    /// Waits until `round` or a later round is signalled as ready. Returns immediately if one
+    /// already is.
+    async fn wait_until_ready(receiver: &mut watch::Receiver<u64>, round: u64) {
         loop {
-            // Fetch the `is_ready` value and return if it is true.
-            if *receiver.borrow_and_update() {
+            if *receiver.borrow_and_update() >= round {
                 return;
             }
 
-            // Block until the `is_value` changed, or the channel is closed.
+            // Block until the signalled round changed, or the channel is closed.
             if receiver.changed().await.is_err() {
                 return;
             }
@@ -253,7 +296,7 @@ mod tests {
         },
         time::Duration,
     };
-    use tokio::sync::Notify;
+    use tokio::sync::{Notify, mpsc};
 
     /// A minimal [`BatchPropose`] implementation for testing.
     ///
@@ -270,11 +313,11 @@ mod tests {
             1
         }
 
-        async fn propose_batch(&self) -> Result<bool> {
+        async fn propose_batch(&self) -> Result<Option<u64>> {
             self.propose_count.fetch_add(1, Ordering::SeqCst);
             self.proposed_notify.notify_one();
 
-            Ok(true)
+            Ok(Some(1))
         }
     }
 
@@ -295,13 +338,13 @@ mod tests {
             if n == 0 { 1 } else { 2 }
         }
 
-        async fn propose_batch(&self) -> Result<bool> {
+        async fn propose_batch(&self) -> Result<Option<u64>> {
             self.propose_count.fetch_add(1, Ordering::SeqCst);
-            Ok(true)
+            Ok(Some(2))
         }
     }
 
-    /// A [`BatchPropose`] implementation that returns `Ok(false)` a fixed number of times before
+    /// A [`BatchPropose`] implementation that returns `Ok(None)` a fixed number of times before
     /// succeeding.
     struct RetryProposer {
         retries_before_success: u32,
@@ -315,13 +358,13 @@ mod tests {
             1
         }
 
-        async fn propose_batch(&self) -> Result<bool> {
+        async fn propose_batch(&self) -> Result<Option<u64>> {
             let count = self.propose_count.fetch_add(1, Ordering::SeqCst) + 1;
             if count <= self.retries_before_success {
-                Ok(false)
+                Ok(None)
             } else {
                 self.proposed_notify.notify_one();
-                Ok(true)
+                Ok(Some(1))
             }
         }
     }
@@ -330,8 +373,7 @@ mod tests {
     #[cfg_attr(not(shuttle), tokio::test)]
     async fn test_proposal_task_calls_propose_batch_on_signal() {
         // Start with the task not ready so the initial signal is the trigger.
-        let (ready, _) = watch::channel(false);
-        let task = ProposalTask::<MainnetV0> { inner: Arc::new(ProposalTaskInner { ready }), _phantom: PhantomData };
+        let task = ProposalTask::<MainnetV0>::new(false);
 
         let proposed_notify = Arc::new(Notify::new());
         let propose_count = Arc::new(AtomicU32::new(0));
@@ -346,7 +388,7 @@ mod tests {
         assert_eq!(propose_count.load(Ordering::SeqCst), 0, "propose_batch called before signal");
 
         // Signal readiness — the proposal loop should wake up and call propose_batch.
-        task.signal();
+        task.signal(1);
 
         snarkos_utilities::time::timeout(std::time::Duration::from_secs(5), proposed_notify.notified())
             .await
@@ -369,8 +411,7 @@ mod tests {
         };
 
         // Start not-ready so the task parks in round 2's inner loop without proposing round 1.
-        let (ready, _) = watch::channel(false);
-        let task = ProposalTask::<MainnetV0> { inner: Arc::new(ProposalTaskInner { ready }), _phantom: PhantomData };
+        let task = ProposalTask::<MainnetV0>::new(false);
 
         tokio::spawn(task.run(proposer));
 
@@ -383,7 +424,7 @@ mod tests {
 
     /// Tests the following scenario
     ///
-    ///   1. A batch was already certified for the current round, so readiness is `false`.
+    ///   1. A batch was already certified for the current round, so the task needs a signal.
     ///   2. `signal()` is **never** called externally — the BFT cannot advance the round until
     ///      `propose_batch()` is called (which internally checks the leader-certificate timer).
     #[cfg_attr(not(shuttle), test_log::test(tokio::test))]
@@ -391,13 +432,12 @@ mod tests {
         // Start NOT ready: simulates a batch that was already certified for the round but the
         // round has not yet advanced (the even-round leader cert was missing — e.g. the elected
         // leader was one of the freshly-reset minority validators).
-        let (ready, _) = watch::channel(false);
-        let task = ProposalTask::<MainnetV0> { inner: Arc::new(ProposalTaskInner { ready }), _phantom: PhantomData };
+        let task = ProposalTask::<MainnetV0>::new(false);
 
         let proposed_notify = Arc::new(Notify::new());
         let propose_count = Arc::new(AtomicU32::new(0));
 
-        // A proposer that stays on round 1 and returns Ok(true) on every call to
+        // A proposer that stays on round 1 and returns `Ok(Some(1))` on every call to
         // propose_batch(), simulating try_advance_to_next_round finding the leader-certificate
         // timer expired and advancing the round without an external signal().
         struct NoSignalProposer {
@@ -411,10 +451,10 @@ mod tests {
                 1
             }
 
-            async fn propose_batch(&self) -> Result<bool> {
+            async fn propose_batch(&self) -> Result<Option<u64>> {
                 self.propose_count.fetch_add(1, Ordering::SeqCst);
                 self.proposed_notify.notify_one();
-                Ok(true)
+                Ok(Some(1))
             }
         }
 
@@ -434,20 +474,19 @@ mod tests {
     }
 
     /// After the leader-certificate timer fires (MAX_BATCH_DELAY elapses without an explicit
-    /// `signal()`), the task should still retry `propose_batch` when it returns `Ok(false)` and
-    /// eventually succeed once it returns `Ok(true)`.
+    /// `signal()`), the task should still retry `propose_batch` when it returns `Ok(None)` and
+    /// eventually succeed once it returns the round.
     ///
     /// This models the real primary: when a round is already certified but the round has not yet
     /// advanced (e.g. the elected leader was a freshly-reset minority validator), `propose_batch`
-    /// returns `Ok(false)` until `try_advance_to_next_round` can make progress.
+    /// returns `Ok(None)` until `try_advance_to_next_round` can make progress.
     #[cfg_attr(not(shuttle), test_log::test(tokio::test))]
     async fn test_proposal_task_retries_after_leader_timeout() {
         const RETRIES: u32 = 2;
 
         // Start NOT ready — no external signal will be sent. The task must wait for
         // MAX_BATCH_DELAY to fire, then retry until propose_batch succeeds.
-        let (ready, _) = watch::channel(false);
-        let task = ProposalTask::<MainnetV0> { inner: Arc::new(ProposalTaskInner { ready }), _phantom: PhantomData };
+        let task = ProposalTask::<MainnetV0>::new(false);
 
         let proposed_notify = Arc::new(Notify::new());
         let propose_count = Arc::new(AtomicU32::new(0));
@@ -470,7 +509,7 @@ mod tests {
         assert!(propose_count.load(Ordering::SeqCst) > RETRIES, "expected at least {} total attempts", RETRIES + 1);
     }
 
-    /// When `propose_batch` returns `Ok(false)`, the task retries within the same round until
+    /// When `propose_batch` returns `Ok(None)`, the task retries within the same round until
     /// it succeeds.
     #[cfg_attr(not(shuttle), tokio::test)]
     async fn test_proposal_task_retries_on_false() {
@@ -498,6 +537,100 @@ mod tests {
         assert!(propose_count.load(Ordering::SeqCst) > RETRIES, "expected at least {} total attempts", RETRIES + 1);
     }
 
+    /// A round that ends while `propose_batch` runs signals the task during that call. The task
+    /// keeps the signal: it proposes its next batch `MIN_BATCH_DELAY` after its last proposal,
+    /// also if the primary is in a later round than the signal names by then. That proposal
+    /// uses up the signal, so the round after it, which has no signal, waits for
+    /// `MAX_BATCH_DELAY`.
+    #[cfg_attr(not(shuttle), tokio::test)]
+    async fn test_proposal_task_keeps_signal_from_during_proposal() {
+        /// A proposer whose round ends while it proposes for it. The first proposal signals
+        /// round 2 and ends in round 3, and the second one ends in round 4 with no signal.
+        struct RoundEndingProposer {
+            task: ProposalTask<MainnetV0>,
+            round: AtomicU32,
+            proposal_times: mpsc::UnboundedSender<Instant>,
+        }
+
+        #[async_trait::async_trait]
+        impl BatchPropose for RoundEndingProposer {
+            fn current_round(&self) -> u64 {
+                self.round.load(Ordering::SeqCst).into()
+            }
+
+            async fn propose_batch(&self) -> Result<Option<u64>> {
+                let round = self.round.load(Ordering::SeqCst);
+                match round {
+                    1 => {
+                        self.task.signal(2);
+                        self.round.store(3, Ordering::SeqCst);
+                    }
+                    3 => self.round.store(4, Ordering::SeqCst),
+                    _ => {}
+                }
+                self.proposal_times.send(Instant::now()).ok();
+                Ok(Some(round.into()))
+            }
+        }
+
+        let task = ProposalTask::<MainnetV0>::default();
+        let (proposal_times, mut proposal_times_receiver) = mpsc::unbounded_channel();
+        tokio::spawn(task.clone().run(RoundEndingProposer { task, round: AtomicU32::new(1), proposal_times }));
+
+        let first_proposal = proposal_times_receiver.recv().await.unwrap();
+        let second_proposal = proposal_times_receiver.recv().await.unwrap();
+        let delay = second_proposal - first_proposal;
+        assert!(delay >= MIN_BATCH_DELAY, "the second proposal came after {delay:?}");
+
+        // The clock of a shuttle test is exact. A real timer can end late by any amount, so
+        // only that build can tell the two delays apart.
+        #[cfg(shuttle)]
+        {
+            assert_eq!(delay, MIN_BATCH_DELAY);
+            let third_proposal = proposal_times_receiver.recv().await.unwrap();
+            assert_eq!(third_proposal - second_proposal, MAX_BATCH_DELAY);
+        }
+    }
+
+    /// The round ends between the round check of the task and `propose_batch`, which thus
+    /// proposes for the next round. The task counts the batch for that round: it does not
+    /// propose for it again, and it sends the batch again `MAX_BATCH_DELAY` later.
+    #[cfg_attr(not(shuttle), tokio::test)]
+    async fn test_proposal_task_follows_round_of_proposal() {
+        /// A proposer whose round 1 ends just before its first proposal, which is thus for
+        /// round 2. Its later calls send that batch again.
+        struct LateRoundProposer {
+            task: ProposalTask<MainnetV0>,
+            round: AtomicU32,
+            call_times: mpsc::UnboundedSender<Instant>,
+        }
+
+        #[async_trait::async_trait]
+        impl BatchPropose for LateRoundProposer {
+            fn current_round(&self) -> u64 {
+                self.round.load(Ordering::SeqCst).into()
+            }
+
+            async fn propose_batch(&self) -> Result<Option<u64>> {
+                self.call_times.send(Instant::now()).ok();
+                if self.round.swap(2, Ordering::SeqCst) == 1 {
+                    self.task.signal(2);
+                    return Ok(Some(2));
+                }
+                Ok(None)
+            }
+        }
+
+        let task = ProposalTask::<MainnetV0>::default();
+        let (call_times, mut call_times_receiver) = mpsc::unbounded_channel();
+        tokio::spawn(task.clone().run(LateRoundProposer { task, round: AtomicU32::new(1), call_times }));
+
+        let proposal = call_times_receiver.recv().await.unwrap();
+        let rebroadcast = call_times_receiver.recv().await.unwrap();
+        let delay = rebroadcast - proposal;
+        assert!(delay >= MAX_BATCH_DELAY, "the task called `propose_batch` again after {delay:?}");
+    }
+
     /// The async tests of this module under the `shuttle` scheduler; see `snarkos_utilities::locks`.
     /// Run them with `cargo shuttle-test -p snarkos-node-bft --lib shuttle_tests`.
     ///
@@ -505,6 +638,7 @@ mod tests {
     /// `snarkos_utilities::shuttle_test::check_async`.
     #[cfg(shuttle)]
     mod shuttle_tests {
+        use super::*;
         use snarkos_utilities::shuttle_test::check_async;
 
         /// The number of task orders that each test runs with each scheduler.
@@ -533,6 +667,61 @@ mod tests {
         #[test]
         fn test_proposal_task_retries_on_false() {
             check_async(ITERATIONS, super::test_proposal_task_retries_on_false);
+        }
+
+        #[test]
+        fn test_proposal_task_keeps_signal_from_during_proposal() {
+            check_async(ITERATIONS, super::test_proposal_task_keeps_signal_from_during_proposal);
+        }
+
+        #[test]
+        fn test_proposal_task_follows_round_of_proposal() {
+            check_async(ITERATIONS, super::test_proposal_task_follows_round_of_proposal);
+        }
+
+        /// The round ends just before the task sends its batch again, so that call proposes a
+        /// batch for the next round. The task counts that batch: it sends it again
+        /// `MAX_BATCH_DELAY` later, and does not propose for that round a second time.
+        #[test]
+        fn rebroadcast_proposes_for_the_next_round() {
+            /// A proposer that proposes for round 1, and for round 2 in its second call.
+            struct Proposer {
+                task: ProposalTask<MainnetV0>,
+                num_calls: AtomicU32,
+                call_times: mpsc::UnboundedSender<Instant>,
+            }
+
+            #[async_trait::async_trait]
+            impl BatchPropose for Proposer {
+                fn current_round(&self) -> u64 {
+                    if self.num_calls.load(Ordering::SeqCst) < 2 { 1 } else { 2 }
+                }
+
+                async fn propose_batch(&self) -> Result<Option<u64>> {
+                    self.call_times.send(Instant::now()).ok();
+                    match self.num_calls.fetch_add(1, Ordering::SeqCst) {
+                        0 => Ok(Some(1)),
+                        1 => {
+                            self.task.signal(2);
+                            Ok(Some(2))
+                        }
+                        _ => Ok(None),
+                    }
+                }
+            }
+
+            check_async(ITERATIONS, || async {
+                let task = ProposalTask::<MainnetV0>::default();
+                let (call_times, mut call_times_receiver) = mpsc::unbounded_channel();
+                tokio::spawn(task.clone().run(Proposer { task, num_calls: AtomicU32::new(0), call_times }));
+
+                let mut call_times = Vec::new();
+                for _ in 0..3 {
+                    call_times.push(call_times_receiver.recv().await.unwrap());
+                }
+                assert_eq!(call_times[1] - call_times[0], MAX_BATCH_DELAY);
+                assert_eq!(call_times[2] - call_times[1], MAX_BATCH_DELAY);
+            });
         }
     }
 }
