@@ -19,8 +19,11 @@
 //! ones of the `shuttle` concurrency testing tool, which can switch threads at each operation on
 //! them; see [`crate::locks`] for that build.
 //!
-//! Hazard: shuttle does not see an atomic that comes from `std` directly. A test then never runs
-//! another thread between a read of it and the code that acts on the value.
+//! Hazard: shuttle does not see an atomic that comes from `std` directly, so a test never switches
+//! threads at an operation on it.
+//!
+//! Hazard: shuttle runs every operation as `SeqCst`. A test cannot find a bug that needs a weaker
+//! ordering.
 
 #[cfg(shuttle)]
 use ::shuttle::sync::atomic as backend;

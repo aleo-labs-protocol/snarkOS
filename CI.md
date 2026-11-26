@@ -21,7 +21,7 @@ Jobs run in one of two places:
 
 | Event | Runs |
 |---|---|
-| Pull request into `staging` | `fmt`, `deny`, `shellcheck`, `source-checks`, `machete`, `lint`, `lint-locktick`, `test`, `build-snarkos`, `devnet`, `ci-ok` |
+| Pull request into `staging` | `fmt`, `deny`, `shellcheck`, `source-checks`, `machete`, `lint`, `lint-locktick`, `test-shuttle`, `test`, `build-snarkos`, `devnet`, `ci-ok` |
 | Schedule, on `staging`, every six hours at 47 minutes past | the above, plus `devnet-merge`, `windows`, `each-feature` |
 | Pull request into `release/**` | the first row, plus `devnet-merge`, `windows`, `devnet-release` |
 | Push to `release/**`, or manual dispatch | the first row, plus `devnet-merge`, `windows`, `each-feature`, `devnet-release` |
@@ -79,6 +79,7 @@ jobs run on every event.
 | `source-checks` | hosted | all | | `scripts/check_sources.py`: license headers in `.rs` files |
 | `lint` | `cpu` | all | 90 | clippy, default and `--all-features`; `cargo check --all-features` of `snarkos-node-metrics` and `snarkos-display` |
 | `lint-locktick` | `cpu` | all | 90 | clippy `--all-features` under `--cfg locktick` (`locktick-clippy` alias) |
+| `test-shuttle` | `cpu` | all | 30 | the `shuttle_tests` of `snarkos-node-bft` under `--cfg shuttle` (`shuttle-test` alias), then clippy of `snarkos-utilities` and `snarkos-node-bft` under the cfg (`shuttle-clippy` alias) |
 | `test (light)` | hosted | all | 90 | `snarkos-account`, `-utilities`, `-node-tcp`, `-node-sync-locators`, `-node-network` |
 | `test (cdn)` | hosted | all | 90 | `snarkos-node-cdn` |
 | `test (messages)` | hosted | all | 90 | `snarkos-node-bft-events`, `-node-router-messages`, `-node-bft-ledger-service` |

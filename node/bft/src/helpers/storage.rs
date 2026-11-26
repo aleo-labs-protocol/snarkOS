@@ -1138,7 +1138,7 @@ impl<N: Network> Storage<N> {
             for (id, author) in entries {
                 num_entries += 1;
                 let certificate = certificates.get(id).unwrap_or_else(|| panic!("round {round} lists a missing {id}"));
-                assert_eq!((certificate.round(), certificate.author()), (*round, *author));
+                assert_eq!((certificate.id(), certificate.round(), certificate.author()), (*id, *round, *author));
                 assert_eq!(batch_ids.get(id), Some(round), "the batch ID of {id}");
             }
         }
@@ -1223,7 +1223,6 @@ pub(crate) mod tests {
         batch_ids: &[(Field<N>, u64)],
         transmissions: &HashMap<TransmissionID<N>, (Transmission<N>, IndexSet<Field<N>>)>,
     ) {
-        // Ensure the certificate maps agree with each other.
         storage.assert_maps_agree();
         // Ensure the rounds are well-formed.
         assert_eq!(storage.rounds_iter().collect::<Vec<_>>(), *rounds);

@@ -229,13 +229,15 @@ jobs:
   test-shuttle:
     needs: schedule-due
     runs-on: [self-hosted, linux, x64, cpu]
-    timeout-minutes: 90
+    # A test that waits on a lock that shuttle does not see never returns.
+    timeout-minutes: 30
     if: *fleet-if
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
       # gh-actions is ours; check-shared-refs requires a @vN tag here, not a SHA.
       - uses: aleo-labs-protocol/gh-actions/.github/actions/runner-job-setup@v2
+      - uses: ./.github/actions/job-home
       # An env RUSTFLAGS replaces `--cfg shuttle` without an error. The build
       # then has no shuttle tests, and the filter passes with none.
       - name: Check that the build has the shuttle tests

@@ -42,7 +42,7 @@ members = [
   "utilities",
 ]
 
-# The cfgs of `snarkos_utilities::locks`. A crate that tests one of them inherits this table.
+# The cfgs of `snarkos_utilities::locks`. A crate with code behind one of them inherits this table.
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [ 'cfg(locktick)', 'cfg(shuttle)' ] }
 
