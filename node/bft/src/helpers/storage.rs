@@ -16,7 +16,7 @@
 use crate::helpers::{check_timestamp_for_liveness, fmt_id};
 use snarkos_node_bft_ledger_service::LedgerService;
 use snarkos_node_bft_storage_service::StorageService;
-use snarkos_utilities::locks::parking_lot::{Mutex, RwLock};
+use snarkos_utilities::locks::parking_lot::{Mutex, MutexGuard, RwLock};
 use snarkvm::{
     ledger::{
         block::{Block, Transaction},
@@ -45,7 +45,7 @@ use tokio_util::sync::CancellationToken;
 ///
 /// The `SameCertificate` variant describes a benign race: concurrent sync paths regularly try to
 /// insert the same certificate, and the loser of that race should treat its failure as a no-op
-/// (the certificate is in storage, or another task is inserting it) rather than a hard error.
+/// (the certificate is in storage) rather than a hard error.
 ///
 /// The `SameAuthorAndRound` variant means storage holds a different certificate by that author
 /// for that round.
@@ -128,7 +128,21 @@ pub struct StorageInner<N: Network> {
     /// The maximum number of rounds to keep in storage.
     max_gc_rounds: u64,
     /* Once per batch */
+    /// Serializes the insertion and the removal of certificates, including garbage collection.
+    ///
+    /// It is held across the updates to `rounds`, `certificates`, `batch_ids` and `transmissions`,
+    /// which makes the checks done under it hold until the update is complete.
+    /// The readers of those maps do not take it.
+    ///
+    /// Lock order, for any code that holds more than one of them: `certificate_updates`, then
+    /// `rounds`, then `certificates`, then `batch_ids`. None of them is reentrant, so code that
+    /// holds one must not call a method of `Storage` that takes it again.
+    certificate_updates: Mutex<()>,
     /// The map of `round` to a list of `(certificate ID, author)` entries.
+    ///
+    /// An update holds the write lock of this map until `certificates` and `batch_ids` are
+    /// updated as well. A reader that finds a certificate ID here finds it in those maps too, for
+    /// as long as it holds the read lock.
     rounds: RwLock<IndexMap<u64, IndexSet<(Field<N>, Address<N>)>>>,
     /// A cache of `certificate ID` to unprocessed `certificate`.
     unprocessed_certificates: RwLock<LruCache<Field<N>, BatchCertificate<N>>>,
@@ -163,6 +177,7 @@ impl<N: Network> Storage<N> {
             round_token: Mutex::new((current_round, CancellationToken::new())),
             gc_round: Default::default(),
             max_gc_rounds,
+            certificate_updates: Default::default(),
             rounds: Default::default(),
             unprocessed_certificates: RwLock::new(LruCache::new(unprocessed_cache_size)),
             certificates: Default::default(),
@@ -333,17 +348,28 @@ impl<N: Network> Storage<N> {
         // Compute the next GC round.
         let next_gc_round = next_round.saturating_sub(self.max_gc_rounds);
         // Advance the GC round, recording the previous value.
+        // This must come before the sweep: `insert_certificate_atomic` relies on it to refuse a
+        // certificate for a round that is being swept.
         let previous_gc_round = self.gc_round.fetch_max(next_gc_round, Ordering::SeqCst);
         // Only the call that actually advanced the GC round performs the removal sweep.
         if next_gc_round > previous_gc_round {
+            // List the stored rounds to remove. An insertion that read the previous GC round holds
+            // `certificate_updates` until its round is stored, and a later one is refused, so no
+            // round at or below the GC round is stored after this.
+            let mut gc_rounds: Vec<u64> = {
+                let _update = self.certificate_updates.lock();
+                self.rounds.read().keys().copied().filter(|round| *round <= next_gc_round).collect()
+            };
+            gc_rounds.sort_unstable();
             // Remove the GC round(s) from storage.
-            for gc_round in previous_gc_round..=next_gc_round {
+            for gc_round in gc_rounds {
+                let update = self.certificate_updates.lock();
                 // Iterate over the certificates for the GC round.
                 for id in self.get_certificate_ids_for_round(gc_round).into_iter() {
                     trace!(
                         "Garbage collecting certificate {id} at round {gc_round} (cut-off is round {next_gc_round})"
                     );
-                    self.remove_certificate(id);
+                    self.remove_certificate_locked(&update, id);
                 }
             }
         }
@@ -718,8 +744,8 @@ impl<N: Network> Storage<N> {
         }
 
         // Ensure the storage does not already contain a certificate for this author in this round.
-        // It can be this certificate even though the check above passed: an insertion writes the
-        // round entry before the certificate entry, and another task can be in between the two.
+        // It can be this certificate even though the check above passed: another task can insert
+        // it between the two lookups.
         if let Some(stored_id) = self.certificate_id_in_round_from(round, certificate.author()) {
             return Err(if stored_id == certificate.id() {
                 CheckCertificateError::SameCertificate { round, gc_round }
@@ -802,8 +828,7 @@ impl<N: Network> Storage<N> {
         // counted against the certificate by `insert_transmissions` itself - callers outside the
         // block sync always pass an empty set of aborted IDs.
         // Insert the certificate into storage.
-        self.insert_certificate_atomic(certificate, aborted_transmissions, missing_transmissions);
-        Ok(())
+        self.insert_certificate_atomic(certificate, aborted_transmissions, missing_transmissions, false)
     }
 
     /// Inserts the given `certificate` into storage.
@@ -811,8 +836,55 @@ impl<N: Network> Storage<N> {
     /// This method assumes **all missing** transmissions are provided in the `missing_transmissions` map.
     ///
     /// This method triggers updates to the `rounds`, `certificates`, `batch_ids`, and `transmissions` maps.
+    ///
+    /// # Errors
+    /// Checked while `certificate_updates` is held, so that no other update can invalidate them:
+    /// - [`CheckCertificateError::RoundTooLow`] if garbage collection has reached the round.
+    /// - [`CheckCertificateError::SameCertificate`] if the certificate is in storage.
+    /// - [`CheckCertificateError::SameAuthorAndRound`] if storage holds a different certificate from
+    ///   the same author for the same round. A `trusted_ledger_certificate` is exempt, and is
+    ///   stored in addition to that certificate.
+    ///
+    /// Storage is unchanged if an error is returned.
     fn insert_certificate_atomic(
         &self,
+        certificate: BatchCertificate<N>,
+        aborted_transmission_ids: HashSet<TransmissionID<N>>,
+        missing_transmissions: HashMap<TransmissionID<N>, Transmission<N>>,
+        trusted_ledger_certificate: bool,
+    ) -> Result<(), CheckCertificateError> {
+        let round = certificate.round();
+        let certificate_id = certificate.id();
+        let author = certificate.author();
+
+        let update = self.certificate_updates.lock();
+
+        // Garbage collection advances the GC round before it sweeps, and it sweeps under
+        // `certificate_updates`. A round above the GC round is thus not swept until this is done.
+        let gc_round = self.gc_round();
+        if round <= gc_round {
+            return Err(CheckCertificateError::RoundTooLow { round, gc_round });
+        }
+        if self.contains_certificate(certificate_id) {
+            return Err(CheckCertificateError::SameCertificate { round, gc_round });
+        }
+        if !trusted_ledger_certificate && self.contains_certificate_in_round_from(round, author) {
+            return Err(CheckCertificateError::SameAuthorAndRound { round, gc_round });
+        }
+
+        self.insert_certificate_locked(&update, certificate, aborted_transmission_ids, missing_transmissions);
+        Ok(())
+    }
+
+    /// Writes the given `certificate` to the `rounds`, `certificates`, `batch_ids`, and `transmissions`
+    /// maps, without any check.
+    ///
+    /// The transmissions are written first. A reader that holds the read lock of `rounds` then sees
+    /// the certificate in `rounds`, `certificates` and `batch_ids`, or in none of them. If it sees
+    /// the certificate, then `transmissions` holds its transmissions.
+    fn insert_certificate_locked(
+        &self,
+        _update: &MutexGuard<'_, ()>,
         certificate: BatchCertificate<N>,
         aborted_transmission_ids: HashSet<TransmissionID<N>>,
         missing_transmissions: HashMap<TransmissionID<N>, Transmission<N>>,
@@ -824,23 +896,24 @@ impl<N: Network> Storage<N> {
         // Retrieve the author of the batch.
         let author = certificate.author();
 
-        // Insert the round to certificate ID entry.
-        self.rounds.write().entry(round).or_default().insert((certificate_id, author));
-        // Obtain the certificate's transmission ids.
-        let transmission_ids = certificate.transmission_ids().clone();
-        // Insert the certificate.
-        self.certificates.write().insert(certificate_id, certificate);
-        // Remove the unprocessed certificate.
-        self.unprocessed_certificates.write().pop(&certificate_id);
-        // Insert the batch ID.
-        self.batch_ids.write().insert(certificate_id, round);
         // Insert the certificate ID for each of the transmissions into storage.
         self.transmissions.insert_transmissions(
             certificate_id,
-            transmission_ids,
+            certificate.transmission_ids().clone(),
             aborted_transmission_ids,
             missing_transmissions,
         );
+        {
+            // Insert the round to certificate ID entry.
+            let mut rounds = self.rounds.write();
+            rounds.entry(round).or_default().insert((certificate_id, author));
+            // Insert the certificate.
+            self.certificates.write().insert(certificate_id, certificate);
+            // Insert the batch ID.
+            self.batch_ids.write().insert(certificate_id, round);
+        }
+        // Remove the unprocessed certificate.
+        self.unprocessed_certificates.write().pop(&certificate_id);
     }
 
     /// Inserts the given unprocessed `certificate` into storage.
@@ -858,42 +931,39 @@ impl<N: Network> Storage<N> {
     /// Removes the given `certificate ID` from storage. This method is used to garbage collect individual certificates once blocks are committed.
     ///
     /// This method triggers updates to the `rounds`, `certificates`, `batch_ids`, and `transmissions` maps.
+    /// The transmissions are removed last. A reader that holds the read lock of `rounds` then sees
+    /// the certificate in `rounds`, `certificates` and `batch_ids`, or in none of them. If it sees
+    /// the certificate, then `transmissions` holds its transmissions.
     ///
     /// If the certificate was successfully removed, `true` is returned.
     /// If the certificate did not exist in storage, `false` is returned.
-    fn remove_certificate(&self, certificate_id: Field<N>) -> bool {
-        // Retrieve the certificate.
-        let Some(certificate) = self.get_certificate(certificate_id) else {
-            warn!("Certificate {certificate_id} does not exist in storage");
-            return false;
-        };
-        // Retrieve the round.
-        let round = certificate.round();
-        // Compute the author of the batch.
-        let author = certificate.author();
-
+    fn remove_certificate_locked(&self, _update: &MutexGuard<'_, ()>, certificate_id: Field<N>) -> bool {
         // TODO (howardwu): We may want to use `shift_remove` below, in order to align compatibility
         //  with tests written to for `remove_certificate`. However, this will come with performance hits.
         //  It will be better to write tests that compare the union of the sets.
 
-        // Update the round.
-        match self.rounds.write().entry(round) {
-            Entry::Occupied(mut entry) => {
+        let certificate = {
+            let mut rounds = self.rounds.write();
+            // Remove the certificate.
+            let Some(certificate) = self.certificates.write().swap_remove(&certificate_id) else {
+                warn!("Certificate {certificate_id} does not exist in storage");
+                return false;
+            };
+            // Update the round.
+            if let Entry::Occupied(mut entry) = rounds.entry(certificate.round()) {
                 // Remove the round to certificate ID entry.
-                entry.get_mut().swap_remove(&(certificate_id, author));
+                entry.get_mut().swap_remove(&(certificate_id, certificate.author()));
                 // If the round is empty, remove it.
                 if entry.get().is_empty() {
                     entry.swap_remove();
                 }
             }
-            Entry::Vacant(_) => {}
-        }
-        // Remove the certificate.
-        self.certificates.write().swap_remove(&certificate_id);
+            // Remove the batch ID.
+            self.batch_ids.write().swap_remove(&certificate_id);
+            certificate
+        };
         // Remove the unprocessed certificate.
         self.unprocessed_certificates.write().pop(&certificate_id);
-        // Remove the batch ID.
-        self.batch_ids.write().swap_remove(&certificate_id);
         // Remove the transmission entries in the certificate from storage.
         self.transmissions.remove_transmissions(&certificate_id, certificate.transmission_ids());
         // Return successfully.
@@ -1033,23 +1103,21 @@ impl<N: Network> Storage<N> {
             certificate.transmission_ids().len()
         );
 
-        if trusted_ledger_certificate {
-            self.insert_certificate_atomic(certificate, aborted_transmissions, missing_transmissions);
-            Ok(())
+        let result = if trusted_ledger_certificate {
+            self.insert_certificate_atomic(certificate, aborted_transmissions, missing_transmissions, true)
         } else {
-            match self.insert_certificate(certificate, missing_transmissions, aborted_transmissions) {
-                // The checks at the top of this function are not atomic with the insertion: garbage
-                // collection can pass the round, or another task can store the certificate, in between.
-                Err(
-                    err @ (CheckCertificateError::RoundTooLow { .. } | CheckCertificateError::SameCertificate { .. }),
-                ) => {
-                    trace!("Skipping certificate '{certificate_id}' from block {} - {err}", block.height());
-                    Ok(())
-                }
-                result => result.with_context(|| {
-                    format!("Failed to insert certificate '{certificate_id}' from block {}", block.height())
-                }),
+            self.insert_certificate(certificate, missing_transmissions, aborted_transmissions)
+        };
+        match result {
+            // The checks at the top of this function are not atomic with the insertion: garbage
+            // collection can pass the round, or another task can store the certificate, in between.
+            Err(err @ (CheckCertificateError::RoundTooLow { .. } | CheckCertificateError::SameCertificate { .. })) => {
+                trace!("Skipping certificate '{certificate_id}' from block {} - {err}", block.height());
+                Ok(())
             }
+            result => result.with_context(|| {
+                format!("Failed to insert certificate '{certificate_id}' from block {}", block.height())
+            }),
         }
     }
 }
@@ -1089,34 +1157,21 @@ impl<N: Network> Storage<N> {
     #[cfg(test)]
     #[doc(hidden)]
     pub(crate) fn testing_only_insert_certificate_testing_only(&self, certificate: BatchCertificate<N>) {
-        // Retrieve the round.
-        let round = certificate.round();
-        // Retrieve the certificate ID.
-        let certificate_id = certificate.id();
-        // Retrieve the author of the batch.
-        let author = certificate.author();
-
-        // Insert the round to certificate ID entry.
-        self.rounds.write().entry(round).or_default().insert((certificate_id, author));
-        // Obtain the certificate's transmission ids.
-        let transmission_ids = certificate.transmission_ids().clone();
-        // Insert the certificate.
-        self.certificates.write().insert(certificate_id, certificate);
-        // Insert the batch ID.
-        self.batch_ids.write().insert(certificate_id, round);
-
         // Construct the dummy missing transmissions (for testing purposes).
-        let missing_transmissions = transmission_ids
+        let missing_transmissions = certificate
+            .transmission_ids()
             .iter()
             .map(|id| (*id, Transmission::Transaction(snarkvm::ledger::narwhal::Data::Buffer(bytes::Bytes::new()))))
             .collect::<HashMap<_, _>>();
-        // Insert the certificate ID for each of the transmissions into storage.
-        self.transmissions.insert_transmissions(
-            certificate_id,
-            transmission_ids,
-            Default::default(),
-            missing_transmissions,
-        );
+        // Insert the certificate, without the checks of `insert_certificate_atomic`.
+        let update = self.certificate_updates.lock();
+        self.insert_certificate_locked(&update, certificate, Default::default(), missing_transmissions);
+    }
+
+    /// Removes the given `certificate ID` from storage; see [`Self::remove_certificate_locked`].
+    fn remove_certificate(&self, certificate_id: Field<N>) -> bool {
+        let update = self.certificate_updates.lock();
+        self.remove_certificate_locked(&update, certificate_id)
     }
 }
 
@@ -1260,7 +1315,9 @@ pub(crate) mod tests {
         let (missing_transmissions, transmissions) = sample_transmissions(&certificate, rng);
 
         // Insert the certificate.
-        storage.insert_certificate_atomic(certificate.clone(), Default::default(), missing_transmissions);
+        storage
+            .insert_certificate_atomic(certificate.clone(), Default::default(), missing_transmissions, false)
+            .unwrap();
         // Ensure the certificate exists in storage.
         assert!(storage.contains_certificate(certificate_id));
         // Ensure the certificate is stored in the correct round.
@@ -1330,21 +1387,26 @@ pub(crate) mod tests {
         let (missing_transmissions, transmissions) = sample_transmissions(&certificate, rng);
 
         // Insert the certificate.
-        storage.insert_certificate_atomic(certificate.clone(), Default::default(), missing_transmissions.clone());
+        storage
+            .insert_certificate_atomic(certificate.clone(), Default::default(), missing_transmissions.clone(), false)
+            .unwrap();
         // Ensure the certificate exists in storage.
         assert!(storage.contains_certificate(certificate_id));
         // Check that the underlying storage representation is correct.
         assert_storage(&storage, &rounds, &certificates, &batch_ids, &transmissions);
 
         // Insert the certificate again - without any missing transmissions.
-        storage.insert_certificate_atomic(certificate.clone(), Default::default(), Default::default());
+        let result =
+            storage.insert_certificate_atomic(certificate.clone(), Default::default(), Default::default(), false);
+        assert!(matches!(result, Err(CheckCertificateError::SameCertificate { .. })));
         // Ensure the certificate exists in storage.
         assert!(storage.contains_certificate(certificate_id));
         // Check that the underlying storage representation remains unchanged.
         assert_storage(&storage, &rounds, &certificates, &batch_ids, &transmissions);
 
         // Insert the certificate again - with all of the original missing transmissions.
-        storage.insert_certificate_atomic(certificate, Default::default(), missing_transmissions);
+        let result = storage.insert_certificate_atomic(certificate, Default::default(), missing_transmissions, false);
+        assert!(matches!(result, Err(CheckCertificateError::SameCertificate { .. })));
         // Ensure the certificate exists in storage.
         assert!(storage.contains_certificate(certificate_id));
         // Check that the underlying storage representation remains unchanged.
@@ -1372,7 +1434,9 @@ pub(crate) mod tests {
         if transmission_ids.len() < 2 {
             // Certificate has 0 or 1 transmission; just verify insert without aborted works.
             let (missing_transmissions, _) = sample_transmissions(&certificate, rng);
-            storage.insert_certificate_atomic(certificate.clone(), HashSet::new(), missing_transmissions);
+            storage
+                .insert_certificate_atomic(certificate.clone(), HashSet::new(), missing_transmissions, false)
+                .unwrap();
             for id in certificate.transmission_ids() {
                 assert!(storage.contains_retrievable_transmission(*id));
             }
@@ -1385,7 +1449,9 @@ pub(crate) mod tests {
         let mut missing_transmissions = all_missing;
         missing_transmissions.remove(&aborted_id);
 
-        storage.insert_certificate_atomic(certificate.clone(), aborted_transmission_ids, missing_transmissions);
+        storage
+            .insert_certificate_atomic(certificate.clone(), aborted_transmission_ids, missing_transmissions, false)
+            .unwrap();
 
         assert!(storage.contains_certificate(certificate_id));
         assert_eq!(storage.get_certificates_for_round(round), indexset! { certificate.clone() });
@@ -1502,9 +1568,9 @@ pub(crate) mod tests {
         assert!(!storage.contains_retrievable_transmission(transmission_id));
     }
 
-    /// Block sync skips a certificate that another task is in the middle of inserting (its round
-    /// entry is written, its certificate entry is not), and fails on a certificate whose author
-    /// has a different certificate in storage for the same round.
+    /// Block sync skips a certificate that only the round lookup of `check_certificate` finds, as
+    /// when another task inserts it between the two lookups. It fails on a certificate whose
+    /// author has a different certificate in storage for the same round.
     #[test]
     fn test_sync_certificate_with_block_and_a_stored_round_entry() {
         use snarkvm::prelude::Uniform;
@@ -1523,7 +1589,7 @@ pub(crate) mod tests {
         storage.rounds.write().entry(1).or_default().insert((certificate.id(), certificate.author()));
         storage
             .sync_certificate_with_block(&block, certificate, &Default::default(), false)
-            .expect("a certificate that is being inserted must be skipped");
+            .expect("a certificate that another task inserted must be skipped");
 
         // The round entry holds the ID of another certificate by the same author.
         let certificate = make_certificate(1, rng);
@@ -1617,7 +1683,9 @@ pub(crate) mod tests {
 
                 // Construct the sample 'transmissions'.
                 let (missing_transmissions, _transmissions) = sample_transmissions(&certificate, rng);
-                storage.insert_certificate_atomic(certificate, Default::default(), missing_transmissions);
+                storage
+                    .insert_certificate_atomic(certificate, Default::default(), missing_transmissions, false)
+                    .unwrap();
             }
 
             previous_certs = new_certs;
@@ -1660,7 +1728,9 @@ pub(crate) mod tests {
 
                     // Construct the sample 'transmissions'.
                     let (missing_transmissions, _transmissions) = sample_transmissions(&certificate, rng);
-                    storage.insert_certificate_atomic(certificate, Default::default(), missing_transmissions);
+                    storage
+                        .insert_certificate_atomic(certificate, Default::default(), missing_transmissions, false)
+                        .unwrap();
                 } else {
                     // Pick a few signers, but not enough to form a quorum.
                     let other_keys: Vec<_> = private_keys[0..=3].iter().cloned().filter(|k| k != private_key).collect();
@@ -1771,10 +1841,11 @@ pub(crate) mod tests {
         assert!(matches!(result, Err(CheckCertificateError::SameCertificate { .. })));
     }
 
-    /// Verify that a certificate that another task is in the middle of inserting (its round entry
-    /// is written, its certificate entry is not) is reported as `CheckCertificateError::SameCertificate`.
+    /// Verify that a certificate that only the round lookup finds is reported as
+    /// `CheckCertificateError::SameCertificate`. This is what `check_certificate` sees when another
+    /// task inserts the certificate between its two lookups.
     #[test]
-    fn test_check_certificate_error_same_certificate_during_insertion() {
+    fn test_check_certificate_error_same_certificate_from_round_lookup() {
         let rng = &mut TestRng::default();
 
         // Sample a committee.
@@ -1795,12 +1866,120 @@ pub(crate) mod tests {
         let (_missing_transmissions, transmissions) = sample_transmissions(&certificate, rng);
         let transmissions: HashMap<_, _> = transmissions.into_iter().map(|(k, (t, _))| (k, t)).collect();
 
-        // Write only the round entry, as the first step of an insertion does.
+        // Write only the round entry, so that the certificate lookup misses and the round lookup hits.
         storage.rounds.write().entry(1).or_default().insert((certificate.id(), certificate.author()));
         assert!(!storage.contains_certificate(certificate.id()));
 
         let result = storage.insert_certificate(certificate, transmissions, Default::default());
         assert!(matches!(result, Err(CheckCertificateError::SameCertificate { .. })));
+    }
+
+    /// Verify the errors of `insert_certificate_atomic`, which is the only check that holds when
+    /// two tasks pass `check_certificate` before either of them inserts.
+    #[test]
+    fn test_insert_certificate_atomic_errors() {
+        let rng = &mut TestRng::default();
+
+        // Sample a committee.
+        let (committee, private_keys) =
+            snarkvm::ledger::committee::test_helpers::sample_committee_and_keys_for_round(0, 10, rng);
+        // Initialize the ledger.
+        let ledger = Arc::new(MockLedgerService::new(committee));
+        // Initialize the storage.
+        let storage = Storage::<CurrentNetwork>::new(ledger, Arc::new(BFTMemoryService::new()), 1).unwrap();
+
+        // Sample two distinct certificates from the same author for the same round.
+        let author = &private_keys[0];
+        let other_keys: Vec<_> = private_keys.iter().cloned().filter(|k| k != author).collect();
+        let mut sample_certificate = || {
+            let certificate =
+                sample_batch_certificate_for_round_with_committee(1, Default::default(), author, &other_keys, rng);
+            let (missing_transmissions, _transmissions) = sample_transmissions(&certificate, rng);
+            (certificate, missing_transmissions)
+        };
+        let (certificate_1, transmissions_1) = sample_certificate();
+        let (certificate_2, transmissions_2) = sample_certificate();
+        assert_ne!(certificate_1.id(), certificate_2.id());
+        let insert = |certificate: &BatchCertificate<_>, transmissions: &HashMap<_, _>, trusted_ledger_certificate| {
+            storage.insert_certificate_atomic(
+                certificate.clone(),
+                Default::default(),
+                transmissions.clone(),
+                trusted_ledger_certificate,
+            )
+        };
+
+        // The same certificate is refused, whether it is trusted or not.
+        insert(&certificate_1, &transmissions_1, false).unwrap();
+        for trusted_ledger_certificate in [false, true] {
+            let result = insert(&certificate_1, &transmissions_1, trusted_ledger_certificate);
+            assert!(matches!(result, Err(CheckCertificateError::SameCertificate { .. })));
+        }
+
+        // A different certificate from the same author is refused, unless it is trusted.
+        let result = insert(&certificate_2, &transmissions_2, false);
+        assert!(matches!(result, Err(CheckCertificateError::SameAuthorAndRound { .. })));
+        assert!(!storage.contains_certificate(certificate_2.id()));
+        for id in certificate_2.transmission_ids() {
+            assert!(!storage.contains_retrievable_transmission(*id), "a refused certificate left a transmission");
+        }
+        insert(&certificate_2, &transmissions_2, true).unwrap();
+        assert!(storage.contains_certificate(certificate_1.id()));
+        assert!(storage.contains_certificate(certificate_2.id()));
+
+        // A certificate at the GC round is refused, whether it is trusted or not.
+        let (certificate_3, transmissions_3) = sample_certificate();
+        storage.garbage_collect_certificates(2).unwrap();
+        assert_eq!(storage.gc_round(), 1);
+        for trusted_ledger_certificate in [false, true] {
+            let result = insert(&certificate_3, &transmissions_3, trusted_ledger_certificate);
+            assert!(matches!(result, Err(CheckCertificateError::RoundTooLow { .. })));
+        }
+        assert!(!storage.contains_certificate(certificate_3.id()));
+    }
+
+    /// Verify that exactly one of several concurrent insertions of the same certificate succeeds,
+    /// and that the others report `CheckCertificateError::SameCertificate`.
+    #[test]
+    fn test_insert_same_certificate_concurrently() {
+        const NUM_THREADS: usize = 8;
+
+        let rng = &mut TestRng::default();
+
+        // Sample a committee.
+        let (committee, private_keys) =
+            snarkvm::ledger::committee::test_helpers::sample_committee_and_keys_for_round(0, 10, rng);
+        // Initialize the ledger.
+        let ledger = Arc::new(MockLedgerService::new(committee));
+        // Initialize the storage.
+        let storage = Storage::<CurrentNetwork>::new(ledger, Arc::new(BFTMemoryService::new()), 1).unwrap();
+
+        for author in &private_keys {
+            // Construct a certificate with a full quorum of signers.
+            let other_keys: Vec<_> = private_keys.iter().cloned().filter(|k| k != author).collect();
+            let certificate =
+                sample_batch_certificate_for_round_with_committee(1, Default::default(), author, &other_keys, rng);
+            let (transmissions, _) = sample_transmissions(&certificate, rng);
+
+            let barrier = std::sync::Barrier::new(NUM_THREADS);
+            let results: Vec<_> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..NUM_THREADS)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            barrier.wait();
+                            storage.insert_certificate(certificate.clone(), transmissions.clone(), Default::default())
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|handle| handle.join().unwrap()).collect()
+            });
+
+            assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+            for result in results.iter().filter(|result| result.is_err()) {
+                assert!(matches!(result, Err(CheckCertificateError::SameCertificate { .. })), "{result:?}");
+            }
+            assert_eq!(storage.get_certificate(certificate.id()), Some(certificate));
+        }
     }
 
     /// Verify that inserting two distinct certificates from the same author in the same round
@@ -2275,7 +2454,7 @@ pub mod prop_tests {
 
         let batch_header = BatchHeader::new(
             &signer.private_key,
-            0,
+            1,
             now(),
             committee_id,
             transmission_map.keys().cloned().collect(),
@@ -2317,21 +2496,26 @@ pub mod prop_tests {
         // Insert the certificate.
         let missing_transmissions: HashMap<TransmissionID<CurrentNetwork>, Transmission<CurrentNetwork>> =
             transmission_map.into_iter().collect();
-        storage.insert_certificate_atomic(certificate.clone(), Default::default(), missing_transmissions.clone());
+        storage
+            .insert_certificate_atomic(certificate.clone(), Default::default(), missing_transmissions.clone(), false)
+            .unwrap();
         // Ensure the certificate exists in storage.
         assert!(storage.contains_certificate(certificate_id));
         // Check that the underlying storage representation is correct.
         assert_storage(&storage, &rounds, &certificates, &batch_ids, &internal_transmissions);
 
         // Insert the certificate again - without any missing transmissions.
-        storage.insert_certificate_atomic(certificate.clone(), Default::default(), Default::default());
+        let result =
+            storage.insert_certificate_atomic(certificate.clone(), Default::default(), Default::default(), false);
+        assert!(matches!(result, Err(CheckCertificateError::SameCertificate { .. })));
         // Ensure the certificate exists in storage.
         assert!(storage.contains_certificate(certificate_id));
         // Check that the underlying storage representation remains unchanged.
         assert_storage(&storage, &rounds, &certificates, &batch_ids, &internal_transmissions);
 
         // Insert the certificate again - with all of the original missing transmissions.
-        storage.insert_certificate_atomic(certificate, Default::default(), missing_transmissions);
+        let result = storage.insert_certificate_atomic(certificate, Default::default(), missing_transmissions, false);
+        assert!(matches!(result, Err(CheckCertificateError::SameCertificate { .. })));
         // Ensure the certificate exists in storage.
         assert!(storage.contains_certificate(certificate_id));
         // Check that the underlying storage representation remains unchanged.
