@@ -58,18 +58,16 @@ type Guard<G> = ::snarkvm::utilities::locktick::LockGuard<G>;
 pub mod parking_lot {
     use super::Guard;
 
-    #[cfg(not(any(locktick, shuttle)))]
-    use ::parking_lot as backend;
-    #[cfg(all(shuttle, not(locktick)))]
-    use ::shuttle_parking_lot as backend;
+    /// The crate whose guards the locks of `backend` hand out, wrapped or not.
+    #[cfg(not(shuttle))]
+    use ::parking_lot as guards;
+    #[cfg(shuttle)]
+    use ::shuttle_parking_lot as guards;
+
     #[cfg(locktick)]
     use ::snarkvm::utilities::locktick::parking_lot as backend;
-
-    /// The crate whose guards the locks of `backend` hand out, wrapped or not.
-    #[cfg(not(all(shuttle, not(locktick))))]
-    use ::parking_lot as guards;
-    #[cfg(all(shuttle, not(locktick)))]
-    use ::shuttle_parking_lot as guards;
+    #[cfg(not(locktick))]
+    use guards as backend;
 
     pub type Mutex<T> = backend::Mutex<T>;
     pub type RwLock<T> = backend::RwLock<T>;

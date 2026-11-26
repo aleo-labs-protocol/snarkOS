@@ -241,6 +241,8 @@ jobs:
       - name: Check that the build has the shuttle tests
         run: cargo shuttle-test -p snarkos-node-bft --lib shuttle_tests -- --list | grep -q 'shuttle_tests::.* test$'
       - run: cargo shuttle-test -p snarkos-node-bft --lib shuttle_tests
+      # No other job compiles the code that is behind the cfg.
+      - run: cargo shuttle-clippy -p snarkos-utilities -p snarkos-node-bft --all-targets -- -D warnings
 
   # Each line of `runs` is one cargo command. Lines with the same `-p` set and
   # cargo flags share one build; nextest's `-E` and `--no-tests` are not cargo

@@ -42,6 +42,10 @@ members = [
   "utilities",
 ]
 
+# The cfgs of `snarkos_utilities::locks`. A crate that tests one of them inherits this table.
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [ 'cfg(locktick)', 'cfg(shuttle)' ] }
+
 [workspace.dependencies.snarkvm]
 #path = "../snarkVM"
 git = "https://github.com/aleo-labs-protocol/snarkVM.git"

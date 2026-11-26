@@ -113,38 +113,32 @@ fn spawn_insert(
     thread::spawn(move || storage.insert_certificate(certificate, transmissions, Default::default()))
 }
 
+/// Starts a thread that collects the garbage of the rounds that are out of range in `round`.
+fn spawn_garbage_collection(storage: &Storage<CurrentNetwork>, round: u64) -> thread::JoinHandle<()> {
+    let storage = storage.clone();
+    thread::spawn(move || storage.garbage_collect_certificates(round).unwrap())
+}
+
 /// Starts a thread that reads the certificate maps while the other threads change them.
 fn spawn_reader(storage: &Storage<CurrentNetwork>) -> thread::JoinHandle<()> {
     let storage = storage.clone();
-    thread::spawn(move || assert_maps_agree(&storage))
+    thread::spawn(move || storage.assert_maps_agree())
 }
 
-/// Asserts that `rounds`, `certificates` and `batch_ids` describe the same set of certificates.
-///
-/// This must hold at any time for a reader that holds the read lock of `rounds`.
-fn assert_maps_agree(storage: &Storage<CurrentNetwork>) {
-    let rounds = storage.rounds.read();
-    let certificates = storage.certificates.read();
-    let batch_ids = storage.batch_ids.read();
-
-    let mut num_entries = 0;
-    for (round, entries) in rounds.iter() {
-        assert!(!entries.is_empty(), "round {round} is stored without a certificate");
-        for (id, author) in entries {
-            num_entries += 1;
-            let certificate = certificates.get(id).unwrap_or_else(|| panic!("round {round} lists a missing {id}"));
-            assert_eq!((certificate.round(), certificate.author()), (*round, *author));
-            assert_eq!(batch_ids.get(id), Some(round), "the batch ID of {id}");
-        }
-    }
-    assert_eq!(certificates.len(), num_entries, "a certificate is in no round");
-    assert_eq!(batch_ids.len(), num_entries, "a batch ID is in no round");
+/// Asserts that one of the two insertions stored its certificate, and that the other one failed
+/// with an error that `is_expected`.
+fn assert_one_inserted(results: &[InsertResult; 2], is_expected: impl Fn(&CheckCertificateError) -> bool) {
+    let is_one_inserted = match results {
+        [Ok(()), Err(error)] | [Err(error), Ok(())] => is_expected(error),
+        _ => false,
+    };
+    assert!(is_one_inserted, "{results:?}");
 }
 
 /// Asserts what must hold once no thread changes the storage: the maps agree, no round at or
 /// below the GC round is stored, and the transmissions are the ones of the stored certificates.
 fn assert_at_rest(storage: &Storage<CurrentNetwork>) {
-    assert_maps_agree(storage);
+    storage.assert_maps_agree();
 
     let gc_round = storage.gc_round();
     for (round, _) in storage.rounds_iter() {
@@ -185,14 +179,7 @@ fn same_certificate_inserted_twice() {
         let results = inserts.map(|insert| insert.join().unwrap());
         reader.join().unwrap();
 
-        assert!(
-            matches!(
-                results,
-                [Ok(()), Err(CheckCertificateError::SameCertificate { .. })]
-                    | [Err(CheckCertificateError::SameCertificate { .. }), Ok(())]
-            ),
-            "{results:?}"
-        );
+        assert_one_inserted(&results, |error| matches!(error, CheckCertificateError::SameCertificate { .. }));
         assert!(storage.contains_certificate(certificate.0.id()));
         assert_at_rest(&storage);
     });
@@ -215,14 +202,7 @@ fn two_certificates_of_one_author_and_round() {
         let results = inserts.map(|insert| insert.join().unwrap());
         reader.join().unwrap();
 
-        assert!(
-            matches!(
-                results,
-                [Ok(()), Err(CheckCertificateError::SameAuthorAndRound { .. })]
-                    | [Err(CheckCertificateError::SameAuthorAndRound { .. }), Ok(())]
-            ),
-            "{results:?}"
-        );
+        assert_one_inserted(&results, |error| matches!(error, CheckCertificateError::SameAuthorAndRound { .. }));
         for ((certificate, _), result) in certificates.iter().zip(&results) {
             assert_eq!(storage.contains_certificate(certificate.id()), result.is_ok());
         }
@@ -242,10 +222,7 @@ fn insertion_during_garbage_collection_of_its_round() {
         let storage = new_storage(&committee, 1);
 
         let insert = spawn_insert(&storage, &certificate);
-        let garbage_collection = {
-            let storage = storage.clone();
-            thread::spawn(move || storage.garbage_collect_certificates(2).unwrap())
-        };
+        let garbage_collection = spawn_garbage_collection(&storage, 2);
         let reader = spawn_reader(&storage);
         let result = insert.join().unwrap();
         garbage_collection.join().unwrap();
@@ -280,10 +257,7 @@ fn insertion_during_garbage_collection_of_the_previous_round() {
         }
 
         let insert = spawn_insert(&storage, &certificate);
-        let garbage_collection = {
-            let storage = storage.clone();
-            thread::spawn(move || storage.garbage_collect_certificates(2).unwrap())
-        };
+        let garbage_collection = spawn_garbage_collection(&storage, 2);
         let reader = spawn_reader(&storage);
         let result = insert.join().unwrap();
         garbage_collection.join().unwrap();

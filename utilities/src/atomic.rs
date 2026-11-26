@@ -23,6 +23,8 @@
 //! another thread between a read of it and the code that acts on the value.
 
 #[cfg(shuttle)]
-pub use ::shuttle::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use ::shuttle::sync::atomic as backend;
 #[cfg(not(shuttle))]
-pub use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic as backend;
+
+pub use backend::{AtomicU32, AtomicU64, Ordering};

@@ -47,5 +47,5 @@ features = [ "shuttle" ]
 workspace = true
 features = [ "macros", "rt", "time" ]
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = [ 'cfg(locktick)', 'cfg(shuttle)' ] }
+[lints]
+workspace = true
