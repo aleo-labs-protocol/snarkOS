@@ -34,7 +34,7 @@ version = "${2:-1.0}"
 EOF
 }
 
-lockfile() { # pin, anyhow version, foo version, another dependency of a
+lockfile() { # pin, anyhow version, foo version, another dependency of a, version of a
   local dep=
   if [ -n "${4:-}" ]; then
     dep=$'\n'" \"$4\","
@@ -44,7 +44,7 @@ version = 4
 
 [[package]]
 name = "a"
-version = "0.1.0"
+version = "${5:-0.1.0}"
 dependencies = [${dep}
  "foo",
  "snarkvm",
@@ -53,10 +53,12 @@ dependencies = [${dep}
 [[package]]
 name = "anyhow"
 version = "${2:-1.0}"
+source = "registry"
 
 [[package]]
 name = "foo"
 version = "${3:-1.0.0}"
+source = "registry"
 
 [[package]]
 name = "snarkvm"
@@ -90,10 +92,10 @@ setup() {
   git -C "$repo" branch release
 }
 
-edit() { # branch, pin, anyhow version, foo version, line above the anyhow table, another dependency of a
+edit() { # branch, pin, anyhow version, foo version, line above the anyhow table, another dependency of a, version of a
   git -C "$repo" checkout -q "$1"
   manifest "$2" "${3:-}" "${5:-}" > "$repo/Cargo.toml"
-  lockfile "$2" "${3:-}" "${4:-}" "${6:-}" > "$repo/Cargo.lock"
+  lockfile "$2" "${3:-}" "${4:-}" "${6:-}" "${7:-}" > "$repo/Cargo.lock"
   git -C "$repo" commit -qam "$1"
 }
 
@@ -131,6 +133,13 @@ is_unmerged() { unmerged_paths | grep -qxF "$1"; }
 
 same_as_head() { # path
   git -C "$repo" diff --cached --quiet HEAD -- "$1" && fails is_unmerged "$1" && git -C "$repo" diff --quiet -- "$1"
+}
+
+# The staged path is HEAD's but for the given number of changed lines, and the
+# working tree has it.
+head_but_lines() { # path, count
+  [ "$(git -C "$repo" diff --cached --numstat HEAD -- "$1" | cut -f1,2)" = "$2"$'\t'"$2" ] \
+    && fails is_unmerged "$1" && git -C "$repo" diff --quiet -- "$1"
 }
 
 staged_has() { git -C "$repo" show ":$1" | grep -qxF "$2"; }
@@ -190,6 +199,50 @@ edit release "$release_pin" 1.0 1.0.0 '' anyhow
 merge_into
 run_hook
 ck "the pin is restored" staged_has Cargo.toml 'rev = "1111111" #staging'
+ck "the lockfile is left for people" unmerged_are Cargo.lock
+
+echo "the source moved the pin and bumped a workspace package's version"
+setup "$staging_pin"
+edit release "$release_pin" 1.0 1.0.0 '' '' 5.0.0
+merge_into
+run_hook
+ck "the pin is restored" staged_has Cargo.toml 'rev = "1111111" #staging'
+ck "the version is the source's" staged_has Cargo.lock 'version = "5.0.0"'
+ck "the rest of the lockfile is the target's" head_but_lines Cargo.lock 1
+ck "nothing is left for people" unmerged_are ''
+
+echo "both sides moved the pin, the source bumped a workspace package's version, and the target bumped a package"
+setup "$release_rev"
+edit staging "$staging_pin" 1.0 1.0.2
+edit release "$release_pin" 1.0 1.0.0 '' '' 5.0.0
+merge_into
+ck "the lockfile conflicts before the hook" is_unmerged Cargo.lock
+run_hook
+ck "the version is the source's" staged_has Cargo.lock 'version = "5.0.0"'
+ck "the target's bump is kept" staged_has Cargo.lock 'version = "1.0.2"'
+ck "the rest of the lockfile is the target's" head_but_lines Cargo.lock 1
+ck "nothing is left for people" unmerged_are ''
+
+echo "the source moved the pin, bumped a workspace package's version and added a dependency to it"
+setup "$staging_pin"
+edit release "$release_pin" 1.0 1.0.0 '' anyhow 5.0.0
+merge_into
+run_hook
+ck "the lockfile is left for people" unmerged_are Cargo.lock
+
+echo "the source moved the pin, bumped a workspace package's version and bumped another package"
+setup "$staging_pin"
+edit release "$release_pin" 1.0 1.0.1 '' '' 5.0.0
+merge_into
+run_hook
+ck "the lockfile is left for people" unmerged_are Cargo.lock
+
+echo "both sides bumped a workspace package's version, and the source moved the pin"
+setup "$staging_pin"
+edit staging "$staging_pin" 1.0 1.0.0 '' '' 0.2.0
+edit release "$release_pin" 1.0 1.0.0 '' '' 5.0.0
+merge_into
+run_hook
 ck "the lockfile is left for people" unmerged_are Cargo.lock
 
 echo "the hook cannot read the merge base's lockfile"
@@ -307,6 +360,16 @@ if top=$(git -C "$(dirname "$0")" rev-parse --show-toplevel) && git -C "$top" ca
   ck "the hook prints nothing" silent
 else
   echo "skipped the replays: this clone lacks mainnet f2eea52d9 or testnet b80d7794d"
+fi
+
+if [ -n "${top:-}" ] && git -C "$top" cat-file -e 73fd16438 2> /dev/null && git -C "$top" cat-file -e 4cf2b68ae 2> /dev/null; then
+  echo "release/v5.0 4cf2b68ae into staging 73fd16438"
+  replay 73fd16438 4cf2b68ae
+  run_hook
+  ck "the lockfile is staging's with the 22 workspace versions" head_but_lines Cargo.lock 22
+  ck "nothing is left for people" unmerged_are ''
+else
+  echo "skipped the replay: this clone lacks staging 73fd16438 or release/v5.0 4cf2b68ae"
 fi
 
 echo "$pass passed, $fail failed"
