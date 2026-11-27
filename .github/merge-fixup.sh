@@ -9,9 +9,11 @@
 #     target as HEAD forked from it, whichever side changed it. HEAD is the open
 #     pull request's branch when there is one, and the target can move on after
 #     that branch forks. The rest of the manifest merges as usual.
-#   - Cargo.lock keeps git's merge without the source's snarkVM entries. It is
-#     left unmerged for people when the source changed both snarkVM and other
-#     packages, or when HEAD's pin differs from the target's.
+#   - Cargo.lock keeps git's merge without the source's snarkVM entries. When
+#     the source also changed the versions of workspace packages and nothing
+#     else, it is HEAD's lockfile with those versions. It is left unmerged for
+#     people when the source changed snarkVM and anything more than that, or
+#     when HEAD's pin differs from the target's.
 # Other paths stay as git merged them.
 #
 # The hook must not run cargo: the merged tree's cargo and rustup configuration
@@ -68,6 +70,44 @@ packages() {
     on && /^(name|version|source) = / { key = key " " $0 }
     on && NF { all = all " " $0 }
     END { flush() }'
+}
+
+# Prints one line per workspace package of the lockfile: its name, its version
+# and the rest of its entry, separated by tabs.
+members() {
+  awk '
+    function flush() { if (n != "" && !src) print n "\t" v "\t" rest; n = v = rest = ""; src = 0 }
+    /^\[/ { flush(); on = $0 == "[[package]]"; next }
+    on && /^name = / { n = $3; gsub(/"/, "", n); next }
+    on && /^version = / { v = $3; gsub(/"/, "", v); next }
+    on && /^source = / { src = 1 }
+    on && NF { rest = rest " " $0 }
+    END { flush() }'
+}
+
+# Reads package names, and prints each with the source's version of it after a
+# tab. Fails unless each is a workspace package on all three sides, the source
+# changed nothing but its version, and HEAD has the merge base's version. The
+# rest of the entry covers the dependency lists, so it also covers a lockfile
+# that names a workspace package by version in one of them.
+version_bumps() {
+  awk -F '\t' '
+    FILENAME == ARGV[1] { base[$1] = $2; base_rest[$1] = $3; next }
+    FILENAME == ARGV[2] { source[$1] = $2; source_rest[$1] = $3; next }
+    FILENAME == ARGV[3] { head[$1] = $2; next }
+    !($1 in base && $1 in source && $1 in head) { exit 1 }
+    base_rest[$1] != source_rest[$1] || head[$1] != base[$1] { exit 1 }
+    { print $1 "\t" source[$1] }' "$tmp/base.members" "$tmp/source.members" "$tmp/head.members" -
+}
+
+# Prints the input lockfile with the versions of the packages in the given file.
+with_versions() {
+  awk -v f="$1" '
+    BEGIN { while ((getline l < f) > 0) { split(l, a, "\t"); to[a[1]] = a[2] } }
+    /^\[/ { n = "" }
+    /^name = / { n = $3; gsub(/"/, "", n) }
+    /^version = / && n in to { print "version = \"" to[n] "\""; next }
+    { print }'
 }
 
 has_lockfile() {
@@ -144,8 +184,18 @@ if has_lockfile HEAD; then
     fi
     if grep -qE '^snarkvm(-|$)' <<< "$changed"; then
       if grep -qvE '^snarkvm(-|$)' <<< "$changed"; then
-        leave_unmerged "$lockfile"
-        echo "$lockfile: left unmerged, since $SOURCE changed snarkVM and other packages"
+        git show "$base:$lockfile" | members > "$tmp/base.members"
+        git show "MERGE_HEAD:$lockfile" | members > "$tmp/source.members"
+        git show "HEAD:$lockfile" | members > "$tmp/head.members"
+        if grep -vE '^snarkvm(-|$)' <<< "$changed" | version_bumps > "$tmp/bumps"; then
+          git show "HEAD:$lockfile" | with_versions "$tmp/bumps" > "$tmp/lockfile"
+          cp "$tmp/lockfile" "$lockfile"
+          git add "$lockfile"
+          echo "$lockfile: kept that of $TARGET, with the workspace versions of $SOURCE"
+        else
+          leave_unmerged "$lockfile"
+          echo "$lockfile: left unmerged, since $SOURCE changed snarkVM and other packages"
+        fi
       else
         git checkout HEAD -- "$lockfile"
         echo "$lockfile: dropped the snarkVM entries of $SOURCE"
