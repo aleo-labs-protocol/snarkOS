@@ -2140,4 +2140,165 @@ mod tests {
 
         Ok(())
     }
+
+    /// Tests of the certificate requests under the `shuttle` scheduler; see `snarkos_utilities::locks`.
+    /// Run them with `cargo shuttle-test -p snarkos-node-bft --lib shuttle_tests`.
+    ///
+    /// The clock is the one of `snarkos_utilities::time`: it moves only when no task can run, so
+    /// tasks that wait for the same instant run in many orders.
+    ///
+    /// Hazard: the gateway of these tests has no connection, so a request that it must send fails
+    /// with "failed to send request". A test that needs a request to wait puts an earlier request
+    /// to the same peer into the pending queue first. The earlier request expires after
+    /// `CALLBACK_EXPIRATION_IN_SECS`, and the later one is then sent.
+    #[cfg(shuttle)]
+    mod shuttle_tests {
+        use super::*;
+        use snarkos_utilities::{shuttle_test::check_async, time::sleep};
+        use snarkvm::ledger::committee::Committee;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// The number of task orders that each test runs with each scheduler.
+        const ITERATIONS: usize = 1000;
+
+        /// The peer that the tests request the certificate from.
+        const PEER_IP: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 1234);
+
+        /// Returns a committee, and a certificate of round 1 that its members signed.
+        fn sample_committee_and_certificate() -> (Committee<CurrentNetwork>, BatchCertificate<CurrentNetwork>) {
+            let rng = &mut TestRng::default();
+            let (committee, private_keys) =
+                snarkvm::ledger::committee::test_helpers::sample_committee_and_keys_for_round(0, 5, rng);
+            let batch_header =
+                BatchHeader::new(&private_keys[0], 1, now(), committee.id(), Default::default(), IndexSet::new(), rng)
+                    .unwrap();
+            let signatures =
+                private_keys.iter().skip(1).map(|key| key.sign(&[batch_header.batch_id()], rng).unwrap()).collect();
+            (committee, BatchCertificate::from(batch_header, signatures).unwrap())
+        }
+
+        /// Returns a sync module that has no peers and no certificates.
+        fn new_sync(committee: Committee<CurrentNetwork>) -> Sync<CurrentNetwork> {
+            let ledger = Arc::new(MockLedgerService::new(committee));
+            let max_gc_rounds = BatchHeader::<CurrentNetwork>::MAX_GC_ROUNDS as u64;
+            let storage = Storage::new(ledger.clone(), Arc::new(BFTMemoryService::new()), max_gc_rounds).unwrap();
+            let account = Account::new(&mut TestRng::default()).unwrap();
+            let node_data_dir = NodeDataDir::new_test(None);
+            let gateway =
+                Gateway::new(account, storage.clone(), ledger.clone(), None, &[], false, node_data_dir, None).unwrap();
+            let block_sync = Arc::new(BlockSync::new(ledger.clone(), ConnectionMode::Gateway));
+            Sync::new(gateway, storage, ledger, block_sync)
+        }
+
+        /// Puts a request for `certificate_id` that was sent to the peer into the pending queue,
+        /// and returns the receiver of its callback.
+        fn insert_sent_request(
+            sync: &Sync<CurrentNetwork>,
+            certificate_id: Field<CurrentNetwork>,
+        ) -> oneshot::Receiver<BatchCertificate<CurrentNetwork>> {
+            let (sender, receiver) = oneshot::channel();
+            sync.pending.insert(certificate_id, PEER_IP, Some((sender, true)));
+            receiver
+        }
+
+        /// The response to a certificate request arrives at the instant at which the request times
+        /// out. The request fails or succeeds, depending on which of the two tasks runs first. The
+        /// response clears the pending request in both cases, and it reaches the earlier request.
+        #[test]
+        fn response_arrives_at_the_fetch_timeout() {
+            static NUM_FETCHED: AtomicUsize = AtomicUsize::new(0);
+            static NUM_TIMED_OUT: AtomicUsize = AtomicUsize::new(0);
+
+            let (committee, certificate) = sample_committee_and_certificate();
+            check_async(ITERATIONS, move || {
+                let (sync, certificate) = (new_sync(committee.clone()), certificate.clone());
+                async move {
+                    let earlier_request = insert_sent_request(&sync, certificate.id());
+
+                    let request = {
+                        let (sync, certificate_id) = (sync.clone(), certificate.id());
+                        tokio::spawn(async move { sync.send_certificate_request(PEER_IP, certificate_id).await })
+                    };
+                    let response = {
+                        let (sync, certificate) = (sync.clone(), certificate.clone());
+                        tokio::spawn(async move {
+                            sleep(MAX_FETCH_TIMEOUT).await;
+                            sync.finish_certificate_request(PEER_IP, certificate.into());
+                        })
+                    };
+
+                    let fetched = request.await.unwrap();
+                    response.await.unwrap();
+                    match fetched {
+                        Ok(fetched) => {
+                            assert_eq!(fetched, certificate);
+                            NUM_FETCHED.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(error) => {
+                            assert!(format!("{error:#}").contains("(timeout)"), "{error:#}");
+                            NUM_TIMED_OUT.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    assert_eq!(earlier_request.await.unwrap(), certificate);
+                    assert!(!sync.pending.contains(certificate.id()));
+                }
+            });
+
+            // Both orders must occur, or the test does not cover the race.
+            assert!(NUM_FETCHED.load(Ordering::Relaxed) > 0, "the response never came first");
+            assert!(NUM_TIMED_OUT.load(Ordering::Relaxed) > 0, "the timeout never came first");
+        }
+
+        /// A second request for a certificate starts at the instant at which the response to the
+        /// first one arrives. The second request must not wait for a response that no peer will
+        /// send: it gets the response of the first request, or it sends a request of its own.
+        #[test]
+        #[ignore = "fails: the request decides to send nothing, and the response clears the pending queue before the request is in it"]
+        fn request_starts_as_the_response_arrives() {
+            static NUM_FETCHED: AtomicUsize = AtomicUsize::new(0);
+            static NUM_SENT: AtomicUsize = AtomicUsize::new(0);
+
+            let (committee, certificate) = sample_committee_and_certificate();
+            check_async(ITERATIONS, move || {
+                let (sync, certificate) = (new_sync(committee.clone()), certificate.clone());
+                async move {
+                    let first_request = insert_sent_request(&sync, certificate.id());
+
+                    let second_request = {
+                        let (sync, certificate_id) = (sync.clone(), certificate.id());
+                        tokio::spawn(async move {
+                            sleep(Duration::from_secs(1)).await;
+                            sync.send_certificate_request(PEER_IP, certificate_id).await
+                        })
+                    };
+                    let response = {
+                        let (sync, certificate) = (sync.clone(), certificate.clone());
+                        tokio::spawn(async move {
+                            sleep(Duration::from_secs(1)).await;
+                            sync.finish_certificate_request(PEER_IP, certificate.into());
+                        })
+                    };
+
+                    let fetched = second_request.await.unwrap();
+                    response.await.unwrap();
+                    assert_eq!(first_request.await.unwrap(), certificate);
+                    match fetched {
+                        Ok(fetched) => {
+                            assert_eq!(fetched, certificate);
+                            NUM_FETCHED.fetch_add(1, Ordering::Relaxed);
+                        }
+                        // The request came after the response, and the gateway has no connection.
+                        Err(error) if format!("{error:#}").contains("failed to send request") => {
+                            NUM_SENT.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(error) => panic!("the second request sent nothing and got no response: {error:#}"),
+                    }
+                }
+            });
+
+            // Both orders must occur, or the test does not cover the race.
+            assert!(NUM_FETCHED.load(Ordering::Relaxed) > 0, "the second request never came first");
+            assert!(NUM_SENT.load(Ordering::Relaxed) > 0, "the response never came first");
+        }
+    }
 }

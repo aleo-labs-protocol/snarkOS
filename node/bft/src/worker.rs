@@ -1284,6 +1284,87 @@ mod tests {
             assert!(NUM_TIMED_OUT.load(Ordering::Relaxed) > 0, "the timeout never came first");
         }
 
+        /// A second request for a transmission starts at the instant at which the response to the
+        /// first one arrives. The peer answers each request that it gets after one second, so no
+        /// request may time out: the second request gets the response of the first one, or it
+        /// sends a request of its own.
+        #[test]
+        #[ignore = "fails: the request decides to send nothing, and the response clears the pending queue before the request is in it"]
+        fn request_starts_as_the_response_arrives() {
+            const RESPONSE_DELAY: Duration = Duration::from_secs(1);
+            static NUM_FETCHED: AtomicUsize = AtomicUsize::new(0);
+            static NUM_SENT: AtomicUsize = AtomicUsize::new(0);
+
+            check_async(ITERATIONS, || async {
+                let rng = &mut TestRng::default();
+                let committee = snarkvm::ledger::committee::test_helpers::sample_committee(rng);
+                let committee_clone = committee.clone();
+                let (request_sender, mut request_receiver) = tokio::sync::mpsc::unbounded_channel();
+                let num_requests = Arc::new(AtomicUsize::new(0));
+                let num_requests_ = num_requests.clone();
+                let mut gateway = MockGateway::default();
+                gateway.expect_send().returning(move |_, _| {
+                    num_requests_.fetch_add(1, Ordering::Relaxed);
+                    request_sender.send(()).unwrap();
+                    Some(oneshot::channel().1)
+                });
+                let mut mock_ledger = MockLedger::default();
+                mock_ledger.expect_current_committee().returning(move || Ok(committee.clone()));
+                mock_ledger.expect_get_committee_lookback_for_round().returning(move |_| Ok(committee_clone.clone()));
+                mock_ledger.expect_ensure_transmission_is_well_formed().returning(|_, _| Ok(()));
+                let ledger: Arc<dyn LedgerService<CurrentNetwork>> = Arc::new(mock_ledger);
+                let storage =
+                    Storage::<CurrentNetwork>::new(ledger.clone(), Arc::new(BFTMemoryService::new()), 1).unwrap();
+                let worker = Worker::new(0, Arc::new(gateway), storage, ledger, Default::default()).unwrap();
+
+                let transmission_id = TransmissionID::Solution(
+                    rng.random::<u64>().into(),
+                    rng.random::<<CurrentNetwork as Network>::TransmissionChecksum>(),
+                );
+                let peer_ip = SocketAddr::from(([127, 0, 0, 1], 1234));
+
+                // The peer. It waits for requests for ever, so nothing joins it.
+                {
+                    let worker = worker.clone();
+                    drop(tokio::spawn(async move {
+                        while request_receiver.recv().await.is_some() {
+                            sleep(RESPONSE_DELAY).await;
+                            worker.finish_transmission_request(peer_ip, TransmissionResponse {
+                                transmission_id,
+                                transmission: Transmission::Solution(Data::Buffer(Bytes::from(vec![0; 512]))),
+                            });
+                        }
+                    }));
+                }
+
+                let first_request = {
+                    let worker = worker.clone();
+                    tokio::spawn(async move { worker.send_transmission_request(peer_ip, transmission_id).await })
+                };
+                let second_request = {
+                    let worker = worker.clone();
+                    tokio::spawn(async move {
+                        sleep(RESPONSE_DELAY).await;
+                        worker.send_transmission_request(peer_ip, transmission_id).await
+                    })
+                };
+
+                first_request.await.unwrap().unwrap();
+                if let Err(error) = second_request.await.unwrap() {
+                    panic!("the second request got no response: {error:#}");
+                }
+                match num_requests.load(Ordering::Relaxed) {
+                    1 => NUM_FETCHED.fetch_add(1, Ordering::Relaxed),
+                    2 => NUM_SENT.fetch_add(1, Ordering::Relaxed),
+                    num_requests => panic!("the worker sent {num_requests} requests"),
+                };
+            });
+
+            // Both orders must occur, or the test does not cover the race.
+            assert!(NUM_FETCHED.load(Ordering::Relaxed) > 0, "the second request never came first");
+            assert!(NUM_SENT.load(Ordering::Relaxed) > 0, "the response never came first");
+        }
+
         #[test]
         fn test_max_redundant_requests() {
             check_async(ITERATIONS, super::test_max_redundant_requests);
