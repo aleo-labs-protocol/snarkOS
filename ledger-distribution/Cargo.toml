@@ -73,6 +73,9 @@ workspace = true
 workspace = true
 features = [ "env-filter", "parking_lot" ]
 
+[target.'cfg(unix)'.dependencies]
+rlimit = "0.11"
+
 [dev-dependencies.async-trait]
 workspace = true
 

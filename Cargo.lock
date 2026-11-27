@@ -5461,6 +5461,7 @@ dependencies = [
  "hyper-util",
  "num_cpus",
  "object_store",
+ "rlimit",
  "s3s",
  "s3s-fs",
  "serde",
