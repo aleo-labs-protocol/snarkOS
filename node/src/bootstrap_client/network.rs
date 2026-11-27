@@ -114,8 +114,8 @@ impl<N: Network> Reading for BootstrapClient<N> {
 
     /// Creates a [`Decoder`] used to interpret messages from the network.
     /// The `side` param indicates the connection side **from the node's perspective**.
-    fn codec(&self, _peer_addr: SocketAddr, _side: ConnectionSide) -> Self::Codec {
-        Default::default()
+    fn codec(&self, peer_addr: SocketAddr, _side: ConnectionSide) -> Self::Codec {
+        self.peer_codec(peer_addr)
     }
 
     /// Processes a message received from the network.
@@ -208,7 +208,22 @@ impl<N: Network> Writing for BootstrapClient<N> {
 
     /// Creates an [`Encoder`] used to write the outbound messages to the target stream.
     /// The `side` parameter indicates the connection side **from the node's perspective**.
-    fn codec(&self, _addr: SocketAddr, _side: ConnectionSide) -> Self::Codec {
-        Default::default()
+    fn codec(&self, peer_addr: SocketAddr, _side: ConnectionSide) -> Self::Codec {
+        self.peer_codec(peer_addr)
+    }
+}
+
+impl<N: Network> BootstrapClient<N> {
+    /// Returns the codec for a peer that has completed its handshake, in the mode it connected in.
+    ///
+    /// The handshake records the mode before reading and writing are enabled. A peer it did not
+    /// record cannot be resolved, so `process_message` drops whatever its codec decodes.
+    fn peer_codec(&self, peer_addr: SocketAddr) -> BootstrapClientCodec<N> {
+        let mode = self
+            .resolve_to_listener(peer_addr)
+            .and_then(|listener_addr| self.get_connected_peer(listener_addr))
+            .map(|peer| peer.connection_mode)
+            .unwrap_or(ConnectionMode::Router);
+        BootstrapClientCodec::new(mode)
     }
 }
