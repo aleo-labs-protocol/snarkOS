@@ -22,7 +22,10 @@ use ::shuttle::{
     Runner,
     scheduler::{PctScheduler, RandomScheduler, Scheduler},
 };
-use std::{future::Future, sync::Arc};
+use std::{
+    future::Future,
+    sync::{Arc, atomic::Ordering},
+};
 
 /// The depth of the PCT scheduler, which changes the priorities of the threads at
 /// `PCT_DEPTH - 1` points.
@@ -44,26 +47,80 @@ const STACK_SIZE: usize = 8 * 1024 * 1024;
 ///
 /// Both run the clock of [`crate::time`] only when no thread can run.
 ///
-/// A test in which no two threads can run at the same time has one order. It runs once.
+/// A test in which no two threads can run at the same time, and that takes no random data from
+/// shuttle, has one order. It runs once. A `tokio::select!` takes random data: it starts at a
+/// random branch.
 pub fn check(iterations: usize, test: impl Fn() + Send + Sync + 'static) {
     let test = Arc::new(test);
     let run = |scheduler: IdleClock<Box<dyn Scheduler + Send>>| {
-        let (test, had_choice) = (test.clone(), scheduler.had_choice());
+        let (test, had_choice, took_random_data) = (test.clone(), scheduler.had_choice(), scheduler.took_random_data());
         let mut config = Config::new();
         config.stack_size = STACK_SIZE;
+        // The one warning of shuttle is for a `lazy_static` that an execution drops at its end.
+        // The clock is one.
+        config.silence_warnings = true;
         Runner::new(scheduler, config).run(move || test());
-        had_choice.load(std::sync::atomic::Ordering::Relaxed)
+        (had_choice.load(Ordering::Relaxed), took_random_data.load(Ordering::Relaxed))
     };
 
-    // The PCT scheduler panics on a test that gives it nothing to decide, so find that out first.
-    if !run(IdleClock::new(Box::new(RandomScheduler::new(1)))) {
-        return;
+    let (had_choice, took_random_data) = run(IdleClock::new(Box::new(RandomScheduler::new(1))));
+    // The PCT scheduler panics on a test that gives it no threads to choose from.
+    if had_choice {
+        run(IdleClock::new(Box::new(PctScheduler::new(PCT_DEPTH, iterations))));
     }
-    run(IdleClock::new(Box::new(PctScheduler::new(PCT_DEPTH, iterations))));
-    run(IdleClock::new(Box::new(RandomScheduler::new(iterations))));
+    if had_choice || took_random_data {
+        run(IdleClock::new(Box::new(RandomScheduler::new(iterations))));
+    }
 }
 
 /// Runs the future that `test` makes; see [`check`].
 pub fn check_async<F: Future<Output = ()>>(iterations: usize, test: impl Fn() -> F + Send + Sync + 'static) {
     check(iterations, move || ::shuttle::future::block_on(test()));
+}
+
+#[cfg(test)]
+mod shuttle_tests {
+    use super::*;
+    use crate::time::sleep;
+
+    use std::{sync::atomic::AtomicUsize, time::Duration};
+
+    const ITERATIONS: usize = 100;
+
+    /// One task waits in a `select!` for two timers with the same deadline. No two tasks can run
+    /// at the same time, and each branch must still occur.
+    #[test]
+    fn select_in_one_task_takes_each_branch() {
+        let counts = Arc::new((AtomicUsize::new(0), AtomicUsize::new(0)));
+
+        let test_counts = counts.clone();
+        check_async(ITERATIONS, move || {
+            let counts = test_counts.clone();
+            async move {
+                let (num_runs, num_first) = &*counts;
+                num_runs.fetch_add(1, Ordering::Relaxed);
+                tokio::select! {
+                    _ = sleep(Duration::from_secs(1)) => { num_first.fetch_add(1, Ordering::Relaxed); }
+                    _ = sleep(Duration::from_secs(1)) => {}
+                }
+            }
+        });
+
+        let (num_runs, num_first) = (counts.0.load(Ordering::Relaxed), counts.1.load(Ordering::Relaxed));
+        assert!(0 < num_first && num_first < num_runs, "the first branch won {num_first} of {num_runs} runs");
+    }
+
+    /// A task waits for an event that never comes, while another task keeps a timer.
+    #[test]
+    #[should_panic(expected = "the clock passed")]
+    fn clock_ends_an_execution_that_waits_forever() {
+        check_async(ITERATIONS, || async {
+            tokio::spawn(async {
+                loop {
+                    sleep(Duration::from_secs(1)).await;
+                }
+            });
+            std::future::pending::<()>().await;
+        });
+    }
 }

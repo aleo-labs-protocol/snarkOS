@@ -55,6 +55,11 @@ use std::{
     static ref CLOCK: Mutex<Clock> = Mutex::new(Clock::new());
 }
 
+/// The time of the clock at which it fails the execution. Hazard: with no limit, an execution in
+/// which one task waits for an event that never comes, and another task keeps a timer, runs
+/// until shuttle's limit of steps. That failure does not name a blocked task.
+const MAX_TIME: Duration = Duration::from_secs(60 * 60);
+
 /// The label of the clock task of an execution, which [`IdleClock`] holds back.
 #[derive(Clone, Debug)]
 struct ClockTask;
@@ -98,6 +103,9 @@ impl Clock {
 /// Returns the system time. In an execution, it is the time at which the execution started, in
 /// whole seconds, plus the time of its clock. A timestamp in seconds thus changes only when the
 /// clock moves, and not with the real time that an execution takes.
+///
+/// Hazard: on a thread that shuttle does not run, such as a `rayon` thread, it is the real system
+/// time. The timers panic there.
 pub fn system_now() -> SystemTime {
     match current::try_get_current_task() {
         Some(_) => {
@@ -220,7 +228,7 @@ impl Future for NextDeadline {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        let due = {
+        let (now, due) = {
             let mut clock = CLOCK.lock().unwrap();
             let clock = &mut *clock;
             clock.timers.retain(|_, timer| !timer.is_dropped.load(Ordering::Relaxed));
@@ -230,8 +238,9 @@ impl Future for NextDeadline {
             };
             clock.now = clock.now.max(deadline);
             let not_due = clock.timers.split_off(&(clock.now, u64::MAX));
-            std::mem::replace(&mut clock.timers, not_due)
+            (clock.now, std::mem::replace(&mut clock.timers, not_due))
         };
+        assert!(now <= MAX_TIME, "the clock passed {MAX_TIME:?}: does a task wait for an event that never comes?");
         for timer in due.into_values() {
             timer.waker.wake();
         }
@@ -288,17 +297,26 @@ pub struct IdleClock<S> {
     scheduler: S,
     /// Whether the wrapped scheduler ever had more than one task to choose from.
     had_choice: Arc<AtomicBool>,
+    /// Whether a test ever took random data from the wrapped scheduler.
+    took_random_data: Arc<AtomicBool>,
 }
 
 impl<S> IdleClock<S> {
     pub fn new(scheduler: S) -> Self {
-        Self { scheduler, had_choice: Default::default() }
+        Self { scheduler, had_choice: Default::default(), took_random_data: Default::default() }
     }
 
     /// Returns a flag that is set once the wrapped scheduler has more than one task to choose
     /// from. If it is not set after an execution, the test has that one order only.
     pub fn had_choice(&self) -> Arc<AtomicBool> {
         self.had_choice.clone()
+    }
+
+    /// Returns a flag that is set once a test takes random data from the wrapped scheduler, as
+    /// `shuttle::rand` does. A test that sets neither flag in an execution has that one execution
+    /// only.
+    pub fn took_random_data(&self) -> Arc<AtomicBool> {
+        self.took_random_data.clone()
     }
 }
 
@@ -334,6 +352,7 @@ impl<S: Scheduler> Scheduler for IdleClock<S> {
     }
 
     fn next_u64(&mut self) -> u64 {
+        self.took_random_data.store(true, Ordering::Relaxed);
         self.scheduler.next_u64()
     }
 }
