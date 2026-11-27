@@ -905,7 +905,7 @@ mod tests {
         assert_eq!(worker.num_transmissions(), num_to_insert);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_send_transmission() {
         let rng = &mut TestRng::default();
         // Sample a committee.
@@ -945,7 +945,7 @@ mod tests {
         assert!(!worker.pending.contains(transmission_id));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_solution_ok() {
         let rng = &mut TestRng::default();
         // Sample a committee.
@@ -982,7 +982,7 @@ mod tests {
         assert!(worker.ready.read().contains(transmission_id));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_solution_nok() {
         let rng = &mut TestRng::default();
         // Sample a committee.
@@ -1019,7 +1019,7 @@ mod tests {
         assert!(!worker.ready.read().contains(transmission_id));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_transaction_ok() {
         let rng = &mut TestRng::default();
         // Sample a committee.
@@ -1057,7 +1057,7 @@ mod tests {
         assert!(worker.ready.read().contains(transmission_id));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_transaction_nok() {
         let mut rng = &mut TestRng::default();
         // Sample a committee.
@@ -1094,7 +1094,7 @@ mod tests {
         assert!(!worker.ready.read().contains(transmission_id));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_flood_transmission_requests() {
         let rng = &mut TestRng::default();
         // Sample a committee.
@@ -1149,6 +1149,7 @@ mod tests {
 
         // Let all the requests expire.
         tokio::time::sleep(Duration::from_secs(CALLBACK_EXPIRATION_IN_SECS as u64 + 1)).await;
+        worker.pending.backdate_callbacks(CALLBACK_EXPIRATION_IN_SECS + 1);
         assert_eq!(worker.pending.num_sent_requests(transmission_id), 0);
         assert_eq!(worker.pending.num_callbacks(transmission_id), 0);
 

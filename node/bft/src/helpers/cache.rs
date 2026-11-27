@@ -230,7 +230,7 @@ mod tests {
     use super::*;
     use snarkvm::prelude::MainnetV0;
 
-    use std::{net::Ipv4Addr, thread, time::Duration};
+    use std::net::Ipv4Addr;
 
     type CurrentNetwork = MainnetV0;
 
@@ -264,6 +264,12 @@ mod tests {
 
     const INTERVAL_IN_SECS: i64 = 3;
 
+    /// Moves every timestamp in the map `secs` seconds into the past.
+    fn backdate<V>(map: &RwLock<BTreeMap<i64, V>>, secs: i64) {
+        let mut map = map.write();
+        *map = std::mem::take(&mut *map).into_iter().map(|(timestamp, value)| (timestamp - secs, value)).collect();
+    }
+
     macro_rules! test_cache_fields {
         ($($name:ident),*) => {
             $(
@@ -278,12 +284,12 @@ mod tests {
 
                         // Insert an input, recent events should be 1.
                         assert_eq!(cache.[<insert_ $name>](input, INTERVAL_IN_SECS), 1);
-                        // Wait for 1s so that the next entry doesn't overwrite the first one.
-                        thread::sleep(Duration::from_secs(1));
+                        // Age the entries by 1s so that the next entry doesn't overwrite the first one.
+                        backdate(&cache.[<seen_ $name s>], 1);
                         // Insert an input, recent events should be 2.
                         assert_eq!(cache.[<insert_ $name>](input, INTERVAL_IN_SECS), 2);
-                        // Wait for 1s so that the next entry doesn't overwrite the first one.
-                        thread::sleep(Duration::from_secs(1));
+                        // Age the entries by 1s so that the next entry doesn't overwrite the first one.
+                        backdate(&cache.[<seen_ $name s>], 1);
                         // Insert an input, recent events should be 3.
                         assert_eq!(cache.[<insert_ $name>](input, INTERVAL_IN_SECS), 3);
 
@@ -300,8 +306,8 @@ mod tests {
                         // Check that the cache contains the input for 2 entries.
                         assert_eq!(cache.[<seen_ $name s>].read().len(), 2);
 
-                        // Wait for the input to expire.
-                        thread::sleep(Duration::from_secs(INTERVAL_IN_SECS as u64 + 1));
+                        // Age the entries until the input expires.
+                        backdate(&cache.[<seen_ $name s>], INTERVAL_IN_SECS + 1);
 
                         // Insert an input again, recent events should be 1.
                         assert_eq!(cache.[<insert_ $name>](input, INTERVAL_IN_SECS), 1);
