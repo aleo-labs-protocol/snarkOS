@@ -178,8 +178,11 @@ impl<N: Network> Sync<N> {
         self.spawn(async move {
             loop {
                 // Wait until there is something to do or until the timeout.
-                let _ =
-                    tokio::time::timeout(Self::MAX_SYNC_INTERVAL, self_.block_sync.wait_for_block_responses()).await;
+                let _ = snarkos_utilities::time::timeout(
+                    Self::MAX_SYNC_INTERVAL,
+                    self_.block_sync.wait_for_block_responses(),
+                )
+                .await;
 
                 let ping = ping.clone();
                 let self_ = self_.clone();
@@ -203,7 +206,7 @@ impl<N: Network> Sync<N> {
         self.spawn(async move {
             loop {
                 // Sleep briefly.
-                tokio::time::sleep(MAX_FETCH_TIMEOUT).await;
+                snarkos_utilities::time::sleep(MAX_FETCH_TIMEOUT).await;
 
                 // Remove the expired pending transmission requests.
                 let self__ = self_.clone();
@@ -1063,7 +1066,7 @@ impl<N: Network> Sync<N> {
         }
         // Wait for the certificate to be fetched.
         // TODO (raychu86): Consider making the timeout dynamic based on network traffic and/or the number of validators.
-        tokio::time::timeout(MAX_FETCH_TIMEOUT, callback_receiver)
+        snarkos_utilities::time::timeout(MAX_FETCH_TIMEOUT, callback_receiver)
             .await
             .with_context(|| format!("Unable to fetch batch certificate {} (timeout)", fmt_id(certificate_id)))?
             .with_context(|| format!("Unable to fetch batch certificate {}", fmt_id(certificate_id)))

@@ -79,7 +79,7 @@ jobs run on every event.
 | `source-checks` | hosted | all | | `scripts/check_sources.py`: license headers in `.rs` files |
 | `lint` | `cpu` | all | 90 | clippy, default and `--all-features`; `cargo check --all-features` of `snarkos-node-metrics` and `snarkos-display` |
 | `lint-locktick` | `cpu` | all | 90 | clippy `--all-features` under `--cfg locktick` (`locktick-clippy` alias) |
-| `test-shuttle` | `cpu` | all | 30 | the `shuttle_tests` of `snarkos-node-bft` under `--cfg shuttle` (`shuttle-test` alias), then clippy `--all-features` under the cfg of the workspace without `snarkos-cli` and `snarkos` (`shuttle-clippy` alias) |
+| `test-shuttle` | `cpu` | all | 30 | the `shuttle_tests` of `snarkos-node-bft` and of `snarkos-utilities` under `--cfg shuttle` (`shuttle-test` alias), then clippy `--all-features` under the cfg of the workspace without `snarkos-cli` and `snarkos` (`shuttle-clippy` alias) |
 | `test (light)` | hosted | all | 90 | `snarkos-account`, `-utilities`, `-node-tcp`, `-node-sync-locators`, `-node-network` |
 | `test (cdn)` | hosted | all | 90 | `snarkos-node-cdn` |
 | `test (messages)` | hosted | all | 90 | `snarkos-node-bft-events`, `-node-router-messages`, `-node-bft-ledger-service` |

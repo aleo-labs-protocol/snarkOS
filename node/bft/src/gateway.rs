@@ -365,7 +365,7 @@ impl<N: Network> Gateway<N> {
             let gateway = self.clone();
             self.spawn(async move {
                 loop {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    snarkos_utilities::time::sleep(Duration::from_secs(1)).await;
                     gateway.update_metrics();
                 }
             });
@@ -995,13 +995,13 @@ impl<N: Network> Gateway<N> {
         let self_clone = self.clone();
         self.spawn(async move {
             // Sleep briefly to ensure the other nodes are ready to connect.
-            tokio::time::sleep(Duration::from_millis(1000)).await;
+            snarkos_utilities::time::sleep(Duration::from_millis(1000)).await;
             info!("Starting the heartbeat of the gateway...");
             loop {
                 // Process a heartbeat in the gateway.
                 self_clone.heartbeat().await;
                 // Sleep for the heartbeat interval.
-                tokio::time::sleep(Duration::from_secs(15)).await;
+                snarkos_utilities::time::sleep(Duration::from_secs(15)).await;
             }
         });
     }
@@ -1410,7 +1410,7 @@ impl<N: Network> Transport<N> for Gateway<N> {
                 // Rate limit the number of certificate requests sent to the peer.
                 while $self.cache.$cache_map(peer_ip, $interval) > $self.$freq() {
                     // Sleep for a short period of time to allow the cache to clear.
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    snarkos_utilities::time::sleep(Duration::from_millis(10)).await;
                 }
                 // Send the event to the peer.
                 $self.send_inner(peer_ip, event)

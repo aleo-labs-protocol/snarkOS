@@ -20,12 +20,12 @@ use time::OffsetDateTime;
 
 /// Returns the current UTC epoch timestamp.
 pub fn now() -> i64 {
-    OffsetDateTime::now_utc().unix_timestamp()
+    now_utc().unix_timestamp()
 }
 
 /// Returns the current UTC epoch time.
 pub fn now_utc() -> OffsetDateTime {
-    OffsetDateTime::now_utc()
+    snarkos_utilities::time::system_now().into()
 }
 
 /// Converts the given timestamp to an `OffsetDateTime`, defaulting to the current UTC time if invalid.

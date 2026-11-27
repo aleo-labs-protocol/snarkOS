@@ -17,9 +17,7 @@
 //! Run them with `cargo shuttle-test -p snarkos-node-bft --lib shuttle_tests`.
 //!
 //! Each test samples its certificates once. It then runs its closure many times, each time on a
-//! new storage and with another order of the steps of its threads; see [`check`]. A failure
-//! prints the schedule that replays it, which `shuttle::replay` takes. The random scheduler also
-//! prints its seed, which `SHUTTLE_RANDOM_SEED` takes.
+//! new storage and with another order of the steps of its threads; see [`check`].
 //!
 //! Hazard: shuttle switches threads only at the types that the cfg swaps. A thread that samples
 //! or signs inside a closure makes each run slow and tests nothing more.
@@ -27,7 +25,7 @@
 use super::{tests::sample_transmissions, *};
 use snarkos_node_bft_ledger_service::MockLedgerService;
 use snarkos_node_bft_storage_service::BFTMemoryService;
-use snarkos_utilities::shuttle::{self, thread};
+use snarkos_utilities::{shuttle::thread, shuttle_test::check};
 use snarkvm::{
     ledger::{
         committee::{Committee, test_helpers::sample_committee_and_keys_for_round},
@@ -43,10 +41,6 @@ type InsertResult = Result<(), CheckCertificateError>;
 
 /// The number of thread orders that each test of this module runs with each scheduler.
 const ITERATIONS: usize = 5_000;
-
-/// The depth of the PCT scheduler, which changes the priorities of the threads at
-/// `PCT_DEPTH - 1` points.
-const PCT_DEPTH: usize = 3;
 
 /// The number of committee members, which is the smallest one that tolerates a fault.
 const NUM_MEMBERS: usize = 4;
@@ -85,19 +79,6 @@ impl Fixture {
         let (transmissions, _) = sample_transmissions(&certificate, &mut self.rng);
         (certificate, transmissions)
     }
-}
-
-/// Runs `test` under two schedulers, each with new seeds and for `iterations` thread orders.
-///
-/// The PCT scheduler runs one thread until a random point, and then prefers another one. It
-/// finds the orders in which one thread stops between two particular steps while another one
-/// runs to its end. The random scheduler picks a thread at every step, so its threads advance
-/// together, and it almost never produces those orders.
-pub(crate) fn check(iterations: usize, test: impl Fn() + Send + Sync + 'static) {
-    let test = Arc::new(test);
-    let pct_test = test.clone();
-    shuttle::check_pct(move || pct_test(), iterations, PCT_DEPTH);
-    shuttle::check_random(move || test(), iterations);
 }
 
 /// Returns an empty storage whose GC round is 0.

@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::events::BlockRequest;
+use crate::{events::BlockRequest, helpers::now};
 use snarkvm::{console::types::Field, ledger::narwhal::TransmissionID, prelude::Network};
 
 use core::hash::Hash;
@@ -22,7 +22,6 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::{IpAddr, SocketAddr},
 };
-use time::OffsetDateTime;
 
 #[derive(Debug)]
 pub struct Cache<N: Network> {
@@ -166,7 +165,7 @@ impl<N: Network> Cache<N> {
         interval_in_secs: i64,
     ) -> usize {
         // Fetch the current timestamp.
-        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let now = now();
 
         // Get the write lock.
         let mut map_write = map.write();
