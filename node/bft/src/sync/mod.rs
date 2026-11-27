@@ -2145,11 +2145,12 @@ mod tests {
     /// Run them with `cargo shuttle-test -p snarkos-node-bft --lib shuttle_tests`.
     ///
     /// The clock is the one of `snarkos_utilities::time`: it moves only when no task can run, so
-    /// tasks that wait for the same instant run in every order.
+    /// tasks that wait for the same instant run in many orders.
     ///
     /// Hazard: the gateway of these tests has no connection, so a request that it must send fails
     /// with "failed to send request". A test that needs a request to wait puts an earlier request
-    /// to the same peer into the pending queue first.
+    /// to the same peer into the pending queue first. The earlier request expires after
+    /// `CALLBACK_EXPIRATION_IN_SECS`, and the later one is then sent.
     #[cfg(shuttle)]
     mod shuttle_tests {
         use super::*;

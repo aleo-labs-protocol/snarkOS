@@ -39,12 +39,34 @@ const STACK_SIZE: usize = 8 * 1024 * 1024;
 /// runs that schedule only.
 const REPLAY_FILE: &str = "SHUTTLE_REPLAY_FILE";
 
+/// Prints how to replay a failure when the test that holds it panics. The message of shuttle
+/// names `shuttle::replay`, which runs neither the clock of [`crate::time`] nor [`STACK_SIZE`].
+struct ReplayHint;
+
+impl Drop for ReplayHint {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!(
+                "to replay the failure: save the schedule in a file, name the file in {REPLAY_FILE}, and run this test with `--exact`"
+            );
+        }
+    }
+}
+
 /// Runs `test` under two schedulers, each with new seeds and for `iterations` orders of the
 /// steps of its threads and tasks.
 ///
 /// A failure prints the schedule that replays it. To replay it, save it in a file, name the file
-/// in `SHUTTLE_REPLAY_FILE`, and run that test only. The random scheduler also prints its seed,
-/// which `SHUTTLE_RANDOM_SEED` takes.
+/// in `SHUTTLE_REPLAY_FILE`, and run that test only. If the failure prints two schedules, the
+/// last one is the full one. The random scheduler also prints its seed, which
+/// `SHUTTLE_RANDOM_SEED` takes.
+///
+/// Hazard: every test that runs takes the schedule in the file, and the filter of `cargo test`
+/// is a part of a name. Give the full path of the test, with `--exact`.
+///
+/// Hazard: a schedule fits the steps of the code that made it. After a change to those steps,
+/// such as the correction of the failure, the replay does not pass: it panics in shuttle with
+/// "schedule ended early" or "scheduled task is not runnable".
 ///
 /// The PCT scheduler runs one thread until a random point, and then prefers another one. It
 /// finds the orders in which one thread stops between two particular steps while another one
@@ -70,11 +92,18 @@ pub fn check(iterations: usize, test: impl Fn() + Send + Sync + 'static) {
     };
 
     if let Ok(path) = std::env::var(REPLAY_FILE) {
-        let scheduler = ReplayScheduler::new_from_file(&path)
+        let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("could not read the schedule in '{path}': {error}"));
-        run(IdleClock::new(Box::new(scheduler)));
+        // Shuttle prints the schedule between two lines that hold a quotation mark.
+        let schedule: String = text.chars().filter(|c| !c.is_whitespace() && *c != '"').collect();
+        assert!(
+            !schedule.is_empty() && schedule.chars().all(|c| c.is_ascii_hexdigit()),
+            "'{path}' does not hold a schedule that shuttle printed"
+        );
+        run(IdleClock::new(Box::new(ReplayScheduler::new_from_encoded(&schedule))));
         return;
     }
+    let _replay_hint = ReplayHint;
 
     let (had_choice, took_random_data) = run(IdleClock::new(Box::new(RandomScheduler::new(1))));
     // The PCT scheduler panics on a test that gives it no threads to choose from.

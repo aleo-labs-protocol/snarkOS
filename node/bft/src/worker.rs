@@ -1292,14 +1292,19 @@ mod tests {
         #[ignore = "fails: the request decides to send nothing, and the response clears the pending queue before the request is in it"]
         fn request_starts_as_the_response_arrives() {
             const RESPONSE_DELAY: Duration = Duration::from_secs(1);
+            static NUM_FETCHED: AtomicUsize = AtomicUsize::new(0);
+            static NUM_SENT: AtomicUsize = AtomicUsize::new(0);
 
             check_async(ITERATIONS, || async {
                 let rng = &mut TestRng::default();
                 let committee = snarkvm::ledger::committee::test_helpers::sample_committee(rng);
                 let committee_clone = committee.clone();
                 let (request_sender, mut request_receiver) = tokio::sync::mpsc::unbounded_channel();
+                let num_requests = Arc::new(AtomicUsize::new(0));
+                let num_requests_ = num_requests.clone();
                 let mut gateway = MockGateway::default();
                 gateway.expect_send().returning(move |_, _| {
+                    num_requests_.fetch_add(1, Ordering::Relaxed);
                     request_sender.send(()).unwrap();
                     Some(oneshot::channel().1)
                 });
@@ -1348,7 +1353,16 @@ mod tests {
                 if let Err(error) = second_request.await.unwrap() {
                     panic!("the second request got no response: {error:#}");
                 }
+                match num_requests.load(Ordering::Relaxed) {
+                    1 => NUM_FETCHED.fetch_add(1, Ordering::Relaxed),
+                    2 => NUM_SENT.fetch_add(1, Ordering::Relaxed),
+                    num_requests => panic!("the worker sent {num_requests} requests"),
+                };
             });
+
+            // Both orders must occur, or the test does not cover the race.
+            assert!(NUM_FETCHED.load(Ordering::Relaxed) > 0, "the second request never came first");
+            assert!(NUM_SENT.load(Ordering::Relaxed) > 0, "the response never came first");
         }
 
         #[test]

@@ -4179,6 +4179,9 @@ mod tests {
     /// Tests of the primary under the `shuttle` scheduler, which also picks the order in which
     /// the tasks of a test run; see `snarkos_utilities::locks` for that build and its hazards.
     /// Run them with `cargo shuttle-test -p snarkos-node-bft --lib shuttle_tests`.
+    ///
+    /// Hazard: the gateway of these tests has no connection, so nothing that the primary sends
+    /// arrives. A test puts the answers of the peers into the channels of the primary.
     #[cfg(shuttle)]
     mod shuttle_tests {
         use super::*;
@@ -4293,7 +4296,9 @@ mod tests {
         /// certified its batch of round 1, and the number of those in which the batch expired.
         fn peers_answer_the_proposal(signature_delay: Duration, certificate_delay: Duration) -> (usize, usize) {
             /// The time that the primary has to propose its batch of round 2, after the last event.
-            const TIME_TO_REST: Duration = Duration::from_millis(2 * MAX_BATCH_DELAY.as_millis() as u64);
+            /// The timers of the primary end at multiples of the batch delays, and the last
+            /// millisecond puts the checks after them.
+            const TIME_TO_REST: Duration = Duration::from_millis(2 * MAX_BATCH_DELAY.as_millis() as u64 + 1);
 
             let mut rng = TestRng::default();
             let (accounts, committee) = sample_committee(&mut rng);
@@ -4440,6 +4445,9 @@ mod tests {
         #[test]
         #[ignore = "fails: the proposal task clears its ready flag after it proposes, and loses the signal of a round that started in the meantime"]
         fn round_ends_as_the_primary_proposes() {
+            static NUM_PROPOSED_FIRST: AtomicUsize = AtomicUsize::new(0);
+            static NUM_CERTIFICATES_FIRST: AtomicUsize = AtomicUsize::new(0);
+
             let mut rng = TestRng::default();
             let (accounts, committee) = sample_committee(&mut rng);
             let height = CurrentNetwork::CONSENSUS_HEIGHT(ConsensusVersion::V1).unwrap();
@@ -4456,6 +4464,10 @@ mod tests {
 
                     // The proposal task proposes `MIN_BATCH_DELAY` after it starts.
                     sleep(MIN_BATCH_DELAY).await;
+                    match primary.proposed_batch.read().as_proposal() {
+                        Some(_) => NUM_PROPOSED_FIRST.fetch_add(1, Ordering::Relaxed),
+                        None => NUM_CERTIFICATES_FIRST.fetch_add(1, Ordering::Relaxed),
+                    };
                     for (peer_ip, certificate) in peer_certificates {
                         sender.tx_batch_certified.send((peer_ip, Data::Object(certificate))).await.unwrap();
                     }
@@ -4472,6 +4484,10 @@ mod tests {
                     primary.handles.lock().clear();
                 }
             });
+
+            // Both orders must occur, or the two events are not at the same instant.
+            assert!(NUM_PROPOSED_FIRST.load(Ordering::Relaxed) > 0, "the proposal never came first");
+            assert!(NUM_CERTIFICATES_FIRST.load(Ordering::Relaxed) > 0, "the certificates never came first");
         }
     }
 }
