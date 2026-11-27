@@ -1050,7 +1050,6 @@ impl<N: Network> Sync<N> {
                         || !request_stake_redundancy_reached(&self.gateway, sent_peers)?))
             })?;
 
-        // If the number of requests is less than or equal to the redundancy factor, send the certificate request to the peer.
         if should_send_request {
             // Send the certificate request to the peer.
             if self.gateway.send(peer_ip, Event::CertificateRequest(certificate_id.into())).await.is_none() {
@@ -2146,9 +2145,10 @@ mod tests {
     /// tasks that wait for the same instant run in many orders.
     ///
     /// Hazard: the gateway of these tests has no connection, so a request that it must send fails
-    /// with "failed to send request". A test that needs a request to wait puts an earlier request
-    /// to the same peer into the pending queue first. The earlier request expires after
-    /// `CALLBACK_EXPIRATION_IN_SECS`, and the later one is then sent.
+    /// with "failed to send request". A test that needs a request to wait puts earlier requests
+    /// into the pending queue first: one to the same peer, or one to each of enough validators.
+    /// An earlier request expires after `CALLBACK_EXPIRATION_IN_SECS`, and the later one is then
+    /// sent.
     #[cfg(shuttle)]
     mod shuttle_tests {
         use super::*;
@@ -2300,10 +2300,14 @@ mod tests {
         }
 
         /// Requests to enough peers are pending, so a request to one more peer checks the stake
-        /// of those peers, while the pending queue is locked. They hold enough stake, so the
-        /// request sends nothing, and it gets the response to one of the pending requests.
+        /// of those peers, while the pending queue is locked. The response to one of the pending
+        /// requests arrives at the same instant. The request finds enough stake, sends nothing and
+        /// gets that response, or it comes after the response and sends a request of its own.
         #[test]
         fn request_checks_the_stake_of_the_sent_peers() {
+            static NUM_FETCHED: AtomicUsize = AtomicUsize::new(0);
+            static NUM_SENT: AtomicUsize = AtomicUsize::new(0);
+
             let (committee, certificate) = sample_committee_and_certificate();
             check_async(ITERATIONS, move || {
                 let (sync, certificate) = (new_sync(committee.clone()), certificate.clone());
@@ -2325,19 +2329,33 @@ mod tests {
                     let response = {
                         let (sync, certificate) = (sync.clone(), certificate.clone());
                         tokio::spawn(async move {
-                            sleep(Duration::from_secs(1)).await;
                             sync.finish_certificate_request(sent_peers[0], certificate.into());
                         })
                     };
 
-                    assert_eq!(request.await.unwrap().unwrap(), certificate);
+                    let fetched = request.await.unwrap();
                     response.await.unwrap();
                     for sent_request in sent_requests {
                         assert_eq!(sent_request.await.unwrap(), certificate);
                     }
-                    assert!(!sync.pending.contains(certificate.id()));
+                    match fetched {
+                        Ok(fetched) => {
+                            assert_eq!(fetched, certificate);
+                            assert!(!sync.pending.contains(certificate.id()));
+                            NUM_FETCHED.fetch_add(1, Ordering::Relaxed);
+                        }
+                        // The request came after the response, and the gateway cannot reach its peer.
+                        Err(error) if format!("{error:#}").contains("failed to send request") => {
+                            NUM_SENT.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(error) => panic!("the request sent nothing and got no response: {error:#}"),
+                    }
                 }
             });
+
+            // Both orders must occur, or the test does not cover the race.
+            assert!(NUM_FETCHED.load(Ordering::Relaxed) > 0, "the request never came first");
+            assert!(NUM_SENT.load(Ordering::Relaxed) > 0, "the response never came first");
         }
     }
 }

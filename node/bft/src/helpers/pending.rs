@@ -143,6 +143,9 @@ impl<T: Copy + Clone + PartialEq + Eq + Hash, V: Clone> Pending<T, V> {
     ///
     /// In addition, an optional `callback` may be provided, that is triggered upon removal.
     /// Note: The callback, if provided, is **always** inserted into the callback queue.
+    ///
+    /// Hazard: a request that sends or waits depending on the sent requests in the queue must use
+    /// [`Self::insert_request`]. A read of the queue and this call are two steps.
     pub fn insert(
         &self,
         item: impl Into<T>,
@@ -190,6 +193,10 @@ impl<T: Copy + Clone + PartialEq + Eq + Hash, V: Clone> Pending<T, V> {
     /// response can remove the sent requests in between, and the callback then waits for a
     /// response that no request asks for. `should_send_request` runs under that lock, so it must
     /// not use the pending queue.
+    ///
+    /// Hazard: `should_send_request` takes its locks after the lock of the pending queue. The
+    /// callers read the committee of the ledger and the peers of the gateway there, so code that
+    /// holds a lock of those must not use the pending queue.
     pub fn insert_request(
         &self,
         item: impl Into<T>,
@@ -199,7 +206,6 @@ impl<T: Copy + Clone + PartialEq + Eq + Hash, V: Clone> Pending<T, V> {
     ) -> Result<bool> {
         let item = item.into();
         let now = now();
-        // Acquire the pending lock.
         let mut pending = self.pending.write();
 
         // Clear the callbacks that have expired.
@@ -208,11 +214,11 @@ impl<T: Copy + Clone + PartialEq + Eq + Hash, V: Clone> Pending<T, V> {
         // Determine the sent requests that are still pending.
         let mut num_sent_requests = 0usize;
         let mut sent_peers = HashSet::new();
-        for (peer_ip, callbacks) in pending.get(&item).into_iter().flatten() {
+        for (sent_peer_ip, callbacks) in pending.get(&item).into_iter().flatten() {
             let num_sent = callbacks.iter().filter(|(_, _, request_sent)| *request_sent).count();
             if num_sent > 0 {
                 num_sent_requests = num_sent_requests.saturating_add(num_sent);
-                sent_peers.insert(*peer_ip);
+                sent_peers.insert(*sent_peer_ip);
             }
         }
 
@@ -253,7 +259,6 @@ impl<T: Copy + Clone + PartialEq + Eq + Hash, V: Clone> Pending<T, V> {
     }
 
     /// Removes the callbacks for the specified `item` that have expired from the `pending` map.
-    #[allow(clippy::type_complexity)]
     fn retain_live_callbacks_for_item(
         pending: &mut HashMap<T, HashMap<SocketAddr, Vec<(oneshot::Sender<V>, i64, bool)>>>,
         now: i64,

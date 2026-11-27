@@ -592,7 +592,6 @@ impl<N: Network> Worker<N> {
                     && (num_sent < num_redundant_requests || !stake_redundancy_reached()?))
             })?;
 
-        // If the number of requests is less than or equal to the the redundancy factor, send the transmission request to the peer.
         if should_send_request {
             trace!("Requesting transmission {} from peer '{peer_ip}'", self.format_transmission_id(transmission_id));
             // Send the transmission request to the peer.
