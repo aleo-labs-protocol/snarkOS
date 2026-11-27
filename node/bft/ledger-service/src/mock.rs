@@ -21,12 +21,13 @@ use snarkvm::{
         PendingBlock,
         Transaction,
         committee::Committee,
-        narwhal::{BatchCertificate, Data, Transmission, TransmissionID},
+        narwhal::{BatchCertificate, Data, Subdag, Transmission, TransmissionID},
         puzzle::{Solution, SolutionID},
     },
     prelude::{Address, ConsensusVersion, Field, Network, Result, Zero, bail, consensus_config_value},
 };
 
+use indexmap::IndexMap;
 use snarkos_utilities::locks::parking_lot::Mutex;
 use std::{
     collections::{BTreeMap, HashSet},
@@ -44,6 +45,11 @@ pub struct MockLedgerService<N: Network> {
     known_transmission_ids: HashSet<TransmissionID<N>>,
     /// The transmission IDs for which the containment check returns an error, as a failed ledger read would.
     unreadable_transmission_ids: HashSet<TransmissionID<N>>,
+    /// The hashes of the blocks that `check_next_block` accepts.
+    valid_block_hashes: HashSet<N::BlockHash>,
+    /// The hashes of the blocks for which `advance_to_next_block` returns an error, as a failed ledger write
+    /// would.
+    unwritable_block_hashes: HashSet<N::BlockHash>,
 }
 
 impl<N: Network> MockLedgerService<N> {
@@ -54,6 +60,8 @@ impl<N: Network> MockLedgerService<N> {
             height_to_round_and_hash: Default::default(),
             known_transmission_ids: Default::default(),
             unreadable_transmission_ids: Default::default(),
+            valid_block_hashes: Default::default(),
+            unwritable_block_hashes: Default::default(),
         }
     }
 
@@ -73,6 +81,18 @@ impl<N: Network> MockLedgerService<N> {
         known_transmission_ids: HashSet<TransmissionID<N>>,
     ) -> Self {
         Self { known_transmission_ids, ..Self::new(committee) }
+    }
+
+    /// Makes `check_next_block` accept the blocks with the given hashes.
+    pub fn with_valid_block_hashes(mut self, hashes: impl IntoIterator<Item = N::BlockHash>) -> Self {
+        self.valid_block_hashes.extend(hashes);
+        self
+    }
+
+    /// Makes `advance_to_next_block` fail for the blocks with the given hashes, as a failed ledger write would.
+    pub fn with_unwritable_block_hashes(mut self, hashes: impl IntoIterator<Item = N::BlockHash>) -> Self {
+        self.unwritable_block_hashes.extend(hashes);
+        self
     }
 
     /// Makes the containment check fail for the given transmission IDs.
@@ -263,7 +283,7 @@ impl<N: Network> LedgerService<N> for MockLedgerService<N> {
 
     /// Begins a ledger update.
     fn begin_ledger_update<'a>(&'a self) -> Result<Box<dyn LedgerUpdateService<N> + 'a>, BeginLedgerUpdateError> {
-        unimplemented!();
+        Ok(Box::new(MockLedgerUpdate { ledger: self }))
     }
 
     /// Returns the spent cost for a transaction in microcredits.
@@ -279,5 +299,53 @@ impl<N: Network> LedgerService<N> for MockLedgerService<N> {
     fn is_stopped(&self) -> bool {
         // No ledger to check against.
         false
+    }
+}
+
+/// A ledger update on a [`MockLedgerService`]. `check_next_block` accepts only the blocks marked
+/// valid. It fails the others with `InvalidRound` if the round is not above the latest round, and
+/// with `VerificationFailed` otherwise.
+struct MockLedgerUpdate<'a, N: Network> {
+    ledger: &'a MockLedgerService<N>,
+}
+
+impl<N: Network> LedgerUpdateService<N> for MockLedgerUpdate<'_, N> {
+    fn check_block_subdag(
+        &self,
+        _block: Block<N>,
+        _prefix: &[PendingBlock<N>],
+    ) -> Result<PendingBlock<N>, CheckBlockError<N>> {
+        unimplemented!();
+    }
+
+    fn check_block_content(&self, _block: PendingBlock<N>) -> Result<Block<N>, CheckBlockError<N>> {
+        unimplemented!();
+    }
+
+    fn check_next_block(&self, block: Block<N>) -> Result<Block<N>, CheckBlockError<N>> {
+        if self.ledger.valid_block_hashes.contains(&block.hash()) {
+            return Ok(block);
+        }
+        let latest_round = self.ledger.get_block_round(self.ledger.latest_block_height())?;
+        if block.round() <= latest_round {
+            return Err(CheckBlockError::InvalidRound { new: block.round(), previous: latest_round });
+        }
+        Err(CheckBlockError::VerificationFailed { inner: anyhow::anyhow!("invalid block") })
+    }
+
+    fn prepare_advance_to_next_quorum_block(
+        &self,
+        _subdag: Subdag<N>,
+        _transmissions: IndexMap<TransmissionID<N>, Transmission<N>>,
+    ) -> Result<Block<N>, CheckBlockError<N>> {
+        unimplemented!();
+    }
+
+    fn advance_to_next_block(&self, block: &Block<N>) -> Result<()> {
+        if self.ledger.unwritable_block_hashes.contains(&block.hash()) {
+            bail!("failed ledger write");
+        }
+        self.ledger.height_to_round_and_hash.lock().insert(block.height(), (block.round(), block.hash()));
+        Ok(())
     }
 }

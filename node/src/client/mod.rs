@@ -23,7 +23,7 @@ use crate::{
 };
 
 use snarkos_account::Account;
-use snarkos_node_network::{ConnectionMode, NodeType};
+use snarkos_node_network::{ConnectionMode, NodeType, PeerPoolHandling};
 use snarkos_node_rest::{Rest, RestVerificationLimits};
 use snarkos_node_router::{
     Heartbeat,
@@ -33,7 +33,7 @@ use snarkos_node_router::{
     Routing,
     messages::{Message, UnconfirmedSolution, UnconfirmedTransaction},
 };
-use snarkos_node_sync::{BlockSync, Ping};
+use snarkos_node_sync::{AdvanceBlockSyncError, BlockSync, Ping};
 use snarkos_node_tcp::{
     P2P,
     protocols::{Disconnect, Handshake, OnConnect, Reading},
@@ -320,11 +320,16 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
 
     /// Client-side version of [`snarkvm_node_bft::Sync::try_advancing_block_synchronization`].
     async fn try_advancing_block_synchronization(&self) {
+        let height = self.ledger.latest_height();
         let has_new_blocks = match self.sync.try_advancing_block_synchronization().await {
             Ok(val) => val,
             Err(err) => {
                 error!("Block synchronization failed - {err}");
-                return;
+                if let AdvanceBlockSyncError::InvalidBlock { peer_ip, .. } = err {
+                    self.router().ip_ban_peer(peer_ip, Some(&err.to_string()));
+                }
+                // The pass can advance the ledger before it fails.
+                self.ledger.latest_height() > height
             }
         };
 
