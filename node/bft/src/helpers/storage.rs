@@ -43,9 +43,12 @@ use tokio_util::sync::CancellationToken;
 
 /// Errors returned by [`Storage::check_certificate`] (and therefore [`Storage::insert_certificate`]).
 ///
-/// The `SameCertificate` and `SameAuthorAndRound` variants describe benign races: concurrent sync
-/// paths regularly try to insert the same certificate, and the loser of that race should treat its
-/// failure as a no-op (the certificate is in fact present in storage) rather than a hard error.
+/// The `SameCertificate` variant describes a benign race: concurrent sync paths regularly try to
+/// insert the same certificate, and the loser of that race should treat its failure as a no-op
+/// (the certificate is in storage, or another task is inserting it) rather than a hard error.
+///
+/// The `SameAuthorAndRound` variant means storage holds a different certificate by that author
+/// for that round.
 #[derive(Debug, thiserror::Error)]
 pub enum CheckCertificateError {
     #[error("Certificate round {round} already exists in storage (gc_round = {gc_round})")]
@@ -59,8 +62,10 @@ pub enum CheckCertificateError {
 }
 
 impl CheckCertificateError {
-    /// Whether the error indicates the certificate is already in storage (a benign sync race
-    /// rather than a hard failure). Callers should not log benign errors at ERROR.
+    /// Whether storage declined the certificate for a reason other than the certificate being
+    /// invalid. Callers should not log benign errors at ERROR.
+    ///
+    /// This includes `SameAuthorAndRound`, although storage then holds a different certificate.
     pub fn is_benign(&self) -> bool {
         matches!(self, Self::SameCertificate { .. } | Self::SameAuthorAndRound { .. } | Self::RoundTooLow { .. })
     }
@@ -363,6 +368,11 @@ impl<N: Network> Storage<N> {
     /// Returns `true` if the storage contains a certificate from the specified `author` in the given `round`.
     pub fn contains_certificate_in_round_from(&self, round: u64, author: Address<N>) -> bool {
         self.rounds.read().get(&round).is_some_and(|set| set.iter().any(|(_, a)| a == &author))
+    }
+
+    /// Returns the ID of the certificate from the specified `author` in the given `round`, if there is one.
+    fn certificate_id_in_round_from(&self, round: u64, author: Address<N>) -> Option<Field<N>> {
+        self.rounds.read().get(&round)?.iter().find(|(_, a)| a == &author).map(|(id, _)| *id)
     }
 
     /// Returns `true` if the storage contains the specified `certificate ID`.
@@ -685,9 +695,10 @@ impl<N: Network> Storage<N> {
     /// - The signers have reached the quorum threshold (N - f).
     ///
     /// # Errors
-    /// Returns [`CheckCertificateError::SameCertificate`] or [`CheckCertificateError::SameAuthorAndRound`]
-    /// if the certificate (or one from the same author for the same round) is already in storage.
-    /// These are benign during concurrent sync; callers should not log them at ERROR.
+    /// Returns [`CheckCertificateError::SameCertificate`] if the certificate is already in storage,
+    /// which is benign during concurrent sync; callers should not log it at ERROR.
+    /// Returns [`CheckCertificateError::SameAuthorAndRound`] if storage holds a different certificate
+    /// from the same author for the same round.
     pub fn check_certificate(
         &self,
         certificate: &BatchCertificate<N>,
@@ -707,8 +718,14 @@ impl<N: Network> Storage<N> {
         }
 
         // Ensure the storage does not already contain a certificate for this author in this round.
-        if self.contains_certificate_in_round_from(round, certificate.author()) {
-            return Err(CheckCertificateError::SameAuthorAndRound { round, gc_round });
+        // It can be this certificate even though the check above passed: an insertion writes the
+        // round entry before the certificate entry, and another task can be in between the two.
+        if let Some(stored_id) = self.certificate_id_in_round_from(round, certificate.author()) {
+            return Err(if stored_id == certificate.id() {
+                CheckCertificateError::SameCertificate { round, gc_round }
+            } else {
+                CheckCertificateError::SameAuthorAndRound { round, gc_round }
+            });
         }
 
         // Ensure the batch header is well-formed.
@@ -1020,9 +1037,19 @@ impl<N: Network> Storage<N> {
             self.insert_certificate_atomic(certificate, aborted_transmissions, missing_transmissions);
             Ok(())
         } else {
-            self.insert_certificate(certificate, missing_transmissions, aborted_transmissions).with_context(|| {
-                format!("Failed to insert certificate '{certificate_id}' from block {}", block.height())
-            })
+            match self.insert_certificate(certificate, missing_transmissions, aborted_transmissions) {
+                // The checks at the top of this function are not atomic with the insertion: garbage
+                // collection can pass the round, or another task can store the certificate, in between.
+                Err(
+                    err @ (CheckCertificateError::RoundTooLow { .. } | CheckCertificateError::SameCertificate { .. }),
+                ) => {
+                    trace!("Skipping certificate '{certificate_id}' from block {} - {err}", block.height());
+                    Ok(())
+                }
+                result => result.with_context(|| {
+                    format!("Failed to insert certificate '{certificate_id}' from block {}", block.height())
+                }),
+            }
         }
     }
 }
@@ -1475,6 +1502,36 @@ pub(crate) mod tests {
         assert!(!storage.contains_retrievable_transmission(transmission_id));
     }
 
+    /// Block sync skips a certificate that another task is in the middle of inserting (its round
+    /// entry is written, its certificate entry is not), and fails on a certificate whose author
+    /// has a different certificate in storage for the same round.
+    #[test]
+    fn test_sync_certificate_with_block_and_a_stored_round_entry() {
+        use snarkvm::prelude::Uniform;
+
+        let rng = &mut TestRng::default();
+
+        let transmission_id = TransmissionID::Transaction(
+            <CurrentNetwork as Network>::TransactionID::from(Field::rand(rng)),
+            <CurrentNetwork as Network>::TransmissionChecksum::from(rng.random::<u128>()),
+        );
+        let (storage, make_certificate) = sample_storage_and_certificates_for_transmission(transmission_id, true, rng);
+        let block = crate::test_helpers::sample_genesis_block(rng);
+
+        // The round entry holds the ID of the certificate itself.
+        let certificate = make_certificate(0, rng);
+        storage.rounds.write().entry(1).or_default().insert((certificate.id(), certificate.author()));
+        storage
+            .sync_certificate_with_block(&block, certificate, &Default::default(), false)
+            .expect("a certificate that is being inserted must be skipped");
+
+        // The round entry holds the ID of another certificate by the same author.
+        let certificate = make_certificate(1, rng);
+        storage.rounds.write().entry(1).or_default().insert((Field::rand(rng), certificate.author()));
+        let error = storage.sync_certificate_with_block(&block, certificate, &Default::default(), false).unwrap_err();
+        assert!(matches!(error.downcast_ref(), Some(CheckCertificateError::SameAuthorAndRound { .. })));
+    }
+
     #[test]
     fn test_sync_certificate_with_a_previously_aborted_transmission() {
         check_sync_certificate_with_a_previously_aborted_transmission(true);
@@ -1710,6 +1767,38 @@ pub(crate) mod tests {
             .expect("Valid certificate rejected");
 
         // Inserting the exact same certificate again must fail with `SameCertificate`.
+        let result = storage.insert_certificate(certificate, transmissions, Default::default());
+        assert!(matches!(result, Err(CheckCertificateError::SameCertificate { .. })));
+    }
+
+    /// Verify that a certificate that another task is in the middle of inserting (its round entry
+    /// is written, its certificate entry is not) is reported as `CheckCertificateError::SameCertificate`.
+    #[test]
+    fn test_check_certificate_error_same_certificate_during_insertion() {
+        let rng = &mut TestRng::default();
+
+        // Sample a committee.
+        let (committee, private_keys) =
+            snarkvm::ledger::committee::test_helpers::sample_committee_and_keys_for_round(0, 10, rng);
+        // Initialize the ledger.
+        let ledger = Arc::new(MockLedgerService::new(committee));
+        // Initialize the storage.
+        let storage = Storage::<CurrentNetwork>::new(ledger, Arc::new(BFTMemoryService::new()), 1).unwrap();
+
+        // Construct a certificate with a full quorum of signers.
+        let author = &private_keys[0];
+        let other_keys: Vec<_> = private_keys.iter().cloned().filter(|k| k != author).collect();
+        let certificate =
+            sample_batch_certificate_for_round_with_committee(1, Default::default(), author, &other_keys, rng);
+
+        // Construct the sample 'transmissions'.
+        let (_missing_transmissions, transmissions) = sample_transmissions(&certificate, rng);
+        let transmissions: HashMap<_, _> = transmissions.into_iter().map(|(k, (t, _))| (k, t)).collect();
+
+        // Write only the round entry, as the first step of an insertion does.
+        storage.rounds.write().entry(1).or_default().insert((certificate.id(), certificate.author()));
+        assert!(!storage.contains_certificate(certificate.id()));
+
         let result = storage.insert_certificate(certificate, transmissions, Default::default());
         assert!(matches!(result, Err(CheckCertificateError::SameCertificate { .. })));
     }
