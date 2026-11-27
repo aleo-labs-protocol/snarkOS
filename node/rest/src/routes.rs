@@ -35,6 +35,7 @@ use snarkvm::{
         block::Transaction,
     },
     synthesizer::{
+        process::deployment_freeze::is_built_in_program,
         program::{FinalizeGlobalState, StackTrait},
         vm::{History, MappingName},
     },
@@ -918,16 +919,20 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         Path(id): Path<ProgramID<N>>,
         metadata: Query<Metadata>,
     ) -> Result<ErasedJson, RestError> {
-        // Get the program from the ledger.
-        let program = rest
-            .ledger
-            .get_program(id)
-            .with_context(|| format!("Failed to find program `{id}`"))
-            .map_err(map_missing_resource_error)?;
+        // Get the program from the ledger, or the built-in program.
+        let program = match rest.ledger.get_program(id) {
+            Ok(program) => program,
+            Err(error) => match rest.built_in_program(&id) {
+                Some(program) => program,
+                None => {
+                    return Err(map_missing_resource_error(error.context(format!("Failed to find program `{id}`"))));
+                }
+            },
+        };
         // Check if metadata is requested and return the program with metadata if so.
         if metadata.metadata.unwrap_or(false) {
             // Get the edition of the program.
-            let edition = rest.ledger.get_latest_edition_for_program(&id)?;
+            let edition = rest.latest_edition_for_program(&id)?;
             return rest.return_program_with_metadata(program, edition);
         }
         // Return the program without metadata.
@@ -941,12 +946,13 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         Path((id, edition)): Path<(ProgramID<N>, u16)>,
         metadata: Query<Metadata>,
     ) -> Result<ErasedJson, RestError> {
-        // Get the program from the ledger.
-        match rest
+        // Get the program from the ledger, or the built-in program, whose only edition is 0.
+        let program = rest
             .ledger
             .try_get_program_for_edition(&id, edition)
             .with_context(|| format!("Failed get program `{id}` for edition {edition}"))?
-        {
+            .or_else(|| if edition == 0 { rest.built_in_program(&id) } else { None });
+        match program {
             Some(program) => {
                 // Check if metadata is requested and return the program with metadata if so.
                 if metadata.metadata.unwrap_or(false) {
@@ -990,12 +996,31 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         })))
     }
 
+    /// Returns a built-in program that the deployment store does not hold. `aleo_deployment_freeze.aleo`
+    /// is loaded by every process but never deployed, so the ledger does not have it; `credits.aleo`
+    /// is in the store.
+    fn built_in_program(&self, id: &ProgramID<N>) -> Option<Program<N>> {
+        if !is_built_in_program(id) {
+            return None;
+        }
+        self.ledger.vm().process().get_stack(id).ok().map(|stack| stack.program().clone())
+    }
+
+    /// Returns the latest edition of a program: the ledger's, or 0 for a built-in program.
+    fn latest_edition_for_program(&self, id: &ProgramID<N>) -> Result<u16, RestError> {
+        match self.ledger.get_latest_edition_for_program(id) {
+            Ok(edition) => Ok(edition),
+            Err(_) if self.built_in_program(id).is_some() => Ok(0),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// GET /<network>/program/{programID}/latest_edition
     pub(crate) async fn get_latest_program_edition(
         State(rest): State<Self>,
         Path(id): Path<ProgramID<N>>,
     ) -> Result<ErasedJson, RestError> {
-        Ok(ErasedJson::new(rest.ledger.get_latest_edition_for_program(&id)?))
+        Ok(ErasedJson::new(rest.latest_edition_for_program(&id)?))
     }
 
     /// GET /<network>/programs/summary
@@ -1124,7 +1149,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         Path(id): Path<ProgramID<N>>,
     ) -> Result<ErasedJson, RestError> {
         // Get the latest edition.
-        let edition = rest.ledger.get_latest_edition_for_program(&id)?;
+        let edition = rest.latest_edition_for_program(&id)?;
         // Get the amendment count for this program and edition.
         let amendment_count =
             rest.ledger.vm().block_store().transaction_store().get_amendment_count(&id, edition)?.unwrap_or(0);
@@ -1410,6 +1435,14 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
             }
             Err(other_rejection) => return Err(other_rejection.into()),
         };
+
+        // Turn deployments away while they are frozen, before any other check, and before the
+        // transaction reaches the memory pool or is broadcast.
+        if tx.is_deploy()
+            && let Err(error) = check_deployment_not_frozen(rest.deployment_freeze.policy(&rest.ledger))
+        {
+            return Err(RestError::unprocessable_entity(error));
+        }
 
         // If the transaction exceeds the transaction size limit, return an error.
         // The buffer is initially roughly sized to hold a `transfer_public`,

@@ -75,6 +75,9 @@ workspace = true
 [dependencies.snarkos-node-network]
 workspace = true
 
+[dependencies.snarkos-node-bft-ledger-service]
+workspace = true
+
 [dependencies.snarkos-node-router]
 workspace = true
 

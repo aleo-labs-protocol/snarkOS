@@ -15,7 +15,9 @@
 
 #![forbid(unsafe_code)]
 
+mod seen_transactions;
 mod transactions_queue;
+use seen_transactions::SeenTransactions;
 #[cfg(feature = "metrics")]
 use transactions_queue::QueueInsertion;
 use transactions_queue::TransactionsQueue;
@@ -43,7 +45,7 @@ use snarkos_node_bft::{
     },
     spawn_blocking,
 };
-use snarkos_node_bft_ledger_service::LedgerService;
+use snarkos_node_bft_ledger_service::{LedgerService, check_deployment_not_frozen};
 use snarkos_node_bft_storage_service::BFTPersistentStorage;
 use snarkos_node_sync::{BlockSync, Ping};
 use snarkos_utilities::{
@@ -60,6 +62,7 @@ use snarkvm::{
         store::StorageMode,
     },
     prelude::*,
+    synthesizer::process::deployment_freeze::FreezeWindow,
     utilities::flatten_error,
 };
 
@@ -109,7 +112,7 @@ pub struct Consensus<N: Network> {
     /// The recently-seen unconfirmed solutions.
     seen_solutions: Arc<Mutex<LruCache<SolutionID<N>, ()>>>,
     /// The recently-seen unconfirmed transactions.
-    seen_transactions: Arc<Mutex<LruCache<N::TransactionID, ()>>>,
+    seen_transactions: Arc<Mutex<SeenTransactions<N>>>,
     #[cfg(feature = "metrics")]
     transmissions_tracker: Arc<Mutex<metrics::TransmissionTracker<N>>>,
     /// The spawned handles.
@@ -174,7 +177,7 @@ impl<N: Network> Consensus<N> {
             solutions_queue: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(CAPACITY_FOR_SOLUTIONS).unwrap()))),
             transactions_queue: Default::default(),
             seen_solutions: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(1 << 16).unwrap()))),
-            seen_transactions: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(1 << 16).unwrap()))),
+            seen_transactions: Arc::new(Mutex::new(SeenTransactions::new(NonZeroUsize::new(1 << 16).unwrap()))),
             #[cfg(feature = "metrics")]
             // Cover the inbound queues plus transmissions already handed to the BFT: up to
             // `MAX_TRANSMISSIONS_TOLERANCE` in the workers, and as many again in certificates awaiting commit.
@@ -399,13 +402,25 @@ impl<N: Network> Consensus<N> {
         Ok(())
     }
 
+    /// Returns the deployment freeze window if deployments are frozen for the next block (node policy).
+    pub fn deployment_freeze_policy(&self) -> Option<FreezeWindow> {
+        self.ledger.deployment_freeze_policy()
+    }
+
     /// Adds the given unconfirmed transaction to the memory pool, which will then eventually be passed
     /// to the BFT layer for inclusion in a batch.
     pub async fn add_unconfirmed_transaction(&self, transaction: Transaction<N>) -> Result<()> {
-        // Calculate the transmission checksum.
-        let checksum = Data::<Transaction<N>>::Buffer(transaction.to_bytes_le()?.into()).to_checksum::<N>()?;
         #[cfg(feature = "metrics")]
         let kind = metrics::transaction_kind(&transaction);
+        // Turn deployments away while they are frozen, before any other check.
+        if transaction.is_deploy() {
+            check_deployment_not_frozen(self.ledger.deployment_freeze_policy()).inspect_err(|_| {
+                #[cfg(feature = "metrics")]
+                metrics::record_mempool_transaction(kind, "rejected_deployments_frozen");
+            })?;
+        }
+        // Calculate the transmission checksum.
+        let checksum = Data::<Transaction<N>>::Buffer(transaction.to_bytes_le()?.into()).to_checksum::<N>()?;
         // Queue the unconfirmed transaction.
         {
             let transaction_id = transaction.id();
@@ -417,7 +432,7 @@ impl<N: Network> Consensus<N> {
                 bail!("Transaction '{}' is a fee transaction (skipping)", fmt_id(transaction_id));
             }
             // Check if the transaction was recently seen.
-            if self.seen_transactions.lock().put(transaction_id, ()).is_some() {
+            if self.seen_transactions.lock().insert(transaction_id, transaction.is_deploy()) {
                 #[cfg(feature = "metrics")]
                 metrics::record_mempool_transaction(kind, "recently_seen");
                 // If the transaction was recently seen, return early.
@@ -479,8 +494,28 @@ impl<N: Network> Consensus<N> {
         let transactions = {
             // Determine the available capacity.
             let capacity = Primary::<N>::MAX_TRANSMISSIONS_TOLERANCE.saturating_sub(num_unconfirmed_transmissions);
+            // Read the deployment freeze policy before taking the lock below.
+            let deployment_freeze = self.ledger.deployment_freeze_policy();
+            // Forget the deployments seen so far, including those dropped below and from the BFT's
+            // ready queue, so that a resend after the freeze is not ignored as recently seen. This
+            // scans the seen cache once per freeze, so do it before taking the queue lock.
+            if let Some(freeze) = deployment_freeze {
+                self.seen_transactions.lock().forget_deployments(freeze);
+            }
             // Acquire the lock on the transactions queue.
             let mut tx_queue = self.transactions_queue.write();
+            // While deployments are frozen, drop the queued deployments instead of sending them to the BFT.
+            // Nothing is charged, and their owners can send them again after the freeze. The worker
+            // also refuses them, so this only saves the capacity they would take up on the way.
+            if let Some(freeze) = deployment_freeze {
+                let num_dropped = tx_queue.deployments.clear();
+                if num_dropped > 0 {
+                    debug!(
+                        "Dropped {num_dropped} queued deployments - deployments are frozen until block {}",
+                        freeze.end
+                    );
+                }
+            }
             // Determine the number of deployments to send.
             let num_deployments = tx_queue.deployments.len().min(capacity).min(MAX_DEPLOYMENTS_PER_INTERVAL);
             // Determine the number of executions to send.

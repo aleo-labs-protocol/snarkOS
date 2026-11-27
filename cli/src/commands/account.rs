@@ -105,7 +105,7 @@ pub enum Account {
 }
 
 /// Parse a raw Aleo input into fields
-fn aleo_literal_to_fields<N: Network>(input: &str) -> Result<Vec<Field<N>>> {
+pub(crate) fn aleo_literal_to_fields<N: Network>(input: &str) -> Result<Vec<Field<N>>> {
     Value::<N>::from_str(input)?.to_fields()
 }
 

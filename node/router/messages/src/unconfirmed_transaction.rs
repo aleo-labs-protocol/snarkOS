@@ -44,6 +44,20 @@ impl<N: Network> UnconfirmedTransaction<N> {
         + DATA_ENCODING_OVERHEAD; // `Data`'s envelope around `transaction`
 }
 
+impl<N: Network> UnconfirmedTransaction<N> {
+    /// Returns `true` if the transaction is a deployment, without deserializing it.
+    ///
+    /// A serialized transaction starts with its version (1) and its variant (0 for a deployment).
+    /// Bytes with another version are not a valid transaction, so this returns `false` for them,
+    /// and they fail to deserialize instead.
+    pub fn is_deployment(&self) -> bool {
+        match &self.transaction {
+            Data::Object(transaction) => transaction.is_deploy(),
+            Data::Buffer(bytes) => bytes.starts_with(&[1, 0]),
+        }
+    }
+}
+
 impl<N: Network> From<Transaction<N>> for UnconfirmedTransaction<N> {
     /// Initializes a new `UnconfirmedTransaction` message.
     fn from(transaction: Transaction<N>) -> Self {
@@ -157,5 +171,51 @@ pub mod prop_tests {
             original.transaction.deserialize_blocking().unwrap(),
             deserialized.transaction.deserialize_blocking().unwrap(),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::samples::sample_fee_public_transaction;
+    use snarkvm::{
+        ledger::test_helpers::{sample_deployment_transaction, sample_execution_transaction_with_fee},
+        prelude::{MainnetV0, TestRng},
+    };
+
+    use bytes::Bytes;
+
+    type CurrentNetwork = MainnetV0;
+
+    /// Returns the message carrying the transaction serialized, as it arrives from a peer.
+    fn serialized(transaction: &Transaction<CurrentNetwork>) -> UnconfirmedTransaction<CurrentNetwork> {
+        UnconfirmedTransaction {
+            transaction_id: transaction.id(),
+            transaction: Data::Buffer(Bytes::from(transaction.to_bytes_le().unwrap())),
+        }
+    }
+
+    #[test]
+    fn is_deployment_reads_the_serialized_variant() {
+        let rng = &mut TestRng::default();
+        let deployment = sample_deployment_transaction(2, 0, false, true, rng);
+        let execution = sample_execution_transaction_with_fee(true, rng, 0);
+        let fee = sample_fee_public_transaction(rng);
+
+        for transaction in [&deployment, &execution, &fee] {
+            let expected = transaction.is_deploy();
+            assert_eq!(UnconfirmedTransaction::from(transaction.clone()).is_deployment(), expected);
+            assert_eq!(serialized(transaction).is_deployment(), expected);
+        }
+        assert!(serialized(&deployment).is_deployment());
+
+        // Bytes that do not start with transaction version 1 are not taken for a deployment.
+        let mut bytes = deployment.to_bytes_le().unwrap();
+        bytes[0] = 2;
+        let message = UnconfirmedTransaction::<CurrentNetwork> {
+            transaction_id: deployment.id(),
+            transaction: Data::Buffer(Bytes::from(bytes)),
+        };
+        assert!(!message.is_deployment());
     }
 }

@@ -25,6 +25,7 @@ use snarkvm::{
         puzzle::{Solution, SolutionID},
     },
     prelude::{Address, ConsensusVersion, Field, Network, Result, Zero, bail, consensus_config_value},
+    synthesizer::process::deployment_freeze::FreezeWindow,
 };
 
 use snarkos_utilities::locks::parking_lot::Mutex;
@@ -44,6 +45,8 @@ pub struct MockLedgerService<N: Network> {
     known_transmission_ids: HashSet<TransmissionID<N>>,
     /// The transmission IDs for which the containment check returns an error, as a failed ledger read would.
     unreadable_transmission_ids: HashSet<TransmissionID<N>>,
+    /// The deployment freeze the ledger reports for the next block.
+    deployment_freeze: Option<FreezeWindow>,
 }
 
 impl<N: Network> MockLedgerService<N> {
@@ -54,6 +57,7 @@ impl<N: Network> MockLedgerService<N> {
             height_to_round_and_hash: Default::default(),
             known_transmission_ids: Default::default(),
             unreadable_transmission_ids: Default::default(),
+            deployment_freeze: None,
         }
     }
 
@@ -81,6 +85,12 @@ impl<N: Network> MockLedgerService<N> {
         unreadable_transmission_ids: impl IntoIterator<Item = TransmissionID<N>>,
     ) -> Self {
         self.unreadable_transmission_ids.extend(unreadable_transmission_ids);
+        self
+    }
+
+    /// Reports the given deployment freeze for the next block.
+    pub fn with_deployment_freeze(mut self, freeze: FreezeWindow) -> Self {
+        self.deployment_freeze = Some(freeze);
         self
     }
 }
@@ -279,5 +289,10 @@ impl<N: Network> LedgerService<N> for MockLedgerService<N> {
     fn is_stopped(&self) -> bool {
         // No ledger to check against.
         false
+    }
+
+    /// Returns the configured deployment freeze.
+    fn deployment_freeze_policy(&self) -> Option<FreezeWindow> {
+        self.deployment_freeze
     }
 }

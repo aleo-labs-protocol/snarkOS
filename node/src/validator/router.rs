@@ -187,6 +187,11 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Validator<N, C> {
         self.router().is_valid_message_version(message_version)
     }
 
+    /// Returns `true` during a deployment freeze.
+    fn turns_away_deployments(&self) -> bool {
+        self.consensus.deployment_freeze_policy().is_some()
+    }
+
     /// Retrieves the blocks within the block request range, and returns the block response to the peer.
     fn block_request(&self, peer_ip: SocketAddr, message: BlockRequest) -> bool {
         crate::send_block_response(self.router(), &self.ledger, peer_ip, message)
