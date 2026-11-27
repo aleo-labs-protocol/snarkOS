@@ -4249,6 +4249,7 @@ mod tests {
 
         let rng = &mut TestRng::default();
         let runtime = tokio::runtime::Runtime::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
 
         let ledger = runtime.block_on(async {
             let genesis = sample_genesis_block(rng);
@@ -4267,7 +4268,7 @@ mod tests {
                 Some("127.0.0.1:0".parse().unwrap()),
                 &[],
                 false,
-                NodeDataDir::new_test(None),
+                NodeDataDir::new(dir.path().to_path_buf()),
                 None,
                 1,
             )
