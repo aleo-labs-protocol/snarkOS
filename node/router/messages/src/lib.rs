@@ -173,6 +173,7 @@ impl<N: Network> Message<N> {
         (ConsensusVersion::V21, 32),
         (ConsensusVersion::V22, 33),
         (ConsensusVersion::V23, Self::STATUS_MESSAGE_VERSION),
+        (ConsensusVersion::V24, 35),
     ];
 
     /// Returns the latest message version whose consensus upgrade has a scheduled block height.
