@@ -16,6 +16,7 @@
 mod router;
 
 use crate::{
+    AuthorityRetention,
     bft::{helpers::fmt_id, ledger_service::CoreLedgerService, spawn_blocking},
     cdn::CdnBlockSync,
     traits::NodeInterface,
@@ -134,6 +135,7 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
         rest_verification_limits: RestVerificationLimits,
         history_api_url: Option<String>,
         history_json: bool,
+        authority_retention: AuthorityRetention,
         account: Account<N>,
         trusted_peers: &[SocketAddr],
         genesis: Block<N>,
@@ -149,7 +151,11 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
             let storage_mode = storage_mode.clone();
             let genesis = genesis.clone();
 
-            spawn_blocking!(Ledger::<N, C>::load(genesis, storage_mode))
+            spawn_blocking!(Ledger::<N, C>::load_with_options(
+                genesis,
+                storage_mode,
+                authority_retention.load_options()
+            ))
         }
         .with_context(|| "Failed to initialize the ledger")?;
 
@@ -227,18 +233,20 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
         }
 
         // Set up everything else after CDN sync is done.
-        if let Some(cdn_sync) = cdn_sync
-            && let Err(error) = cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN")
-        {
-            crate::log_clean_error(&storage_mode);
-            node.shut_down().await;
-            return Err(error);
-        }
+        let cdn_fallback = match crate::finish_cdn_sync(cdn_sync, &ledger, &node.sync, &node.ping).await {
+            Ok(cdn_fallback) => cdn_fallback,
+            Err(error) => {
+                crate::log_clean_error(&storage_mode);
+                node.shut_down().await;
+                return Err(error);
+            }
+        };
 
         // Initialize the routing.
         node.initialize_routing().await;
         // Initialize the sync module.
         node.initialize_sync();
+        node.spawn(crate::monitor_stuck_sync(node.sync.clone(), node.signal_handler.clone(), cdn_fallback));
         // Initialize solution verification.
         node.initialize_solution_verification();
         // Initialize deployment verification.

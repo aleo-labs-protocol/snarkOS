@@ -212,7 +212,7 @@ pub fn prepare_dev_committee_options(
 }
 
 /// Persists the given `start_round` to `<node_data_dir>/dev-committee-state` if the file
-/// doesn't already exist. Called after [`Ledger::load_with_dev_committee`] so that the
+/// doesn't already exist. Called after the ledger loads with a dev committee, so that the
 /// round chosen by snarkVM (its `latest_round()` default) survives restarts.
 #[cfg(feature = "dev-committee-override")]
 pub fn persist_dev_committee_start_round_if_unwritten(node_data_dir: &NodeDataDir, start_round: u64) -> Result<()> {
@@ -257,6 +257,11 @@ impl<N: Network, C: ConsensusStorage<N>> LedgerService<N> for CoreLedgerService<
     /// Returns the latest block height in the ledger.
     fn latest_block_height(&self) -> u32 {
         self.ledger.latest_height()
+    }
+
+    /// Returns the authority-pruning watermark of the block store.
+    fn authority_pruned_below(&self) -> Result<Option<u32>> {
+        self.ledger.vm().block_store().authority_pruned_below()
     }
 
     /// Returns the latest block in the ledger.

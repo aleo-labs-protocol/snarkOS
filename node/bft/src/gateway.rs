@@ -71,7 +71,12 @@ use snarkos_node_network::{
     },
     shorten_snarkos_sha,
 };
-use snarkos_node_sync::{MAX_BLOCKS_BEHIND, communication_service::CommunicationService, serve_block_request};
+use snarkos_node_sync::{
+    BlockRequestOutcome,
+    MAX_BLOCKS_BEHIND,
+    communication_service::CommunicationService,
+    serve_block_request,
+};
 use snarkos_node_tcp::{
     Config,
     ConnectError,
@@ -744,26 +749,40 @@ impl<N: Network> Gateway<N> {
 
                 let supports_status = self.supports_status_replies(peer_ip);
                 let self_ = self.clone();
-                let response = match task::spawn_blocking(move || {
+                let outcome = match task::spawn_blocking(move || {
                     serve_block_request(
                         block_request,
                         supports_status,
                         || self_.ledger.latest_block_height(),
+                        || self_.ledger.authority_pruned_below(),
                         |heights| self_.ledger.get_blocks(heights),
                     )
                 })
                 .await
                 {
-                    Ok(Ok(response)) => response,
+                    Ok(Ok(outcome)) => outcome,
                     Ok(Err(error)) => return Err(error),
                     Err(error) => return Err(anyhow!("[BlockRequest] {error}")),
                 };
 
                 let self_ = self.clone();
-                self.spawn(async move {
-                    // Send the `BlockResponse` message to the peer.
-                    Transport::send(&self_, peer_ip, Event::BlockResponse(response)).await;
-                });
+                match outcome {
+                    BlockRequestOutcome::Reply(response) => self.spawn(async move {
+                        // Send the `BlockResponse` message to the peer.
+                        Transport::send(&self_, peer_ip, Event::BlockResponse(response)).await;
+                    }),
+                    BlockRequestOutcome::Drop => {}
+                    BlockRequestOutcome::OutdatedPeer(status) => {
+                        warn!(
+                            "{CONTEXT} Disconnecting '{peer_ip}': the peer is on an older version and requested blocks \
+                            {start_height} to {end_height}, which this node does not serve ({status:?})"
+                        );
+                        self.spawn(async move {
+                            Transport::send(&self_, peer_ip, DisconnectReason::ProtocolViolation.into()).await;
+                            self_.disconnect(peer_ip);
+                        });
+                    }
+                }
                 Ok(true)
             }
             Event::BlockResponse(BlockResponse { request, status, latest_consensus_version, blocks }) => {

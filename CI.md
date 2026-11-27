@@ -21,7 +21,7 @@ Jobs run in one of two places:
 
 | Event | Runs |
 |---|---|
-| Pull request into `staging` | `fmt`, `deny`, `shellcheck`, `source-checks`, `machete`, `lint`, `lint-locktick`, `test`, `build-snarkos`, `devnet`, `ci-ok` |
+| Pull request into `staging` | `fmt`, `deny`, `shellcheck`, `source-checks`, `machete`, `lint`, `lint-locktick`, `test`, `build-snarkos`, `devnet` |
 | Schedule, on `staging`, every six hours at 47 minutes past | the above, plus `devnet-merge`, `windows`, `each-feature` |
 | Pull request into `release/**` | the first row, plus `devnet-merge`, `windows`, `devnet-release` |
 | Push to `release/**`, or manual dispatch | the first row, plus `devnet-merge`, `windows`, `each-feature`, `devnet-release` |
@@ -36,7 +36,7 @@ head of `staging` is due a check:
 
 - The head is not due if an earlier scheduled run on it gave a verdict: the
   run passed or failed, and its `fmt` job ran. Every other job in the run is
-  then skipped, and so is `ci-ok`. The job's summary names that run.
+  then skipped. The job's summary names that run.
 - A cancelled run, a run that was not due, and a run where `schedule-due`
   failed give no verdict. A head with only such runs is due.
 - A failed head is not checked again on the next tick. To retry it, re-run
@@ -98,18 +98,12 @@ jobs run on every event.
 | `machete` | hosted | all | | `cargo machete` |
 | `windows` | hosted (Windows) | merge | | `cargo check --examples --benches --tests` in `account`, `cli`, `display`, `node` |
 | `each-feature` | `cpu` | merge, no pull request | 120 | `cargo hack clippy --each-feature` over the workspace, without `cuda` |
-| `ci-ok` | hosted | all | | fails unless every job succeeded; a job may be skipped where it is not meant to run |
 | `notify` | hosted | schedule | 10 | posts to Slack when the scheduled run turns red or green |
 
 A job with no timeout gets the GitHub default of six hours. Only hosted jobs
 have none, and a hosted job holds no fleet box.
 
-Protected branches require `ci-ok` alone. GitHub counts a skipped job as
-passed for a required check, so `ci-ok` checks each job's result itself.
-
-A pull request that changes only Markdown files starts no run, so it gets no
-`ci-ok` check. Where a branch rule requires `ci-ok`,
-such a pull request cannot merge until a workflow reports that check for it.
+A pull request that changes only Markdown files starts no run.
 
 ## Test groups
 

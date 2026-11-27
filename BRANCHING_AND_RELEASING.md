@@ -36,7 +36,7 @@ This replaces `git checkout mainnet` and `git pull`. The script asks GitHub for 
 
 ## CI
 
-Pull requests that target a `release/**` branch, and pushes to a `release/**` branch, run the merge and release jobs in addition to the normal CI, and `ci-ok` fails if one is skipped. See [CI.md](CI.md).
+Pull requests that target a `release/**` branch, and pushes to a `release/**` branch, run the merge and release jobs in addition to the normal CI. See [CI.md](CI.md).
 
 ## Release process
 

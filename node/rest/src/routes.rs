@@ -18,7 +18,10 @@ use snarkos_node_network::PeerPoolHandling;
 use snarkos_node_router::messages::UnconfirmedSolution;
 use snarkos_node_sync::BftSyncMode;
 use snarkvm::{
-    ledger::{puzzle::Solution, store::aleo_ledger_dir},
+    ledger::{
+        puzzle::Solution,
+        store::{aleo_ledger_dir, min_authority_retention_blocks, oldest_retained_authority_height},
+    },
     prelude::{
         Address,
         ConsensusVersion,
@@ -107,6 +110,57 @@ fn map_missing_resource_error(err: anyhow::Error) -> RestError {
     });
 
     if is_missing_resource { RestError::not_found(err) } else { RestError::from(err) }
+}
+
+/// Whether the store has pruned a range of blocks, by its authority-pruning watermark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RangePruning {
+    /// The range reaches below the watermark `pruned_below`.
+    Pruned { pruned_below: u32 },
+    /// The range is retained.
+    Retained,
+    /// The watermark could not be read.
+    Unknown,
+}
+
+impl RangePruning {
+    /// Returns whether `start..end` is pruned, given the result of reading the watermark. A failure
+    /// to read it is logged.
+    fn of(start: u32, end: u32, pruned_below: Result<Option<u32>>) -> Self {
+        match pruned_below {
+            Ok(Some(pruned_below)) if range_reaches_below(start, end, pruned_below) => Self::Pruned { pruned_below },
+            Ok(_) => Self::Retained,
+            Err(error) => {
+                warn!("Failed to read the authority-pruning watermark - {error:#}");
+                Self::Unknown
+            }
+        }
+    }
+}
+
+/// Returns `true` if `start..end` reaches below `pruned_below`, the store's authority-pruning
+/// watermark. Genesis is never pruned.
+fn range_reaches_below(start: u32, end: u32, pruned_below: u32) -> bool {
+    let first_prunable = start.max(1);
+    end > first_prunable && first_prunable < pruned_below
+}
+
+/// Returns `true` if a store at `latest_height` may have pruned part of `start..end`. No store keeps
+/// fewer than snarkVM's `min_authority_retention_blocks`, so a range within that many recent blocks
+/// is retained without reading the watermark.
+fn range_may_be_pruned<N: Network>(start: u32, end: u32, latest_height: u32) -> bool {
+    let oldest_retained = oldest_retained_authority_height(latest_height, min_authority_retention_blocks::<N>());
+    range_reaches_below(start, end, oldest_retained)
+}
+
+/// Returns the `410 Gone` for a range from `start` that reaches below `pruned_below`, the store's
+/// authority-pruning watermark.
+fn pruned_error(start: u32, pruned_below: u32) -> RestError {
+    let height = start.max(1);
+    RestError::gone(anyhow!(
+        "the authority of block {height} has been pruned (earliest {pruned_below}); \
+        use /block/{height}/header, /block/{height}/transactions, or an archival node"
+    ))
 }
 
 /// Deserialize a CSV string into a vector of strings.
@@ -317,6 +371,12 @@ struct SyncStatus<'a> {
 }
 
 impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
+    /// Returns whether blocks `start..end` are pruned, by the store's authority-pruning watermark.
+    /// It reads storage.
+    fn range_pruning(&self, start: u32, end: u32) -> RangePruning {
+        RangePruning::of(start, end, self.ledger.vm().block_store().authority_pruned_below())
+    }
+
     /// GET /<network>/version
     pub(crate) async fn get_version() -> ErasedJson {
         ErasedJson::new(VersionInfo::get::<N>())
@@ -342,7 +402,7 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
         let block = rest.ledger.latest_block();
         let hash = block.hash();
         // When present, this is 3x faster than serializing the block from the ledger.
-        rest.block_cache.lock().get_or_insert(hash, || ErasedJson::new(block)).clone()
+        rest.block_cache.lock().get_or_insert(hash, || (block.height(), ErasedJson::new(block))).1.clone()
     }
 
     /// GET /<network>/block/{height}
@@ -353,39 +413,60 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
     ) -> Result<ErasedJson, RestError> {
         // Manually parse the height or the height of the hash, axum doesn't support different types
         // for the same path param.
-        let hash = if let Ok(height) = height_or_hash.parse::<u32>() {
-            rest.ledger
+        let (hash, height) = if let Ok(height) = height_or_hash.parse::<u32>() {
+            let hash = rest
+                .ledger
                 .get_hash(height)
                 .with_context(|| "Failed to get a block's hash")
-                .map_err(map_missing_resource_error)?
+                .map_err(map_missing_resource_error)?;
+            (hash, Some(height))
         } else if let Ok(hash) = height_or_hash.parse::<N::BlockHash>() {
-            hash
+            (hash, None)
         } else {
             return Err(RestError::bad_request(anyhow!("invalid input: neither a block height nor a block hash")));
         };
 
-        // Attempt to find a serialized block in the cache.
-        if let Some(json_block) = rest.block_cache.lock().get(&hash) {
-            return Ok(json_block.clone());
+        // Serve from the cache unless the block has been pruned since it was cached. A recent block
+        // is served without reading storage; for an older one, the watermark decides.
+        let cached = rest.block_cache.lock().get(&hash).cloned();
+        if let Some((height, json_block)) = cached {
+            let end = height.saturating_add(1);
+            if !range_may_be_pruned::<N>(height, end, rest.ledger.latest_height()) {
+                return Ok(json_block);
+            }
+            let rest = rest.clone();
+            let pruning = tokio::task::spawn_blocking(move || rest.range_pruning(height, end))
+                .await
+                .map_err(|e| RestError::internal_server_error(anyhow!("tokio error: {e}")))?;
+            match pruning {
+                RangePruning::Retained => return Ok(json_block),
+                RangePruning::Pruned { pruned_below } => return Err(pruned_error(height, pruned_below)),
+                // Read the block from storage instead.
+                RangePruning::Unknown => {}
+            }
         }
 
-        // Retrieve the block from the database.
-        let json_block = match tokio::task::spawn_blocking(move || match rest.ledger.try_get_block_by_hash(&hash) {
-            Ok(Some(block)) => Some(ErasedJson::new(block)),
-            Ok(None) => None,
-            Err(e) => {
-                error!("Couldn't find a block: {e}");
-                None
+        // Retrieve and serialize the block from the database. A block whose authority has been pruned
+        // fails to read and is reported as gone; a hash the node does not know is a 404.
+        tokio::task::spawn_blocking(move || {
+            let error = match rest.ledger.try_get_block_by_hash(&hash) {
+                Ok(Some(block)) => return Ok(ErasedJson::new(block)),
+                Ok(None) => return Err(RestError::not_found(anyhow!("Couldn't find block {height_or_hash}"))),
+                Err(error) => error,
+            };
+            if let Some(height) = height.or_else(|| rest.ledger.get_height(&hash).ok()) {
+                match rest.range_pruning(height, height.saturating_add(1)) {
+                    RangePruning::Pruned { pruned_below } => return Err(pruned_error(height, pruned_below)),
+                    // Without the watermark, a missing block cannot be told from a pruned one.
+                    RangePruning::Unknown => return Err(RestError::internal_server_error(error)),
+                    RangePruning::Retained => {}
+                }
             }
+            error!("Couldn't find a block: {error:#}");
+            Err(RestError::not_found(anyhow!("Couldn't find block {height_or_hash}")))
         })
         .await
-        {
-            Ok(Some(block)) => Ok(block),
-            Ok(None) => Err(RestError::not_found(anyhow!("Couldn't find block {height_or_hash}"))),
-            Err(e) => Err(RestError::internal_server_error(anyhow!("tokio error: {e}"))),
-        }?;
-
-        Ok(json_block)
+        .map_err(|e| RestError::internal_server_error(anyhow!("tokio error: {e}")))?
     }
 
     /// GET /<network>/blocks?start={start_height}&end={end_height}
@@ -393,19 +474,32 @@ impl<N: Network, C: ConsensusStorage<N>, R: Routing<N>> Rest<N, C, R> {
     ///
     /// `start` is inclusive and `end` is exclusive. A height the node does not have is a 404. With
     /// `allow_partial=true`, a range that reaches past the tip is clamped to it instead, so the
-    /// array is shorter than the range, and empty when `start` is past the tip.
+    /// array is shorter than the range, and empty when `start` is past the tip. A range that reaches
+    /// below the store's authority-pruning watermark (genesis aside) is a 410 as a whole.
     pub(crate) async fn get_blocks(
         State(rest): State<Self>,
         Query(block_range): Query<BlockRange>,
     ) -> Result<ErasedJson, RestError> {
-        let (start_height, end_height) =
-            check_block_range(block_range, MAX_BLOCK_RANGE, "blocks", rest.ledger.latest_height())?;
+        let latest_height = rest.ledger.latest_height();
+        let (start_height, end_height) = check_block_range(block_range, MAX_BLOCK_RANGE, "blocks", latest_height)?;
 
         // Prepare a closure for the blocking work.
         let get_json_blocks = move || -> Result<ErasedJson, RestError> {
+            // A range that may reach below the watermark is checked before its blocks are assembled.
+            if range_may_be_pruned::<N>(start_height, end_height, latest_height)
+                && let RangePruning::Pruned { pruned_below } = rest.range_pruning(start_height, end_height)
+            {
+                return Err(pruned_error(start_height, pruned_below));
+            }
             let blocks = cfg_into_iter!(start_height..end_height)
-                .map(|height| rest.ledger.get_block(height).map_err(map_missing_resource_error))
-                .collect::<Result<Vec<_>, _>>()?;
+                .map(|height| rest.ledger.get_block(height))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|err| match rest.range_pruning(start_height, end_height) {
+                    RangePruning::Pruned { pruned_below } => pruned_error(start_height, pruned_below),
+                    RangePruning::Retained => map_missing_resource_error(err),
+                    // Without the watermark, a missing block cannot be told from a pruned one.
+                    RangePruning::Unknown => RestError::internal_server_error(err),
+                })?;
 
             Ok(ErasedJson::new(blocks))
         };
@@ -1886,6 +1980,44 @@ mod route_error_tests {
         let err = map_missing_resource_error(anyhow::anyhow!(message));
         assert_eq!(err, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(err.to_string(), message);
+    }
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    use axum::http::StatusCode;
+
+    type CurrentNetwork = snarkvm::prelude::MainnetV0;
+
+    /// Tests that the 410 names the first pruned block, genesis aside, and the earliest one served.
+    #[test]
+    fn pruned_error_names_the_blocks() {
+        const W: u32 = 1_000;
+        let err = pruned_error(W - 1, W);
+        assert_eq!(err, StatusCode::GONE);
+        assert!(err.to_string().contains(&format!("(earliest {W})")), "{err}");
+        assert!(err.to_string().contains(&format!("/block/{}/header", W - 1)), "{err}");
+        assert!(pruned_error(0, W).to_string().contains("authority of block 1 "));
+    }
+
+    /// Tests which ranges reach below the watermark, and which may be pruned without reading it.
+    #[test]
+    fn range_pruning_boundaries() {
+        const W: u32 = 1_000;
+        assert_eq!(RangePruning::of(1, 2, Ok(None)), RangePruning::Retained);
+        assert_eq!(RangePruning::of(W, W + 1, Ok(Some(W))), RangePruning::Retained);
+        assert_eq!(RangePruning::of(0, 1, Ok(Some(W))), RangePruning::Retained);
+        assert_eq!(RangePruning::of(0, 10, Ok(Some(W))), RangePruning::Pruned { pruned_below: W });
+        assert_eq!(RangePruning::of(W - 1, W, Ok(Some(W))), RangePruning::Pruned { pruned_below: W });
+        assert_eq!(RangePruning::of(W - 1, W, Err(anyhow!("watermark error"))), RangePruning::Unknown);
+
+        // The last `min_authority_retention_blocks` blocks are never pruned; genesis never is.
+        let latest = 10_000;
+        let first_retained = latest - (min_authority_retention_blocks::<CurrentNetwork>() - 1);
+        assert!(!range_may_be_pruned::<CurrentNetwork>(first_retained, latest + 1, latest));
+        assert!(range_may_be_pruned::<CurrentNetwork>(first_retained - 1, first_retained, latest));
+        assert!(!range_may_be_pruned::<CurrentNetwork>(0, 1, latest));
     }
 }
 

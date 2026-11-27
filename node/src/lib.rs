@@ -50,21 +50,125 @@ pub use node::*;
 mod traits;
 pub use traits::*;
 
+use snarkos_node_cdn::CdnBlockSync;
+use snarkos_node_network::PeerPoolHandling;
 use snarkos_node_router::{
     Router,
-    messages::{BlockRequest, Message},
+    messages::{BlockRequest, DisconnectReason, Message},
 };
-use snarkos_node_sync::serve_block_request;
+use snarkos_node_sync::{BlockRequestOutcome, BlockSync, Ping, STUCK_SYNC_SHUTDOWN_THRESHOLD, serve_block_request};
+use snarkos_utilities::{SignalHandler, Stoppable};
 use snarkvm::{
     ledger::{
         Ledger,
-        store::{ConsensusStorage, StorageMode},
+        LoadOptions,
+        store::{ConsensusStorage, StorageMode, check_authority_retention_blocks},
     },
     prelude::Network,
     utilities::flatten_error,
 };
 
-use std::net::SocketAddr;
+use anyhow::{Context, Result};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
+
+/// How many recent blocks' authority data this node keeps (see `--prune-authority-data`). The
+/// default keeps all of it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AuthorityRetention(Option<u32>);
+
+impl AuthorityRetention {
+    /// Keeps the authority data of the last `blocks` blocks, which must be at least snarkVM's
+    /// `min_authority_retention_blocks`.
+    pub fn prune<N: Network>(blocks: u32) -> Result<Self> {
+        check_authority_retention_blocks::<N>(blocks)?;
+        Ok(Self(Some(blocks)))
+    }
+
+    /// Returns the options to load the ledger with.
+    fn load_options(self) -> LoadOptions {
+        LoadOptions::default().with_authority_retention(self.0)
+    }
+}
+
+/// Whether a node whose peers no longer serve the blocks it needs can recover by restarting into
+/// the startup CDN sync.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CdnFallback {
+    /// The startup CDN sync completed, so a restart repeats it.
+    Available,
+    /// CDN sync is disabled (`--nocdn`, or `--dev` without `--cdn`).
+    Disabled,
+    /// The startup CDN sync failed, so a restart retries it.
+    Failed,
+}
+
+/// Waits for the startup CDN sync, if any, then records the ledger height in `sync` and advertises
+/// it through `ping`. Returns whether a restart could repeat the CDN sync.
+async fn finish_cdn_sync<N: Network, C: ConsensusStorage<N>>(
+    cdn_sync: Option<Arc<CdnBlockSync>>,
+    ledger: &Ledger<N, C>,
+    sync: &BlockSync<N>,
+    ping: &Ping<N>,
+) -> Result<CdnFallback> {
+    let cdn_fallback = match cdn_sync {
+        None => CdnFallback::Disabled,
+        // A failed sync was logged by the CDN sync task.
+        Some(cdn_sync) => match cdn_sync.wait().await.with_context(|| "Failed to synchronize from the CDN")? {
+            Ok(_) => CdnFallback::Available,
+            Err(_) => CdnFallback::Failed,
+        },
+    };
+    // Blocks added by CDN sync do not pass through block sync.
+    sync.set_sync_height(ledger.latest_height());
+    match sync.get_block_locators() {
+        Ok(locators) => ping.update_block_locators(locators),
+        Err(error) => warn!("{}", flatten_error(error.context("Failed to advertise the blocks added by CDN sync"))),
+    }
+    Ok(cdn_fallback)
+}
+
+/// Shuts the node down if its block sync stays stuck (see [`shut_down_if_stuck_sync`]).
+async fn monitor_stuck_sync<N: Network>(
+    sync: Arc<BlockSync<N>>,
+    signal_handler: Arc<SignalHandler>,
+    cdn_fallback: CdnFallback,
+) {
+    while !signal_handler.is_stopped() {
+        tokio::time::sleep(STUCK_SYNC_SHUTDOWN_THRESHOLD / 10).await;
+        if shut_down_if_stuck_sync(&sync, &signal_handler, cdn_fallback) {
+            break;
+        }
+    }
+}
+
+/// Returns `true` if a node whose block sync has been stuck for `stuck_for` must shut down: after
+/// `STUCK_SYNC_SHUTDOWN_THRESHOLD`, unless CDN sync is disabled, since a restart could not help.
+fn is_stuck_sync_fatal(stuck_for: Option<Duration>, cdn_fallback: CdnFallback) -> bool {
+    cdn_fallback != CdnFallback::Disabled
+        && stuck_for.is_some_and(|stuck_for| stuck_for >= STUCK_SYNC_SHUTDOWN_THRESHOLD)
+}
+
+/// Shuts the node down, as failed, if its block sync has been stuck long enough (see
+/// [`is_stuck_sync_fatal`]), and returns whether it did.
+fn shut_down_if_stuck_sync<N: Network>(
+    sync: &BlockSync<N>,
+    signal_handler: &SignalHandler,
+    cdn_fallback: CdnFallback,
+) -> bool {
+    if !is_stuck_sync_fatal(sync.stuck_for(), cdn_fallback) {
+        return false;
+    }
+    let recovery = match cdn_fallback {
+        CdnFallback::Failed => "The startup CDN sync failed (see above): restart the node to retry it",
+        _ => "Restart the node to sync the missing blocks from the CDN",
+    };
+    error!(
+        "No connected peer serves the blocks this node needs. Shutting down. {recovery}, or restore a recent \
+        ledger snapshot."
+    );
+    signal_handler.stop_with_error("No connected peer serves the blocks this node needs (see the logs above)".into());
+    true
+}
 
 /// Answers a `BlockRequest` from a router peer with blocks from `ledger`. Returns `false` if the
 /// request cannot be served.
@@ -78,11 +182,23 @@ fn send_block_response<N: Network, C: ConsensusStorage<N>>(
         request,
         router.supports_status_replies(peer_ip),
         || ledger.latest_height(),
+        || ledger.vm().block_store().authority_pruned_below(),
         |heights| ledger.get_blocks(heights),
     );
     match response {
-        Ok(response) => {
+        Ok(BlockRequestOutcome::Reply(response)) => {
             router.send(peer_ip, Message::BlockResponse(response));
+            true
+        }
+        Ok(BlockRequestOutcome::Drop) => true,
+        Ok(BlockRequestOutcome::OutdatedPeer(status)) => {
+            let BlockRequest { start_height, end_height } = request;
+            warn!(
+                "Disconnecting '{peer_ip}': the peer is on an older version and requested blocks {start_height} to \
+                {end_height}, which this node does not serve ({status:?})"
+            );
+            router.send(peer_ip, Message::Disconnect(DisconnectReason::ProtocolViolation.into()));
+            router.disconnect(peer_ip);
             true
         }
         Err(error) => {
@@ -177,4 +293,34 @@ pub fn notification_message() -> String {
     .bold();
 
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type CurrentNetwork = snarkvm::prelude::MainnetV0;
+
+    #[test]
+    fn authority_retention_load_options() {
+        assert_eq!(AuthorityRetention::default().load_options().authority_retention, None);
+        let min = snarkvm::ledger::store::min_authority_retention_blocks::<CurrentNetwork>();
+        let pruning = AuthorityRetention::prune::<CurrentNetwork>(min).unwrap();
+        assert_eq!(pruning.load_options().authority_retention, Some(min));
+        assert!(AuthorityRetention::prune::<CurrentNetwork>(min - 1).is_err());
+    }
+
+    /// Tests that a stuck node shuts down only after the threshold, and never with CDN sync disabled.
+    #[test]
+    fn stuck_sync_is_fatal_only_with_a_cdn_after_the_threshold() {
+        let below = Some(STUCK_SYNC_SHUTDOWN_THRESHOLD - Duration::from_secs(1));
+        let at = Some(STUCK_SYNC_SHUTDOWN_THRESHOLD);
+        for cdn_fallback in [CdnFallback::Available, CdnFallback::Failed] {
+            assert!(!is_stuck_sync_fatal(None, cdn_fallback));
+            assert!(!is_stuck_sync_fatal(below, cdn_fallback));
+            assert!(is_stuck_sync_fatal(at, cdn_fallback));
+        }
+        assert!(!is_stuck_sync_fatal(at, CdnFallback::Disabled));
+        assert!(!is_stuck_sync_fatal(Some(Duration::MAX), CdnFallback::Disabled));
+    }
 }

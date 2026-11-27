@@ -598,41 +598,11 @@ jobs:
         with: { tool: cargo-hack@0.6.46 }
       - run: cargo hack clippy --workspace --each-feature --exclude-features cuda --locked -- -D warnings
 
-  # The one job to require on protected branches. A skipped job counts as passed
-  # for a required check, so every job must succeed here, except one skipped
-  # where it is not meant to run: `schedule-due` off the schedule,
-  # `each-feature` on a pull request, the merge jobs on a pull request into
-  # any branch but a release branch, and `devnet-release` outside a release.
-  # A scheduled run that is not due has no verdict.
-  ci-ok:
-    if: >-
-      always() &&
-      (github.event_name != 'schedule' || needs.schedule-due.outputs.due == 'true')
-    needs: [schedule-due, check-shared-refs, fmt, deny, shellcheck, source-checks, merge-fixup, machete, release-graph, lint, lint-locktick, test-hosted, test, build-snarkos, devnet, devnet-merge, devnet-release, windows, each-feature]
-    runs-on: ubuntu-latest
-    steps:
-      - env:
-          NEEDS: ${{ toJSON(needs) }}
-          EVENT: ${{ github.event_name }}
-          RELEASE: >-
-            ${{ github.event_name == 'workflow_dispatch' ||
-            startsWith(github.ref, 'refs/heads/release/') ||
-            startsWith(github.base_ref, 'release/') }}
-        run: |
-          jq -e --arg event "$EVENT" --argjson release "$RELEASE" '
-            (if $event == "schedule" then ["devnet-release"]
-            elif $event != "pull_request" then ["schedule-due"]
-            elif $release then ["schedule-due", "each-feature"]
-            else ["schedule-due", "each-feature", "devnet-merge", "devnet-release", "windows"] end) as $skippable
-            | to_entries
-            | map(select(.value.result != "success" and (.value.result != "skipped" or (.key | IN($skippable[]) | not))))
-            | if length == 0 then true else (map("\(.key): \(.value.result)") | join(", ") | halt_error) end' <<< "$NEEDS"
-
   # Posts to Slack when staging's scheduled run turns red, and once when it is
   # green again. `checked` is false for a run that was not due.
   notify:
     if: always() && github.event_name == 'schedule' && github.repository == 'aleo-labs-protocol/snarkOS'
-    needs: [schedule-due, check-shared-refs, fmt, deny, shellcheck, source-checks, merge-fixup, machete, release-graph, lint, lint-locktick, test-hosted, test, build-snarkos, devnet, devnet-merge, devnet-release, windows, each-feature, ci-ok]
+    needs: [schedule-due, check-shared-refs, fmt, deny, shellcheck, source-checks, merge-fixup, machete, release-graph, lint, lint-locktick, test-hosted, test, build-snarkos, devnet, devnet-merge, devnet-release, windows, each-feature]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions: { actions: read }

@@ -95,6 +95,10 @@ const STUCK_SYNC_GRACE: Duration = Duration::from_secs(60);
 /// How often to warn while block sync stays stuck.
 const STUCK_SYNC_WARNING_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
+/// How long block sync may be stuck (see [`BlockSync::stuck_for`]) before a node that can recover
+/// from the CDN shuts down.
+pub const STUCK_SYNC_SHUTDOWN_THRESHOLD: Duration = Duration::from_secs(5 * 60);
+
 /// This is a dummy IP address that is used to represent the local node.
 /// Note: This here does not need to be a real IP address, but it must be unique/distinct from all other connections.
 pub const DUMMY_SELF_IP: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
@@ -3660,10 +3664,10 @@ mod tests {
         sync.stuck_since.lock().map(|since| since.at)
     }
 
-    /// Tests that the stuck clock keeps running while a peer leaves and returns every half grace
-    /// period, and that block sync counts as stuck once the stuck predicate has held for the grace
-    /// period in total. Tests that the clock restarts when a peer ahead serves the next block, when a
-    /// request can progress, or when the height changes.
+    /// Tests that block sync reaches the shutdown threshold while a peer leaves and returns every
+    /// half grace period, so that the stuck predicate holds half of the time, and counts as stuck
+    /// once the predicate has held for the grace period in total. Tests that the clock restarts when
+    /// a peer ahead serves the next block, when a request can progress, or when the height changes.
     #[test]
     fn test_stuck_clock_survives_peer_churn() {
         let sync = sample_sync_at_height(1_000);
@@ -3672,7 +3676,9 @@ mod tests {
         let step = STUCK_SYNC_GRACE / 2;
         let mut now = start;
         assert_eq!(sync.stuck_for_at(now), None);
-        for round in 1..=4 {
+        let mut round = 0;
+        while now < start + STUCK_SYNC_SHUTDOWN_THRESHOLD {
+            round += 1;
             now += step;
             sync.remove_peer(&sample_peer_ip(3));
             assert_eq!(sync.stuck_for_at(now), None);
@@ -3680,6 +3686,7 @@ mod tests {
             add_peers(&sync, 3, 1, 1_100, 1_050);
             assert_eq!(sync.stuck_for_at(now), (round * step >= STUCK_SYNC_GRACE).then(|| now - start));
         }
+        assert!(sync.stuck_for_at(now).unwrap() >= STUCK_SYNC_SHUTDOWN_THRESHOLD);
         sync.warn_if_stuck(now);
         assert_eq!(sync.stuck_since.lock().unwrap().warned_at, Some(now));
 

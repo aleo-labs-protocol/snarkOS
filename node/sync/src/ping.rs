@@ -114,7 +114,7 @@ impl<N: Network> Ping<N> {
     pub fn on_peer_connected(&self, peer_ip: SocketAddr) {
         // Send the first ping.
         let locators = self.inner.lock().block_locators.clone();
-        if !self.router.send_ping(peer_ip, locators) {
+        if !self.router.send_ping(peer_ip, locators, self.router.oldest_retained_height()) {
             warn!("Peer {peer_ip} connected and immediately disconnected?");
         }
     }
@@ -138,15 +138,16 @@ impl<N: Network> Ping<N> {
 
             // Do not hold the lock while waiting.
             let sleep_time = {
+                let oldest_retained = router.oldest_retained_height();
                 let mut inner = inner.lock();
                 let now = Instant::now();
 
                 // Ping peers.
                 if new_block {
-                    Self::ping_all_peers(&mut inner, router);
+                    Self::ping_all_peers(&mut inner, router, oldest_retained);
                     new_block = false;
                 } else {
-                    Self::ping_expired_peers(now, &mut inner, router);
+                    Self::ping_expired_peers(now, &mut inner, router, oldest_retained);
                 }
 
                 // Figure out how long to sleep.
@@ -166,7 +167,7 @@ impl<N: Network> Ping<N> {
     }
 
     /// Ping all peers that have an expired timer.
-    fn ping_expired_peers(now: Instant, inner: &mut PingInner<N>, router: &Router<N>) {
+    fn ping_expired_peers(now: Instant, inner: &mut PingInner<N>, router: &Router<N>, oldest_retained: Option<u32>) {
         loop {
             // Find next peer to contact.
             let peer_ip = {
@@ -183,7 +184,7 @@ impl<N: Network> Ping<N> {
 
             // Send new ping
             let locators = inner.block_locators.clone();
-            let success = router.send_ping(peer_ip, locators.clone());
+            let success = router.send_ping(peer_ip, locators.clone(), oldest_retained);
             inner.next_ping.pop_first();
 
             if !success {
@@ -193,13 +194,13 @@ impl<N: Network> Ping<N> {
     }
 
     /// Ping all known peers.
-    fn ping_all_peers(inner: &mut PingInner<N>, router: &Router<N>) {
+    fn ping_all_peers(inner: &mut PingInner<N>, router: &Router<N>, oldest_retained: Option<u32>) {
         let peers: Vec<SocketAddr> = inner.next_ping.values().copied().collect();
         inner.next_ping.clear();
 
         for peer_ip in peers {
             let locators = inner.block_locators.clone();
-            let success = router.send_ping(peer_ip, locators);
+            let success = router.send_ping(peer_ip, locators, oldest_retained);
 
             if !success {
                 trace!("Failed to send ping to peer {peer_ip}. Disconnected.");
