@@ -1,6 +1,6 @@
 [package]
 name = "snarkos-ledger-distribution"
-version = "4.13.1"
+version = "5.0.0"
 authors = [ "The Aleo Team <hello@aleo.org>" ]
 description = "Uploads the ledger's blocks to the bucket that serves the snarkOS block CDN"
 homepage = "https://aleo.org"
