@@ -80,6 +80,12 @@ impl<N: Network> ProposalTask<N> {
         self.inner.ready.send_replace(true);
     }
 
+    /// Returns a receiver that observes [`Self::signal`] (only used in unit tests).
+    #[cfg(test)]
+    pub(super) fn subscribe(&self) -> watch::Receiver<bool> {
+        self.inner.ready.subscribe()
+    }
+
     /// Runs the batch proposal loop. This is intended to be spawned as a long-running task.
     ///
     /// Each iteration covers one full round (wait → propose → wait for signatures).

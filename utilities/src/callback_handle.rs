@@ -15,6 +15,7 @@
 
 use crate::locks::parking_lot::{RwLock, RwLockReadGuard};
 use anyhow::{Result, bail};
+use std::sync::{Arc, Weak};
 
 /// Helper struct to hold a reference to a callback struct.
 pub struct CallbackHandle<C: Clone + Send + Sync> {
@@ -55,9 +56,16 @@ impl<C: Send + Sync + Clone> CallbackHandle<C> {
     }
 
     /// Remove the callback.
-    /// Used during shutdown to resolve circular dependencies between types.
+    /// Used during shutdown, after which the callback is no longer invoked.
     pub fn clear(&self) {
         let _ = self.callback.write().take();
+    }
+}
+
+impl<T: ?Sized + Send + Sync> CallbackHandle<Weak<T>> {
+    /// Get the callback, if it is set and still alive.
+    pub fn upgrade(&self) -> Option<Arc<T>> {
+        self.callback.read().as_ref().and_then(Weak::upgrade)
     }
 }
 
@@ -112,9 +120,22 @@ mod tests {
         handle.clear();
         assert!(handle.get().is_none());
 
-        // This is what lets shutdown break the circular references and then rebuild them.
+        // A cleared handle can be set again.
         assert!(handle.set("second".to_string()).is_ok());
         assert_eq!(handle.get(), Some("second".to_string()));
+    }
+
+    #[test]
+    fn a_weak_callback_upgrades_while_its_owner_is_alive() {
+        let handle = CallbackHandle::<Weak<String>>::default();
+        assert!(handle.upgrade().is_none());
+
+        let owner = Arc::new("callback".to_string());
+        handle.set(Arc::downgrade(&owner)).unwrap();
+        assert!(handle.upgrade().is_some_and(|callback| Arc::ptr_eq(&callback, &owner)));
+
+        drop(owner);
+        assert!(handle.upgrade().is_none());
     }
 
     #[test]
