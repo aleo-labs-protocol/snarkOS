@@ -18,7 +18,7 @@ use crate::{
     MAX_FETCH_TIMEOUT,
     Transport,
     events::{CertificateRequest, CertificateResponse, Event},
-    helpers::{Pending, Storage, SyncReceiver, fmt_id, max_redundant_requests},
+    helpers::{Pending, Storage, SyncReceiver, fmt_id, max_redundant_requests, request_stake_redundancy_reached},
     ledger_service::{BeginLedgerUpdateError, LedgerService},
     spawn_blocking,
 };
@@ -1035,24 +1035,21 @@ impl<N: Network> Sync<N> {
     ) -> Result<BatchCertificate<N>> {
         // Initialize a oneshot channel.
         let (callback_sender, callback_receiver) = oneshot::channel();
-        // Determine how many sent requests are pending.
-        let num_sent_requests = self.pending.num_sent_requests(certificate_id);
-        // Determine if we've already sent a request to the peer.
-        let contains_peer_with_sent_request = self.pending.contains_peer_with_sent_request(certificate_id, peer_ip);
         // Determine the maximum number of redundant requests.
         let num_redundant_requests = max_redundant_requests(self.ledger.clone(), self.storage.current_round())?;
-        // Establish whether the peers who already got the request collectively hold sufficient stake.
-        let stake_redundancy_reached = || self.pending.request_stake_redundancy_reached(&self.gateway, certificate_id);
-        // Determine if we should send a certificate request to the peer.
-        // Each peer can only receive one request at a time.
-        // We send at most `num_redundant_requests` requests, unless the stake redundancy factor hasn't been reached.
-        let should_send_request = !contains_peer_with_sent_request
-            && (num_sent_requests < num_redundant_requests || !stake_redundancy_reached()?);
+        // Insert the certificate ID into the pending queue, and determine if we should send a
+        // certificate request to the peer.
+        let mut num_sent_requests = 0;
+        let should_send_request =
+            self.pending.insert_request(certificate_id, peer_ip, callback_sender, |num_sent, sent_peers| {
+                num_sent_requests = num_sent;
+                // Each peer can only receive one request at a time.
+                // We send at most `num_redundant_requests` requests, unless the stake redundancy factor hasn't been reached.
+                Ok(!sent_peers.contains(&peer_ip)
+                    && (num_sent < num_redundant_requests
+                        || !request_stake_redundancy_reached(&self.gateway, sent_peers)?))
+            })?;
 
-        // Insert the certificate ID into the pending queue.
-        self.pending.insert(certificate_id, peer_ip, Some((callback_sender, should_send_request)));
-
-        // If the number of requests is less than or equal to the redundancy factor, send the certificate request to the peer.
         if should_send_request {
             // Send the certificate request to the peer.
             if self.gateway.send(peer_ip, Event::CertificateRequest(certificate_id.into())).await.is_none() {
@@ -2148,9 +2145,10 @@ mod tests {
     /// tasks that wait for the same instant run in many orders.
     ///
     /// Hazard: the gateway of these tests has no connection, so a request that it must send fails
-    /// with "failed to send request". A test that needs a request to wait puts an earlier request
-    /// to the same peer into the pending queue first. The earlier request expires after
-    /// `CALLBACK_EXPIRATION_IN_SECS`, and the later one is then sent.
+    /// with "failed to send request". A test that needs a request to wait puts earlier requests
+    /// into the pending queue first: one to the same peer, or one to each of enough validators.
+    /// An earlier request expires after `CALLBACK_EXPIRATION_IN_SECS`, and the later one is then
+    /// sent.
     #[cfg(shuttle)]
     mod shuttle_tests {
         use super::*;
@@ -2190,14 +2188,15 @@ mod tests {
             Sync::new(gateway, storage, ledger, block_sync)
         }
 
-        /// Puts a request for `certificate_id` that was sent to the peer into the pending queue,
+        /// Puts a request for `certificate_id` that was sent to `peer_ip` into the pending queue,
         /// and returns the receiver of its callback.
         fn insert_sent_request(
             sync: &Sync<CurrentNetwork>,
             certificate_id: Field<CurrentNetwork>,
+            peer_ip: SocketAddr,
         ) -> oneshot::Receiver<BatchCertificate<CurrentNetwork>> {
             let (sender, receiver) = oneshot::channel();
-            sync.pending.insert(certificate_id, PEER_IP, Some((sender, true)));
+            sync.pending.insert(certificate_id, peer_ip, Some((sender, true)));
             receiver
         }
 
@@ -2213,7 +2212,7 @@ mod tests {
             check_async(ITERATIONS, move || {
                 let (sync, certificate) = (new_sync(committee.clone()), certificate.clone());
                 async move {
-                    let earlier_request = insert_sent_request(&sync, certificate.id());
+                    let earlier_request = insert_sent_request(&sync, certificate.id(), PEER_IP);
 
                     let request = {
                         let (sync, certificate_id) = (sync.clone(), certificate.id());
@@ -2253,7 +2252,6 @@ mod tests {
         /// first one arrives. The second request must not wait for a response that no peer will
         /// send: it gets the response of the first request, or it sends a request of its own.
         #[test]
-        #[ignore = "fails: the request decides to send nothing, and the response clears the pending queue before the request is in it"]
         fn request_starts_as_the_response_arrives() {
             static NUM_FETCHED: AtomicUsize = AtomicUsize::new(0);
             static NUM_SENT: AtomicUsize = AtomicUsize::new(0);
@@ -2262,7 +2260,7 @@ mod tests {
             check_async(ITERATIONS, move || {
                 let (sync, certificate) = (new_sync(committee.clone()), certificate.clone());
                 async move {
-                    let first_request = insert_sent_request(&sync, certificate.id());
+                    let first_request = insert_sent_request(&sync, certificate.id(), PEER_IP);
 
                     let second_request = {
                         let (sync, certificate_id) = (sync.clone(), certificate.id());
@@ -2298,6 +2296,65 @@ mod tests {
 
             // Both orders must occur, or the test does not cover the race.
             assert!(NUM_FETCHED.load(Ordering::Relaxed) > 0, "the second request never came first");
+            assert!(NUM_SENT.load(Ordering::Relaxed) > 0, "the response never came first");
+        }
+
+        /// Requests to enough peers are pending, so a request to one more peer checks the stake
+        /// of those peers, while the pending queue is locked. The response to one of the pending
+        /// requests arrives at the same instant. The request finds enough stake, sends nothing and
+        /// gets that response, or it comes after the response and sends a request of its own.
+        #[test]
+        fn request_checks_the_stake_of_the_sent_peers() {
+            static NUM_FETCHED: AtomicUsize = AtomicUsize::new(0);
+            static NUM_SENT: AtomicUsize = AtomicUsize::new(0);
+
+            let (committee, certificate) = sample_committee_and_certificate();
+            check_async(ITERATIONS, move || {
+                let (sync, certificate) = (new_sync(committee.clone()), certificate.clone());
+                let validators: Vec<_> = committee.members().keys().copied().take(2).collect();
+                async move {
+                    // Two connected validators have the request, which is the number of redundant requests.
+                    let sent_peers =
+                        [SocketAddr::from(([127, 0, 0, 1], 5001)), SocketAddr::from(([127, 0, 0, 1], 5002))];
+                    let mut sent_requests = Vec::new();
+                    for (peer_ip, address) in sent_peers.into_iter().zip(validators) {
+                        sync.gateway.insert_connected_peer(peer_ip, peer_ip, address);
+                        sent_requests.push(insert_sent_request(&sync, certificate.id(), peer_ip));
+                    }
+
+                    let request = {
+                        let (sync, certificate_id) = (sync.clone(), certificate.id());
+                        tokio::spawn(async move { sync.send_certificate_request(PEER_IP, certificate_id).await })
+                    };
+                    let response = {
+                        let (sync, certificate) = (sync.clone(), certificate.clone());
+                        tokio::spawn(async move {
+                            sync.finish_certificate_request(sent_peers[0], certificate.into());
+                        })
+                    };
+
+                    let fetched = request.await.unwrap();
+                    response.await.unwrap();
+                    for sent_request in sent_requests {
+                        assert_eq!(sent_request.await.unwrap(), certificate);
+                    }
+                    match fetched {
+                        Ok(fetched) => {
+                            assert_eq!(fetched, certificate);
+                            assert!(!sync.pending.contains(certificate.id()));
+                            NUM_FETCHED.fetch_add(1, Ordering::Relaxed);
+                        }
+                        // The request came after the response, and the gateway cannot reach its peer.
+                        Err(error) if format!("{error:#}").contains("failed to send request") => {
+                            NUM_SENT.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(error) => panic!("the request sent nothing and got no response: {error:#}"),
+                    }
+                }
+            });
+
+            // Both orders must occur, or the test does not cover the race.
+            assert!(NUM_FETCHED.load(Ordering::Relaxed) > 0, "the request never came first");
             assert!(NUM_SENT.load(Ordering::Relaxed) > 0, "the response never came first");
         }
     }

@@ -572,27 +572,26 @@ impl<N: Network> Worker<N> {
     ) -> Result<(TransmissionID<N>, Transmission<N>)> {
         // Initialize a oneshot channel.
         let (callback_sender, callback_receiver) = oneshot::channel();
-        // Determine how many sent requests are pending.
-        let num_sent_requests = self.pending.num_sent_requests(transmission_id);
-        // Determine if we've already sent a request to the peer.
-        let contains_peer_with_sent_request = self.pending.contains_peer_with_sent_request(transmission_id, peer_ip);
         // Determine the maximum number of redundant requests.
         let num_redundant_requests = max_redundant_requests(self.ledger.clone(), self.storage.current_round())?;
-        // Establish whether the peers who already got the request collectively hold sufficient stake.
-        #[cfg(test)]
-        let stake_redundancy_reached = || Ok::<_, anyhow::Error>(true);
-        #[cfg(not(test))]
-        let stake_redundancy_reached = || self.pending.request_stake_redundancy_reached(&self.gateway, transmission_id);
-        // Determine if we should send a transmission request to the peer.
-        // Each peer can only receive one request at a time.
-        // We send at most `num_redundant_requests` requests, unless the stake redundancy factor hasn't been reached.
-        let should_send_request = !contains_peer_with_sent_request
-            && (num_sent_requests < num_redundant_requests || !stake_redundancy_reached()?);
+        // Insert the transmission ID into the pending queue, and determine if we should send a
+        // transmission request to the peer.
+        let mut num_sent_requests = 0;
+        let should_send_request =
+            self.pending.insert_request(transmission_id, peer_ip, callback_sender, |num_sent, sent_peers| {
+                num_sent_requests = num_sent;
+                // Establish whether the peers who already got the request collectively hold sufficient stake.
+                #[cfg(test)]
+                let stake_redundancy_reached = || Ok::<_, anyhow::Error>(true);
+                #[cfg(not(test))]
+                let stake_redundancy_reached =
+                    || crate::helpers::request_stake_redundancy_reached(&self.gateway, sent_peers);
+                // Each peer can only receive one request at a time.
+                // We send at most `num_redundant_requests` requests, unless the stake redundancy factor hasn't been reached.
+                Ok(!sent_peers.contains(&peer_ip)
+                    && (num_sent < num_redundant_requests || !stake_redundancy_reached()?))
+            })?;
 
-        // Insert the transmission ID into the pending queue.
-        self.pending.insert(transmission_id, peer_ip, Some((callback_sender, should_send_request)));
-
-        // If the number of requests is less than or equal to the the redundancy factor, send the transmission request to the peer.
         if should_send_request {
             trace!("Requesting transmission {} from peer '{peer_ip}'", self.format_transmission_id(transmission_id));
             // Send the transmission request to the peer.
@@ -1289,7 +1288,6 @@ mod tests {
         /// request may time out: the second request gets the response of the first one, or it
         /// sends a request of its own.
         #[test]
-        #[ignore = "fails: the request decides to send nothing, and the response clears the pending queue before the request is in it"]
         fn request_starts_as_the_response_arrives() {
             const RESPONSE_DELAY: Duration = Duration::from_secs(1);
             static NUM_FETCHED: AtomicUsize = AtomicUsize::new(0);

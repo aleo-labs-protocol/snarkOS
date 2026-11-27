@@ -143,6 +143,9 @@ impl<T: Copy + Clone + PartialEq + Eq + Hash, V: Clone> Pending<T, V> {
     ///
     /// In addition, an optional `callback` may be provided, that is triggered upon removal.
     /// Note: The callback, if provided, is **always** inserted into the callback queue.
+    ///
+    /// Hazard: a request that sends or waits depending on the sent requests in the queue must use
+    /// [`Self::insert_request`]. A read of the queue and this call are two steps.
     pub fn insert(
         &self,
         item: impl Into<T>,
@@ -180,6 +183,52 @@ impl<T: Copy + Clone + PartialEq + Eq + Hash, V: Clone> Pending<T, V> {
         result
     }
 
+    /// Inserts the `callback` of a request for the specified `item` from the specified `peer IP`,
+    /// returning `true` if the caller must send the request to the peer.
+    ///
+    /// `should_send_request` makes that decision. It is given the number of requests for the `item`
+    /// that were sent and are still pending, and the peer IPs that they were sent to.
+    ///
+    /// The decision and the insertion happen under one lock. Hazard: if they are two steps, a
+    /// response can remove the sent requests in between, and the callback then waits for a
+    /// response that no request asks for. `should_send_request` runs under that lock, so it must
+    /// not use the pending queue.
+    ///
+    /// Hazard: `should_send_request` takes its locks after the lock of the pending queue. The
+    /// callers read the committee of the ledger and the peers of the gateway there, so code that
+    /// holds a lock of those must not use the pending queue.
+    pub fn insert_request(
+        &self,
+        item: impl Into<T>,
+        peer_ip: SocketAddr,
+        callback: oneshot::Sender<V>,
+        should_send_request: impl FnOnce(usize, &HashSet<SocketAddr>) -> Result<bool>,
+    ) -> Result<bool> {
+        let item = item.into();
+        let now = now();
+        let mut pending = self.pending.write();
+
+        // Clear the callbacks that have expired.
+        Self::retain_live_callbacks_for_item(&mut pending, now, item);
+
+        // Determine the sent requests that are still pending.
+        let mut num_sent_requests = 0usize;
+        let mut sent_peers = HashSet::new();
+        for (sent_peer_ip, callbacks) in pending.get(&item).into_iter().flatten() {
+            let num_sent = callbacks.iter().filter(|(_, _, request_sent)| *request_sent).count();
+            if num_sent > 0 {
+                num_sent_requests = num_sent_requests.saturating_add(num_sent);
+                sent_peers.insert(*sent_peer_ip);
+            }
+        }
+
+        // Decide, and insert the callback with the decision.
+        let request_sent = should_send_request(num_sent_requests, &sent_peers)?;
+        pending.entry(item).or_default().entry(peer_ip).or_default().push((callback, now, request_sent));
+
+        Ok(request_sent)
+    }
+
     /// Removes the specified `item` from the pending queue.
     /// If the `item` exists and is removed, the peer IPs are returned.
     /// If the `item` does not exist, `None` is returned.
@@ -206,11 +255,15 @@ impl<T: Copy + Clone + PartialEq + Eq + Hash, V: Clone> Pending<T, V> {
 
     /// Removes the callbacks for the specified `item` that have expired.
     pub fn clear_expired_callbacks_for_item(&self, now: i64, item: impl Into<T>) {
-        let item = item.into();
+        Self::retain_live_callbacks_for_item(&mut self.pending.write(), now, item.into());
+    }
 
-        // Acquire the pending lock.
-        let mut pending = self.pending.write();
-
+    /// Removes the callbacks for the specified `item` that have expired from the `pending` map.
+    fn retain_live_callbacks_for_item(
+        pending: &mut HashMap<T, HashMap<SocketAddr, Vec<(oneshot::Sender<V>, i64, bool)>>>,
+        now: i64,
+        item: T,
+    ) {
         // Clear the callbacks that have expired.
         if let Some(peer_map) = pending.get_mut(&item) {
             // Iterate over each peer IP for the item and filter out expired callbacks.
@@ -248,31 +301,33 @@ impl<T: Copy + Clone + PartialEq + Eq + Hash, V: Clone> Pending<T, V> {
             !peer_map.is_empty()
         });
     }
+}
 
-    /// Ensures that the combined stake of the peers that have received the request is
-    /// greater than the redundancy threshold (33%).
-    pub fn request_stake_redundancy_reached<N: Network>(&self, gateway: &Gateway<N>, desired_item: T) -> Result<bool> {
-        let committee = match gateway.ledger().current_committee() {
-            Ok(c) => c,
-            Err(err) => {
-                bail!("Failed to get current committee: {err}");
-            }
-        };
-
-        let total_stake = committee.total_stake();
-        let pending_providers = self.get_sent_peers(desired_item);
-        let mut stake_of_providers = 0;
-        for addr in pending_providers.iter().flatten() {
-            let Some(aleo_addr) = gateway.resolve_to_aleo_addr(*addr) else { continue };
-            let individual_stake = committee.get_stake(aleo_addr);
-            stake_of_providers += individual_stake;
-            if stake_of_providers as f64 / total_stake as f64 > 0.33 {
-                return Ok(true);
-            }
+/// Returns `true` if the combined stake of `sent_peers`, the peers that have received the request,
+/// is greater than the redundancy threshold (33%).
+pub fn request_stake_redundancy_reached<N: Network>(
+    gateway: &Gateway<N>,
+    sent_peers: &HashSet<SocketAddr>,
+) -> Result<bool> {
+    let committee = match gateway.ledger().current_committee() {
+        Ok(c) => c,
+        Err(err) => {
+            bail!("Failed to get current committee: {err}");
         }
+    };
 
-        Ok(false)
+    let total_stake = committee.total_stake();
+    let mut stake_of_providers = 0;
+    for addr in sent_peers {
+        let Some(aleo_addr) = gateway.resolve_to_aleo_addr(*addr) else { continue };
+        let individual_stake = committee.get_stake(aleo_addr);
+        stake_of_providers += individual_stake;
+        if stake_of_providers as f64 / total_stake as f64 > 0.33 {
+            return Ok(true);
+        }
     }
+
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -286,6 +341,45 @@ mod tests {
     type CurrentNetwork = snarkvm::prelude::MainnetV0;
 
     const ITERATIONS: usize = 100;
+
+    #[test]
+    fn test_insert_request() {
+        let rng = &mut TestRng::default();
+        let pending = Pending::<TransmissionID<CurrentNetwork>, ()>::new();
+        let solution_id = TransmissionID::Solution(
+            rng.random::<u64>().into(),
+            rng.random::<<CurrentNetwork as Network>::TransmissionChecksum>(),
+        );
+        let addr_1 = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let addr_2 = SocketAddr::from(([127, 0, 0, 1], 2345));
+        // Sends a request to the peer, unless one was sent to it already.
+        let insert_request = |peer_ip, expected_num_sent_requests, expected_sent_peers: &[SocketAddr]| {
+            pending
+                .insert_request(solution_id, peer_ip, oneshot::channel().0, |num_sent_requests, sent_peers| {
+                    assert_eq!(num_sent_requests, expected_num_sent_requests);
+                    assert_eq!(sent_peers, &expected_sent_peers.iter().copied().collect::<HashSet<_>>());
+                    Ok(!sent_peers.contains(&peer_ip))
+                })
+                .unwrap()
+        };
+
+        // The first request to each peer is sent, and a second one is not.
+        assert!(insert_request(addr_1, 0, &[]));
+        assert!(!insert_request(addr_1, 1, &[addr_1]));
+        assert!(insert_request(addr_2, 1, &[addr_1]));
+        assert!(!insert_request(addr_2, 2, &[addr_1, addr_2]));
+        assert_eq!(pending.num_callbacks(solution_id), 4);
+        assert_eq!(pending.num_sent_requests(solution_id), 2);
+        assert_eq!(pending.get_sent_peers(solution_id), Some([addr_1, addr_2].into()));
+
+        // A decision that fails inserts no callback.
+        assert!(pending.insert_request(solution_id, addr_1, oneshot::channel().0, |_, _| bail!("error")).is_err());
+        assert_eq!(pending.num_callbacks(solution_id), 4);
+
+        // A response removes the requests, so the next request is sent.
+        assert!(pending.remove(solution_id, Some(())).is_some());
+        assert!(insert_request(addr_1, 0, &[]));
+    }
 
     #[test]
     fn test_pending() {
