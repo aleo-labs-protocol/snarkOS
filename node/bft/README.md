@@ -28,26 +28,26 @@ start of each round. This follows the [Bullshark](https://arxiv.org/abs/2209.056
 #### Batch Proposal
 
 Batch proposals are driven by a dedicated **`ProposalTask`** that runs in a loop and is the only place that calls `Primary::propose_batch()`.
-This keeps proposal on a single execution path and avoids concurrent proposal attempts. Each loop iteration covers one full round and proceeds through three stages:
+This keeps proposal on a single execution path and avoids concurrent proposal attempts. Each loop iteration covers the round of one batch and proceeds through three stages:
 
 **Stage 1 — Wait until ready to propose**
 
 The task blocks until all of the following conditions are satisfied:
 1. The node is synced. If it is currently syncing, the task waits via `wait_for_synced_if_syncing()` before continuing.
-2. `MIN_BATCH_DELAY` has elapsed since the start of the round, enforcing a minimum inter-proposal interval.
+2. `MIN_BATCH_DELAY` has elapsed since the last proposal, enforcing a minimum inter-proposal interval.
 3. One of two events fires:
-   - **Ready signal** — `ProposalTask::signal()` is called from `try_increment_to_the_next_round()` when the primary successfully advances to a new round (e.g. after a leader certificate is committed). This is delivered via a `watch` channel.
+   - **Ready signal** — `ProposalTask::signal(round)` is called from `try_increment_to_the_next_round()` when the primary successfully advances to the new round `round` (e.g. after a leader certificate is committed). This is delivered via a `watch` channel that holds the highest signalled round. The task is ready when that round is above the round of its last proposal, so it keeps a signal that arrives while it proposes.
    - **`MAX_BATCH_DELAY` timeout** — If no signal arrives within `MAX_BATCH_DELAY` of the round start, the task proceeds anyway. This handles the case where the elected leader's certificate never arrives.
 
 A short `CREATE_BATCH_INTERVAL` heartbeat keeps the round-change check alive while waiting.
 
 **Stage 2 — Propose**
 
-The task calls `propose_batch()` in a loop until it returns `Ok(true)` (batch submitted). On `Ok(false)` or a transient error it retries every `CREATE_BATCH_INTERVAL`. If the round advances during retries, the task restarts from Stage 1.
+The task calls `propose_batch()` in a loop until it returns `Ok(Some(round))` (batch submitted for `round`). On `Ok(None)` or a transient error it retries, first after `CREATE_BATCH_INTERVAL` and then with a backoff of at most `MAX_BATCH_DELAY`. If the round advances during retries, the task restarts from Stage 1.
 
 **Stage 3 — Wait for signatures**
 
-Once the batch is broadcast, the task periodically calls `propose_batch()` every `MAX_BATCH_DELAY` to rebroadcast to any validators that have not yet signed. It exits this stage as soon as the round advances (detected either via the ready signal or by polling `current_round()`).
+Once the batch is broadcast, the task periodically calls `propose_batch()` every `MAX_BATCH_DELAY` to rebroadcast to any validators that have not yet signed. It exits this stage as soon as the round advances (detected either via the ready signal or by polling `current_round()`). If the round advances just before a rebroadcast, that call proposes the batch of the new round, and the task stays in this stage for that round.
 
 ### Ledger Advancement
 

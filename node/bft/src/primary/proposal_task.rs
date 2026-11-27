@@ -512,7 +512,7 @@ mod tests {
     /// When `propose_batch` returns `Ok(None)`, the task retries within the same round until
     /// it succeeds.
     #[cfg_attr(not(shuttle), tokio::test)]
-    async fn test_proposal_task_retries_on_false() {
+    async fn test_proposal_task_retries_on_none() {
         const RETRIES: u32 = 2;
 
         // Default starts ready, so no signal needed.
@@ -665,8 +665,8 @@ mod tests {
         }
 
         #[test]
-        fn test_proposal_task_retries_on_false() {
-            check_async(ITERATIONS, super::test_proposal_task_retries_on_false);
+        fn test_proposal_task_retries_on_none() {
+            check_async(ITERATIONS, super::test_proposal_task_retries_on_none);
         }
 
         #[test]
