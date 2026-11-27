@@ -311,6 +311,15 @@ impl<N: Network> Peer<N> {
         }
     }
 
+    /// Marks the peer as trusted.
+    pub fn set_trusted(&mut self) {
+        match self {
+            Self::Candidate(peer) => peer.trusted = true,
+            Self::Connecting(peer) => peer.trusted = true,
+            Self::Connected(peer) => peer.trusted = true,
+        }
+    }
+
     /// Updates the peer's `last_seen` timestamp.
     pub fn update_last_seen(&mut self) {
         if let Self::Connected(ConnectedPeer { last_seen, .. }) = self {

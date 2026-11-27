@@ -53,7 +53,7 @@ use snarkvm::{
     utilities::to_bytes_le,
 };
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use base64::prelude::{BASE64_STANDARD, Engine};
 use clap::{Parser, builder::RangedU64ValueParser};
 use colored::Colorize;
@@ -69,11 +69,13 @@ use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs},
     path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
+    time::Duration,
 };
 use tokio::{
     runtime::{self, Handle, Runtime},
     sync::mpsc,
     task,
+    time::sleep,
 };
 use tracing::{debug, info, warn};
 use ureq::http;
@@ -82,6 +84,9 @@ use ureq::http;
 /// Validators should be able to handle at least 1000 concurrent connections, each requiring 2 sockets.
 #[cfg(target_family = "unix")]
 const RECOMMENDED_MIN_NOFILES_LIMIT: u64 = 2048;
+
+/// The time between attempts to resolve a trusted hostname that did not resolve.
+const TRUSTED_HOSTNAME_RETRY_INTERVAL: Duration = Duration::from_secs(120);
 
 /// Default (and maximum) concurrent REST deploy verifications.
 const DEFAULT_NUM_VERIFYING_DEPLOYS: usize =
@@ -461,15 +466,29 @@ impl Start {
 }
 
 impl Start {
-    /// Returns the initial peer(s) to connect to, from the given configurations.
-    fn parse_trusted_addrs(&self, list: &Option<String>) -> Result<Vec<SocketAddr>> {
-        let Some(list) = list else { return Ok(vec![]) };
+    /// Returns the initial peer(s) to connect to, from the given configurations,
+    /// and the entries that did not resolve, which `spawn_trusted_hostname_resolver` retries.
+    fn parse_trusted_addrs(&self, list: &Option<String>) -> Result<(Vec<SocketAddr>, Vec<String>)> {
+        // Split on an empty string returns an empty string.
+        let Some(list) = list.as_deref().filter(|list| !list.is_empty()) else { return Ok(Default::default()) };
 
-        match list.is_empty() {
-            // Split on an empty string returns an empty string.
-            true => Ok(vec![]),
-            false => list.split(',').map(resolve_potential_hostnames).collect(),
+        let mut addrs = Vec::new();
+        let mut unresolved = Vec::new();
+        for entry in list.split(',') {
+            let entry = check_trusted_addr_format(entry)?;
+            match resolve_trusted_addr(entry) {
+                Some(addr) => addrs.push(addr),
+                // An IP address needs no DNS, so its lookup would fail on every retry.
+                None if has_ip_host(entry) => {
+                    bail!("The supplied trusted IP ('{entry}') is malformed: it is not a valid IP address")
+                }
+                None => unresolved.push(entry.to_string()),
+            }
         }
+        if !unresolved.is_empty() {
+            warn!("Starting without {} trusted hostname(s) that did not resolve.", unresolved.len());
+        }
+        Ok((addrs, unresolved))
     }
 
     /// Returns the base URL of the historical staking API to serve the `history` routes from, if
@@ -623,8 +642,8 @@ impl Start {
         // A dev client or prover is allowed to have an index lower than
         // `dev_num_validators` in order to have a balance at startup.
 
-        // Add the dev nodes to the trusted validators.
-        if trusted_validators.is_empty() && is_validator {
+        // Add the dev nodes to the trusted validators, unless `--validators` lists any.
+        if trusted_validators.is_empty() && self.validators.as_deref().is_none_or(str::is_empty) && is_validator {
             // Validators add all other validators as trusted.
             for idx in 0..num_validators {
                 if idx == dev {
@@ -636,8 +655,8 @@ impl Start {
             debug!("Trusted validators set to: {trusted_validators:?}");
         }
 
-        // Determine if we need to populate `trusted_peers`.
-        if trusted_peers.is_empty() {
+        // Determine if we need to populate `trusted_peers`, which `--peers` entries prevent.
+        if trusted_peers.is_empty() && self.peers.as_deref().is_none_or(str::is_empty) {
             if is_validator {
                 if let Some(num_clients) = self.dev_num_clients {
                     // Ensure the clients that added this validator as a trusted peer are able to connect to it.
@@ -849,24 +868,13 @@ impl Start {
         let authority_retention = self.parse_authority_retention::<N>()?;
 
         // Parse the trusted peers to connect to.
-        let mut trusted_peers = self.parse_trusted_addrs(&self.peers)?;
+        let (mut trusted_peers, unresolved_peers) = self.parse_trusted_addrs(&self.peers)?;
         // Parse the trusted validators to connect to.
-        let mut trusted_validators = self.parse_trusted_addrs(&self.validators)?;
+        let (mut trusted_validators, unresolved_validators) = self.parse_trusted_addrs(&self.validators)?;
 
         // Ensure there are no bootstrappers among the trusted peers and validators.
-        let bootstrap_peers = bootstrap_peers::<N>(self.dev.is_some());
-        for trusted in [&mut trusted_peers, &mut trusted_validators] {
-            let initial_peer_count = trusted.len();
-            trusted.retain(|addr| !bootstrap_peers.contains(addr));
-            let final_peer_count = trusted.len();
-            // Warn if this had to be corrected.
-            if final_peer_count != initial_peer_count {
-                warn!(
-                    "Removed some ({}) trusted peers due to them also being bootstrap peers.",
-                    initial_peer_count - final_peer_count
-                );
-            }
-        }
+        remove_bootstrap_peers::<N>(&mut trusted_peers, self.dev.is_some());
+        remove_bootstrap_peers::<N>(&mut trusted_validators, self.dev.is_some());
 
         // Parse the development configurations.
         self.parse_development(&mut trusted_peers, &mut trusted_validators)?;
@@ -1048,6 +1056,18 @@ impl Start {
             NodeType::Client => Node::new_client(node_ip, rest_ip, self.rest_rps, rest_verification_limits, history_api_url.clone(), self.history_json, authority_retention, account, &trusted_peers, genesis, cdn, storage_mode, node_data_dir, self.trusted_peers_only, self.auto_db_checkpoints.clone(), self.dev, signal_handler.clone()).await,
             NodeType::BootstrapClient => Node::new_bootstrap_client(node_ip, account, *genesis.header(), genesis.hash(), self.dev).await,
         }?;
+
+        spawn_trusted_hostname_resolver(&node, unresolved_peers, "peer", Node::add_trusted_peer, self.dev.is_some());
+        // Only a validator connects to the trusted validators.
+        if node_type.is_validator() {
+            spawn_trusted_hostname_resolver(
+                &node,
+                unresolved_validators,
+                "validator",
+                Node::add_trusted_validator,
+                self.dev.is_some(),
+            );
+        }
 
         if !self.nodisplay {
             Display::start(node.clone(), log_receiver, signal_handler.clone()).with_context(|| "Failed to start the display")?;
@@ -1308,29 +1328,103 @@ fn load_or_compute_genesis<N: Network>(
     Ok(block)
 }
 
-// Resolve socket addresses (not URLs) in a host:port format compliant with C::getaddrinfo.
-fn resolve_potential_hostnames(ip_or_hostname: &str) -> Result<SocketAddr> {
+/// Returns the trimmed trusted address if it is a socket address (not a URL) in a host:port format
+/// compliant with C::getaddrinfo.
+fn check_trusted_addr_format(ip_or_hostname: &str) -> Result<&str> {
     let trimmed = ip_or_hostname.trim();
-    // Perform some basic validity checks.
-    if !trimmed.contains(':') {
-        bail!(
-            "The supplied trusted hostname or IP ('{trimmed}') is malformed: missing colon separating the host from the port"
-        );
-    }
     if trimmed.contains("://") {
         bail!("The supplied trusted hostname or IP ('{trimmed}') is malformed: URLs are not supported");
     }
-    match trimmed.to_socket_addrs() {
-        Ok(mut ip_iter) => {
-            // A hostname might resolve to multiple IP addresses. We will use only the first one,
-            // assuming this aligns with the user's expectations.
-            let Some(ip) = ip_iter.next() else {
-                bail!("The supplied trusted hostname ('{trimmed}') does not reference any ip.");
-            };
-            Ok(ip)
-        }
-        Err(e) => Err(anyhow!("The supplied trusted hostname or IP ('{trimmed}') is malformed: {e}")),
+    let Some((_, port)) = trimmed.rsplit_once(':') else {
+        bail!(
+            "The supplied trusted hostname or IP ('{trimmed}') is malformed: missing colon separating the host from the port"
+        );
+    };
+    // An invalid port must fail here, as `resolve_trusted_addr` retries every `to_socket_addrs` failure.
+    if port.parse::<u16>().is_err() {
+        bail!("The supplied trusted hostname or IP ('{trimmed}') is malformed: '{port}' is not a valid port");
     }
+    Ok(trimmed)
+}
+
+/// Returns `true` if the host of the given trusted address is written as an IP address.
+fn has_ip_host(ip_or_hostname: &str) -> bool {
+    let host = ip_or_hostname.rsplit_once(':').map_or(ip_or_hostname, |(host, _)| host);
+    host.starts_with('[') || host.contains(':') || host.bytes().all(|byte| byte.is_ascii_digit() || byte == b'.')
+}
+
+/// Returns the first address that the given trusted address resolves to.
+/// Logs a warning and returns `None` if it does not resolve.
+fn resolve_trusted_addr(ip_or_hostname: &str) -> Option<SocketAddr> {
+    match ip_or_hostname.to_socket_addrs() {
+        // A hostname might resolve to multiple IP addresses. We will use only the first one,
+        // assuming this aligns with the user's expectations.
+        Ok(mut addrs) => {
+            let addr = addrs.next();
+            if addr.is_none() {
+                warn!("The trusted hostname '{ip_or_hostname}' does not reference any IP");
+            }
+            addr
+        }
+        Err(error) => {
+            warn!("Could not resolve the trusted hostname '{ip_or_hostname}': {error}");
+            None
+        }
+    }
+}
+
+/// Removes the bootstrap peers from the given trusted addresses.
+fn remove_bootstrap_peers<N: Network>(trusted: &mut Vec<SocketAddr>, is_dev: bool) {
+    let bootstrap_peers = bootstrap_peers::<N>(is_dev);
+    let initial_peer_count = trusted.len();
+    trusted.retain(|addr| !bootstrap_peers.contains(addr));
+    let num_removed = initial_peer_count - trusted.len();
+    if num_removed != 0 {
+        warn!("Removed some ({num_removed}) trusted peers due to them also being bootstrap peers.");
+    }
+}
+
+/// Retries the given trusted hostnames, which did not resolve at startup, until each one resolves.
+/// Passes each resolved address to `add_trusted`. `kind` names the hostnames in the logs.
+fn spawn_trusted_hostname_resolver<N: Network>(
+    node: &Node<N>,
+    mut unresolved: Vec<String>,
+    kind: &'static str,
+    add_trusted: fn(&Node<N>, SocketAddr),
+    is_dev: bool,
+) {
+    if unresolved.is_empty() {
+        return;
+    }
+    warn!(
+        "Retrying {} trusted {kind} hostname(s) every {} seconds until they resolve.",
+        unresolved.len(),
+        TRUSTED_HOSTNAME_RETRY_INTERVAL.as_secs()
+    );
+    let task_node = node.clone();
+    node.spawn(async move {
+        while !unresolved.is_empty() {
+            sleep(TRUSTED_HOSTNAME_RETRY_INTERVAL).await;
+            let mut resolved = Vec::new();
+            let mut still_unresolved = Vec::new();
+            for hostname in unresolved {
+                let lookup = hostname.clone();
+                // The panic hook reports a panicking lookup, and the hostname is retried.
+                match task::spawn_blocking(move || resolve_trusted_addr(&lookup)).await {
+                    Ok(Some(addr)) => {
+                        info!("Resolved the trusted {kind} '{hostname}' to '{addr}'");
+                        resolved.push(addr);
+                    }
+                    _ => still_unresolved.push(hostname),
+                }
+            }
+            remove_bootstrap_peers::<N>(&mut resolved, is_dev);
+            for addr in resolved {
+                add_trusted(&task_node, addr);
+            }
+            unresolved = still_unresolved;
+        }
+    });
 }
 
 #[cfg(test)]
@@ -1347,17 +1441,17 @@ mod tests {
     fn test_parse_trusted_addrs() {
         let config = Start::try_parse_from(["snarkos", "--peers", ""].iter()).unwrap();
         assert!(config.parse_trusted_addrs(&config.peers).is_ok());
-        assert!(config.parse_trusted_addrs(&config.peers).unwrap().is_empty());
+        assert!(config.parse_trusted_addrs(&config.peers).unwrap().0.is_empty());
 
         let config = Start::try_parse_from(["snarkos", "--peers", "1.2.3.4:5"].iter()).unwrap();
         assert!(config.parse_trusted_addrs(&config.peers).is_ok());
-        assert_eq!(config.parse_trusted_addrs(&config.peers).unwrap(), vec![
+        assert_eq!(config.parse_trusted_addrs(&config.peers).unwrap().0, vec![
             SocketAddr::from_str("1.2.3.4:5").unwrap()
         ]);
 
         let config = Start::try_parse_from(["snarkos", "--peers", "1.2.3.4:5,6.7.8.9:0"].iter()).unwrap();
         assert!(config.parse_trusted_addrs(&config.peers).is_ok());
-        assert_eq!(config.parse_trusted_addrs(&config.peers).unwrap(), vec![
+        assert_eq!(config.parse_trusted_addrs(&config.peers).unwrap().0, vec![
             SocketAddr::from_str("1.2.3.4:5").unwrap(),
             SocketAddr::from_str("6.7.8.9:0").unwrap()
         ]);
@@ -1367,17 +1461,17 @@ mod tests {
     fn test_parse_trusted_validators() {
         let config = Start::try_parse_from(["snarkos", "--validators", ""].iter()).unwrap();
         assert!(config.parse_trusted_addrs(&config.validators).is_ok());
-        assert!(config.parse_trusted_addrs(&config.validators).unwrap().is_empty());
+        assert!(config.parse_trusted_addrs(&config.validators).unwrap().0.is_empty());
 
         let config = Start::try_parse_from(["snarkos", "--validators", "1.2.3.4:5"].iter()).unwrap();
         assert!(config.parse_trusted_addrs(&config.validators).is_ok());
-        assert_eq!(config.parse_trusted_addrs(&config.validators).unwrap(), vec![
+        assert_eq!(config.parse_trusted_addrs(&config.validators).unwrap().0, vec![
             SocketAddr::from_str("1.2.3.4:5").unwrap()
         ]);
 
         let config = Start::try_parse_from(["snarkos", "--validators", "1.2.3.4:5,6.7.8.9:0"].iter()).unwrap();
         assert!(config.parse_trusted_addrs(&config.validators).is_ok());
-        assert_eq!(config.parse_trusted_addrs(&config.validators).unwrap(), vec![
+        assert_eq!(config.parse_trusted_addrs(&config.validators).unwrap().0, vec![
             SocketAddr::from_str("1.2.3.4:5").unwrap(),
             SocketAddr::from_str("6.7.8.9:0").unwrap()
         ]);
@@ -1643,6 +1737,29 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_development_keeps_unresolved_trusted_addrs() {
+        let mut config = Start::try_parse_from(
+            [
+                "snarkos",
+                "--validator",
+                "--dev",
+                "1",
+                "--peers",
+                "unresolvable.invalid:4130",
+                "--validators",
+                "unresolvable.invalid:5000",
+            ]
+            .iter(),
+        )
+        .unwrap();
+        let (mut trusted_peers, _) = config.parse_trusted_addrs(&config.peers).unwrap();
+        let (mut trusted_validators, _) = config.parse_trusted_addrs(&config.validators).unwrap();
+        config.parse_development(&mut trusted_peers, &mut trusted_validators).unwrap();
+        assert!(trusted_peers.is_empty());
+        assert!(trusted_validators.is_empty());
+    }
+
+    #[test]
     fn history_compat_mode_flag() {
         type N = snarkvm::prelude::MainnetV0;
 
@@ -1775,7 +1892,7 @@ mod tests {
         if let Command::Start(start) = cli.command {
             let peers = start.parse_trusted_addrs(&start.peers);
             assert!(peers.is_ok());
-            assert_eq!(peers.unwrap().len(), 2, "Expected two peers");
+            assert_eq!(peers.unwrap().0.len(), 2, "Expected two peers");
         } else {
             panic!("Unexpected result of clap parsing!");
         }
@@ -1789,7 +1906,7 @@ mod tests {
         if let Command::Start(start) = cli.command {
             let peers = start.parse_trusted_addrs(&start.peers);
             assert!(peers.is_ok());
-            assert_eq!(peers.unwrap().len(), 2, "Expected two peers");
+            assert_eq!(peers.unwrap().0.len(), 2, "Expected two peers");
         } else {
             panic!("Unexpected result of clap parsing!");
         }
@@ -1803,7 +1920,7 @@ mod tests {
         if let Command::Start(start) = cli.command {
             let peers = start.parse_trusted_addrs(&start.peers);
             assert!(peers.is_ok());
-            assert_eq!(peers.unwrap().len(), 2, "Expected two peers");
+            assert_eq!(peers.unwrap().0.len(), 2, "Expected two peers");
         } else {
             panic!("Unexpected result of clap parsing!");
         }
@@ -1818,6 +1935,31 @@ mod tests {
             assert!(start.parse_trusted_addrs(&start.peers).is_err());
         } else {
             panic!("Unexpected result of clap parsing!");
+        }
+    }
+
+    #[test]
+    fn parse_trusted_addrs_defers_unresolved_hostnames() {
+        // The `.invalid` top-level domain never resolves (RFC 6761).
+        let config =
+            Start::try_parse_from(["snarkos", "--peers", "127.0.0.1:3030, unresolvable.invalid:4130 "].iter()).unwrap();
+        let (addrs, unresolved) = config.parse_trusted_addrs(&config.peers).unwrap();
+        assert_eq!(addrs, vec![SocketAddr::from_str("127.0.0.1:3030").unwrap()]);
+        assert_eq!(unresolved, vec!["unresolvable.invalid:4130".to_string()]);
+    }
+
+    #[test]
+    fn parse_trusted_addrs_rejects_malformed_entries() {
+        for entry in [
+            "127.0.0.1",
+            "127.0.0.1:99999",
+            "unresolvable.invalid:port",
+            "http://127.0.0.1:3030",
+            "10.0.0.256:5000",
+            "[::1:4130",
+        ] {
+            let config = Start::try_parse_from(["snarkos", "--peers", entry].iter()).unwrap();
+            assert!(config.parse_trusted_addrs(&config.peers).is_err(), "Expected '{entry}' to be rejected");
         }
     }
 

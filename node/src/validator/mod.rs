@@ -248,6 +248,11 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         self.consensus.start_consensus_handlers().await
     }
 
+    /// Marks the given listener address as a trusted validator of the BFT gateway.
+    pub fn add_trusted_validator(&self, listener_addr: SocketAddr) {
+        self.consensus.bft().primary().gateway().add_trusted_peer(listener_addr);
+    }
+
     /// Returns the upgrade monitor.
     fn upgrade_monitor(&self) -> &UpgradeMonitor<N> {
         self.consensus.bft().primary().gateway().upgrade_monitor()
