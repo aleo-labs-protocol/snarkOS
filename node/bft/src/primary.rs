@@ -466,6 +466,18 @@ impl<N: Network> proposal_task::BatchPropose for Primary<N> {
         Primary::current_round(self)
     }
 
+    async fn propose_batch(&self) -> Result<Option<u64>> {
+        if !Primary::propose_batch(self).await? {
+            return Ok(None);
+        }
+        // `Primary::propose_batch` records the round of each batch. Hazard: this reads the round
+        // after that call released its lock, so it is the round of this batch only as long as
+        // nothing else calls `Primary::propose_batch` at the same time.
+        Ok(self.latest_proposal_timestamp.read().await.map(|(round, _)| round))
+    }
+}
+
+impl<N: Network> Primary<N> {
     /// Proposes the batch for the current round.
     ///
     /// This method performs the following steps:
@@ -1799,7 +1811,7 @@ impl<N: Network> Primary<N> {
             // Notify the proposal task if the new round is ready.
             if is_ready {
                 debug!("Primary is ready to propose the next round");
-                self.proposal_task.signal();
+                self.proposal_task.signal(self.current_round());
             } else {
                 debug!("Primary is not ready to propose the next round");
             }
@@ -2273,7 +2285,7 @@ impl<N: Network> Primary<N> {
 
 #[cfg(test)]
 mod tests {
-    use super::{proposal_task::BatchPropose as _, *};
+    use super::*;
     use crate::test_helpers::sample_transaction;
 
     use snarkos_node_bft_ledger_service::MockLedgerService;
@@ -4443,7 +4455,6 @@ mod tests {
         /// its batch of round 1. The primary is in round 2 from then on, so it proposes its batch
         /// of round 2 as soon as `MIN_BATCH_DELAY` has elapsed since its last proposal.
         #[test]
-        #[ignore = "fails: the proposal task clears its ready flag after it proposes, and loses the signal of a round that started in the meantime"]
         fn round_ends_as_the_primary_proposes() {
             static NUM_PROPOSED_FIRST: AtomicUsize = AtomicUsize::new(0);
             static NUM_CERTIFICATES_FIRST: AtomicUsize = AtomicUsize::new(0);
