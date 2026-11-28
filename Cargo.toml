@@ -45,7 +45,7 @@ members = [
 [workspace.dependencies.snarkvm]
 #path = "../snarkVM"
 git = "https://github.com/aleo-labs-protocol/snarkVM.git"
-rev = "a8953a918c427ff9145001dc0928ea086e8f647e" #staging
+rev = "6c4cfcf2a23333b0d6ab7ac4543809895936a7f9" # aleo-labs-protocol/snarkVM#3717
 #version = "=4.12.0"
 default-features = false
 

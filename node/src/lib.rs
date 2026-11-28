@@ -127,6 +127,24 @@ async fn finish_cdn_sync<N: Network, C: ConsensusStorage<N>>(
     Ok(cdn_fallback)
 }
 
+/// Stops the ledger's authority compaction on a blocking thread, waiting for its running slice.
+pub(crate) async fn stop_authority_compaction<N: Network, C: ConsensusStorage<N>>(ledger: &Ledger<N, C>) {
+    let ledger = ledger.clone();
+    if let Err(error) = tokio::task::spawn_blocking(move || ledger.vm().block_store().stop_background_work()).await {
+        error!("Failed to stop the authority map compaction: {error}");
+    }
+}
+
+/// Stops the ledger's authority compaction when dropped, on the dropping thread. A validator holds
+/// one for the exits that skip `shut_down`, on which its ledger may never be dropped.
+pub(crate) struct StopAuthorityCompactionOnDrop<N: Network, C: ConsensusStorage<N>>(pub(crate) Ledger<N, C>);
+
+impl<N: Network, C: ConsensusStorage<N>> Drop for StopAuthorityCompactionOnDrop<N, C> {
+    fn drop(&mut self) {
+        self.0.vm().block_store().stop_background_work();
+    }
+}
+
 /// Shuts the node down if its block sync stays stuck (see [`shut_down_if_stuck_sync`]).
 async fn monitor_stuck_sync<N: Network>(
     sync: Arc<BlockSync<N>>,
